@@ -723,6 +723,7 @@ Notes:
 - [Safety System](docs/SAFETY_SYSTEM.md)
 - [Sponsored Discovery Sponsor Onboarding](docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md)
 - [Windows Notes](docs/WINDOWS.md)
+- [NixOS Development and Self-Dev](docs/NIXOS.md)
 - [Wrappers and Shell Integration](docs/WRAPPERS.md)
 - [Refactoring Notes](docs/REFACTORING.md)
 
@@ -839,6 +840,18 @@ cd jcode
 cargo build --release
 ```
 
+On NixOS, enter the pinned high-performance development shell first. It keeps
+Cargo downloads in `~/.cargo` and incremental artifacts in the local `target/`
+directory, so repeated shell entry and selfdev builds reuse the same caches:
+
+```bash
+scripts/nix_dev_shell.sh selfdev
+scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode
+```
+
+See [NixOS development and self-dev](docs/NIXOS.md) for the cached flake entry,
+direnv, persistent profiles, Cargo caches, and daemon handoff details.
+
 For local self-dev / refactor work on Linux x86_64, prefer:
 
 ```bash
@@ -846,10 +859,10 @@ scripts/dev_cargo.sh build --release -p jcode --bin jcode
 scripts/dev_cargo.sh --print-setup
 ```
 
-That wrapper automatically uses `sccache` when available, prefers a fast
-working local linker setup (`clang + lld`) instead of assuming every machine's
-`mold` configuration is valid, and can print the active linker/cache setup via
-`--print-setup` so slow-path builds are easier to diagnose.
+That wrapper manages `sccache` when it is useful, prefers a fast local linker
+setup (`mold`, then `lld`, then the system linker), and can print the active
+linker/cache setup via `--print-setup` so slow-path builds are easier to
+diagnose.
 
 Then symlink to your PATH:
 

@@ -4,6 +4,193 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# A long-lived jcode daemon may have been started outside `nix develop`, so its
+# selfdev subprocess does not necessarily have Cargo or this repository's native
+# libraries on PATH. On NixOS, transparently re-enter a pinned dev environment.
+#
+# The environment is recorded in a persistent Nix profile keyed only by the
+# flake files. Profile refreshes evaluate a tiny immutable copy of those files,
+# not the dirty checkout. Warm builds enter the profile directly, and the exact
+# active shell remains a GC root for Nix-store libraries in published selfdev
+# binaries. Cargo itself still writes downloads to ~/.cargo and incremental
+# artifacts to target/.
+is_nixos_host() {
+  [[ -r /etc/os-release ]] && grep -q '^ID=nixos$' /etc/os-release
+}
+
+nix_shell_for_args() {
+  if [[ -n "${JCODE_NIX_DEVELOP_SHELL:-}" ]]; then
+    printf '%s\n' "$JCODE_NIX_DEVELOP_SHELL"
+    return
+  fi
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      *jcode-desktop2*|--workspace|--all)
+        printf 'desktop\n'
+        return
+        ;;
+    esac
+  done
+  printf 'selfdev\n'
+}
+
+nix_profile_root() {
+  if [[ -n "${JCODE_NIX_PROFILE_DIR:-}" ]]; then
+    printf '%s\n' "$JCODE_NIX_PROFILE_DIR"
+  elif [[ -n "${JCODE_HOME:-}" ]]; then
+    printf '%s/nix-profiles\n' "$JCODE_HOME"
+  elif [[ -n "${HOME:-}" ]]; then
+    printf '%s/.jcode/nix-profiles\n' "$HOME"
+  else
+    printf '%s/target/jcode-nix-profiles\n' "$repo_root"
+  fi
+}
+
+nix_profile_fingerprint() {
+  local shell_name="$1"
+  {
+    printf 'shell=%s\nsystem=%s-%s\n' "$shell_name" "$(uname -s)" "$(uname -m)"
+    cksum "$repo_root/flake.nix"
+    if [[ -f "$repo_root/flake.lock" ]]; then
+      cksum "$repo_root/flake.lock"
+    else
+      printf 'flake.lock=missing\n'
+    fi
+  } | cksum | awk '{print $1 "-" $2}'
+}
+
+nix_profile_path="${JCODE_NIX_PROFILE_PATH:-}"
+nix_profile_status="${JCODE_NIX_PROFILE_STATUS:-inactive}"
+
+ensure_nix_profile() {
+  local shell_name="$1"
+  local root shell_key platform fingerprint fingerprint_file cached_fingerprint="" flake_source
+  local profile_lock_file profile_lock_fd
+  root="$(nix_profile_root)"
+  shell_key="${shell_name//[^A-Za-z0-9_.-]/_}"
+  platform="$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')"
+  nix_profile_path="$root/${shell_key}-${platform}"
+  fingerprint_file="$nix_profile_path.fingerprint"
+  fingerprint="$(nix_profile_fingerprint "$shell_name")"
+
+  mkdir -p "$root"
+  profile_lock_file="$root/.${shell_key}-${platform}.lock"
+  exec {profile_lock_fd}>"$profile_lock_file"
+  flock "$profile_lock_fd"
+
+  if [[ -f "$fingerprint_file" ]]; then
+    cached_fingerprint="$(cat "$fingerprint_file")"
+  fi
+  if [[ -e "$nix_profile_path" && "$cached_fingerprint" == "$fingerprint" ]]; then
+    nix_profile_status="cached"
+  else
+    flake_source="$("$repo_root/scripts/nix_flake_cache.sh")"
+    printf 'dev_cargo: refreshing persistent Nix profile %s from cached flake %s#%s\n' \
+      "$nix_profile_path" "$flake_source" "$shell_name" >&2
+    JCODE_NIX_QUIET=1 nix develop --profile "$nix_profile_path" \
+      "path:$flake_source#$shell_name" --command true
+    local fingerprint_tmp="$fingerprint_file.tmp.$$"
+    printf '%s\n' "$fingerprint" >"$fingerprint_tmp"
+    mv -f "$fingerprint_tmp" "$fingerprint_file"
+    nix_profile_status="refreshed"
+  fi
+
+  # Old generations intentionally remain GC roots by default because immutable
+  # jcode binaries can still contain their Nix-store RUNPATHs. Contributors who
+  # also prune old binaries can opt into a bounded history, e.g. 30 days.
+  local history_days="${JCODE_NIX_PROFILE_HISTORY_DAYS:-keep}"
+  case "$history_days" in
+    keep|never|0|"") ;;
+    *[!0-9]*)
+      printf 'error: JCODE_NIX_PROFILE_HISTORY_DAYS must be keep or a positive integer\n' >&2
+      exit 2
+      ;;
+    *)
+      if ! nix profile wipe-history --profile "$nix_profile_path" \
+        --older-than "${history_days}d" >/dev/null; then
+        printf 'dev_cargo: warning: failed to prune Nix profile history for %s\n' \
+          "$nix_profile_path" >&2
+      fi
+      ;;
+  esac
+
+  export JCODE_NIX_PROFILE_PATH="$nix_profile_path"
+  export JCODE_NIX_PROFILE_STATUS="$nix_profile_status"
+  flock -u "$profile_lock_fd"
+  exec {profile_lock_fd}>&-
+}
+
+active_nix_shell_supports() {
+  local requested="$1"
+  local active="${JCODE_NIX_DEVSHELL_NAME:-}"
+  [[ "$active" == "$requested" ]]
+}
+
+maybe_enter_nix_develop() {
+  local mode="${JCODE_NIX_AUTO_DEVELOP:-auto}"
+  local force="false"
+  local disabled="false"
+  case "$mode" in
+    auto|"") ;;
+    1|true|yes|on|force) force="true" ;;
+    0|false|no|off|never) disabled="true" ;;
+    *)
+      printf 'error: unsupported JCODE_NIX_AUTO_DEVELOP=%s (expected auto|on|off)\n' "$mode" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${JCODE_NIX_DEVELOP_REEXEC:-0}" == "1" ]]; then
+    if command -v cargo >/dev/null 2>&1; then
+      return 0
+    fi
+    printf 'error: nix develop completed but cargo is still unavailable on PATH\n' >&2
+    exit 127
+  fi
+
+  local shell_name
+  shell_name="$(nix_shell_for_args "$@")"
+
+  if command -v cargo >/dev/null 2>&1 \
+    && [[ "${JCODE_NIX_DEVSHELL_ACTIVE:-0}" == "1" ]] \
+    && active_nix_shell_supports "$shell_name"; then
+    command -v nix >/dev/null 2>&1 || {
+      printf 'error: active jcode Nix shell cannot create its runtime GC root because nix is unavailable\n' >&2
+      exit 127
+    }
+    # Root the exact selected shell that will compile.
+    ensure_nix_profile "${JCODE_NIX_DEVSHELL_NAME}"
+    return 0
+  fi
+
+  [[ "$disabled" == "true" ]] && return 0
+
+  # In auto mode, NixOS always uses the repository shell so native libraries
+  # (not just rustc/cargo) are present. On other hosts, unmanaged Cargo setups
+  # remain untouched, while an active jcode Nix shell still re-enters the exact
+  # requested profile.
+  if [[ "$force" != "true" ]] \
+    && command -v cargo >/dev/null 2>&1 \
+    && [[ "${JCODE_NIX_DEVSHELL_ACTIVE:-0}" != "1" ]] \
+    && ! is_nixos_host; then
+    return 0
+  fi
+
+  if [[ ! -f "$repo_root/flake.nix" ]] || ! command -v nix >/dev/null 2>&1; then
+    printf 'error: the jcode Nix dev shell is required here but cannot be entered\n' >&2
+    printf '%s\n' 'hint: install Nix with flakes enabled, run nix develop, or set up Rust on PATH' >&2
+    exit 127
+  fi
+
+  ensure_nix_profile "$shell_name"
+  printf 'dev_cargo: entering cached Nix profile %s\n' "$nix_profile_path" >&2
+  exec nix develop "$nix_profile_path" --command \
+    env JCODE_NIX_DEVELOP_REEXEC=1 "$repo_root/scripts/dev_cargo.sh" "$@"
+}
+
+maybe_enter_nix_develop "$@"
+
 # `selfdev test` installs a shell-level `cargo` shim so raw `cargo test/check`
 # commands receive this wrapper's memory, linker, feature, and toolchain policy.
 # Exporting this recursion guard makes the final `cargo` invocation below bypass
@@ -20,12 +207,20 @@ log() {
 
 selected_linker_mode="not-configured"
 selected_linker_desc=""
+selected_linker_driver=""
 sccache_status="disabled"
 selfdev_low_memory_status="disabled"
 feature_profile_status="default"
 build_jobs_status="cargo-default"
 git_meta_status="not-configured"
 build_tmpdir_status="system-default"
+if [[ "${JCODE_NIX_DEVELOP_REEXEC:-0}" == "1" ]]; then
+  nix_develop_status="auto-reexec"
+elif [[ "${JCODE_NIX_DEVSHELL_ACTIVE:-0}" == "1" ]]; then
+  nix_develop_status="active"
+else
+  nix_develop_status="inactive"
+fi
 
 path_is_memory_backed() {
   local path="$1"
@@ -73,13 +268,84 @@ configure_build_tmpdir() {
   fi
 }
 
+rust_host_triple() {
+  local host=""
+  if command -v rustc >/dev/null 2>&1; then
+    host="$(rustc -vV 2>/dev/null | awk '/^host: / {print $2; exit}')"
+  fi
+  if [[ -z "$host" ]]; then
+    case "$(uname -s)-$(uname -m)" in
+      Linux-x86_64) host="x86_64-unknown-linux-gnu" ;;
+      Linux-aarch64|Linux-arm64) host="aarch64-unknown-linux-gnu" ;;
+      Darwin-x86_64) host="x86_64-apple-darwin" ;;
+      Darwin-aarch64|Darwin-arm64) host="aarch64-apple-darwin" ;;
+    esac
+  fi
+  printf '%s\n' "$host"
+}
+
+cargo_target_env_prefix() {
+  local host
+  host="$(rust_host_triple)"
+  if [[ -z "$host" ]]; then
+    return 1
+  fi
+  printf 'CARGO_TARGET_%s' "$(printf '%s' "$host" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+}
+
+target_rustflags_var() {
+  local prefix
+  prefix="$(cargo_target_env_prefix)" || return 1
+  printf '%s_RUSTFLAGS\n' "$prefix"
+}
+
+target_linker_var() {
+  local prefix
+  prefix="$(cargo_target_env_prefix)" || return 1
+  printf '%s_LINKER\n' "$prefix"
+}
+
 append_rustflags() {
   local new_flag="$1"
-  if [[ -z "${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}" ]]; then
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$new_flag"
+  local var current
+  var="$(target_rustflags_var)" || {
+    var="RUSTFLAGS"
+  }
+  current="${!var-}"
+  if [[ -z "$current" ]]; then
+    printf -v "$var" '%s' "$new_flag"
   else
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS} ${new_flag}"
+    printf -v "$var" '%s %s' "$current" "$new_flag"
   fi
+  export "${var?}"
+}
+
+set_default_target_linker() {
+  local linker="$1"
+  local var
+  var="$(target_linker_var)" || return 1
+  if [[ -z "${!var-}" ]]; then
+    printf -v "$var" '%s' "$linker"
+    export "${var?}"
+  fi
+}
+
+current_target_rustflags() {
+  local var
+  var="$(target_rustflags_var)" || {
+    printf '%s\n' "${RUSTFLAGS:-<unset>}"
+    return
+  }
+  printf '%s\n' "${!var-<unset>}"
+}
+
+current_target_linker() {
+  local var
+  var="$(target_linker_var)" || {
+    printf '<unset>\n'
+    return
+  }
+  printf '%s\n' "${!var-<unset>}"
 }
 
 selected_profile() {
@@ -504,6 +770,11 @@ dev_nightly_toolchain() {
   return 0
 }
 
+current_rustc_is_nightly() {
+  command -v rustc >/dev/null 2>&1 \
+    && rustc --version 2>/dev/null | grep -q -- '-nightly'
+}
+
 configure_parallel_frontend() {
   local requested="${JCODE_PARALLEL_FRONTEND:-auto}"
   local forced="false"
@@ -555,8 +826,22 @@ configure_parallel_frontend() {
     esac
   done
 
+  # Nix, mise, and other environment managers can place a pinned nightly rustc
+  # directly on PATH without rustup. Use it in place, preserving the immutable
+  # Nix toolchain and avoiding a second toolchain manager/cache.
+  if [[ -z "${JCODE_DEV_TOOLCHAIN:-}" ]] && current_rustc_is_nightly; then
+    local threads="${JCODE_FRONTEND_THREADS:-4}"
+    [[ "$threads" =~ ^[0-9]+$ && "$threads" -ge 1 ]] || threads=4
+
+    parallel_frontend_toolchain="path-nightly"
+    append_rustflags "-Zthreads=${threads}"
+    parallel_frontend_status="enabled:path-nightly:threads=${threads}"
+    log "using parallel rustc front-end (nightly from PATH, -Zthreads=${threads})"
+    return 0
+  fi
+
   command -v rustup >/dev/null 2>&1 || {
-    parallel_frontend_status="skipped-no-rustup"
+    parallel_frontend_status="skipped-no-nightly-toolchain"
     return 0
   }
   local tc
@@ -584,16 +869,31 @@ configure_parallel_frontend() {
 configure_linux_linker() {
   local requested_mode="${JCODE_FAST_LINKER:-auto}"
   local mode="$requested_mode"
+  local driver="${JCODE_LINKER_DRIVER:-}"
+
+  if [[ -n "$driver" ]] && ! command -v "$driver" >/dev/null 2>&1; then
+    printf 'error: JCODE_LINKER_DRIVER is unavailable: %s\n' "$driver" >&2
+    exit 1
+  fi
+  if [[ -z "$driver" ]]; then
+    # Prefer the stdenv `cc` wrapper so slim Nix profiles do not need a second
+    # compiler closure. Users can still opt into clang explicitly.
+    if command -v cc >/dev/null 2>&1; then
+      driver="cc"
+    elif command -v clang >/dev/null 2>&1; then
+      driver="clang"
+    fi
+  fi
 
   case "$mode" in
     auto)
       # Prefer mold over lld: on this repo's large statically-linked binary
       # (~300 MB .text), mold links the jcode bin in ~2.0s vs lld's ~2.9s
       # (measured, warm, selfdev profile). The bin relinks on every build, so
-      # that ~0.8s is a per-build win. Both need clang as the linker driver.
-      if command -v mold >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
+      # that ~0.8s is a per-build win.
+      if command -v mold >/dev/null 2>&1 && [[ -n "$driver" ]]; then
         mode="mold"
-      elif command -v ld.lld >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
+      elif command -v ld.lld >/dev/null 2>&1 && [[ -n "$driver" ]]; then
         mode="lld"
       else
         mode="system"
@@ -608,19 +908,28 @@ configure_linux_linker() {
   esac
 
   selected_linker_mode="$mode"
+  selected_linker_driver="$driver"
 
   case "$mode" in
     lld)
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
+      if [[ -z "$driver" ]]; then
+        printf 'error: lld requested but no C compiler driver is available\n' >&2
+        exit 1
+      fi
+      set_default_target_linker "$driver"
       append_rustflags "-C link-arg=-fuse-ld=lld"
-      selected_linker_desc="clang + lld"
-      log "using clang + lld"
+      selected_linker_desc="$driver + lld"
+      log "using $driver + lld"
       ;;
     mold)
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
+      if [[ -z "$driver" ]]; then
+        printf 'error: mold requested but no C compiler driver is available\n' >&2
+        exit 1
+      fi
+      set_default_target_linker "$driver"
       append_rustflags "-C link-arg=-fuse-ld=mold"
-      selected_linker_desc="clang + mold"
-      log "using clang + mold"
+      selected_linker_desc="$driver + mold"
+      log "using $driver + mold"
       ;;
     system)
       # Leave the linker driver to cargo's default (`cc`). Only mold/lld need
@@ -643,9 +952,19 @@ print_setup() {
 repo_root=$repo_root
 os=$(uname -s)
 arch=$(uname -m)
+nix_develop_status=$nix_develop_status
+nix_devshell_name=${JCODE_NIX_DEVSHELL_NAME:-<unset>}
+nix_toolchain_channel=${JCODE_NIX_TOOLCHAIN_CHANNEL:-<unset>}
+nix_profile_status=${JCODE_NIX_PROFILE_STATUS:-$nix_profile_status}
+nix_profile_path=${JCODE_NIX_PROFILE_PATH:-${nix_profile_path:-<unset>}}
+cargo_path=$(command -v cargo 2>/dev/null || printf '<missing>')
+cargo_home=${CARGO_HOME:-${HOME:-<unset>}/.cargo}
+target_cache=$repo_root/target
+rust_host=$(rust_host_triple)
 sccache_status=$sccache_status
 selfdev_low_memory_status=$selfdev_low_memory_status
 parallel_frontend_status=$parallel_frontend_status
+parallel_frontend_toolchain=${parallel_frontend_toolchain:-<unset>}
 build_jobs_status=$build_jobs_status
 cargo_build_jobs=${CARGO_BUILD_JOBS:-<unset>}
 build_tmpdir_status=$build_tmpdir_status
@@ -656,9 +975,117 @@ build_git_hash=${JCODE_BUILD_GIT_HASH:-<unset>}
 rustc_wrapper=${RUSTC_WRAPPER:-<unset>}
 linker_mode=$selected_linker_mode
 linker_desc=${selected_linker_desc:-<none>}
-linker=${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-<unset>}
-rustflags=${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-<unset>}
+linker_driver=${selected_linker_driver:-<unset>}
+linker=$(current_target_linker)
+rustflags=$(current_target_rustflags)
 EOF
+}
+
+validate_nix_runtime_binary() {
+  local binary="$1"
+  local profile="${JCODE_NIX_PROFILE_PATH:-}"
+
+  case "${JCODE_NIX_VALIDATE_RUNTIME:-1}" in
+    0|false|no|off)
+      log "Nix runtime closure validation disabled by JCODE_NIX_VALIDATE_RUNTIME"
+      return 0
+      ;;
+  esac
+
+  if [[ -z "$profile" ]]; then
+    printf 'error: cannot validate Nix runtime paths without JCODE_NIX_PROFILE_PATH\n' >&2
+    return 1
+  fi
+  if [[ ! -x "$binary" ]]; then
+    printf 'error: expected linked binary for Nix runtime validation: %s\n' "$binary" >&2
+    return 1
+  fi
+  command -v patchelf >/dev/null 2>&1 || {
+    printf 'error: patchelf is required for Nix runtime closure validation\n' >&2
+    return 1
+  }
+  command -v nix-store >/dev/null 2>&1 || {
+    printf 'error: nix-store is required for Nix runtime closure validation\n' >&2
+    return 1
+  }
+  command -v ldd >/dev/null 2>&1 || {
+    printf 'error: ldd is required for Nix runtime closure validation\n' >&2
+    return 1
+  }
+
+  local profile_store closure rpath interpreter ldd_output resolved_paths runtime_paths entry rest store_root
+  local missing="false"
+  profile_store="$(readlink -f "$profile")"
+  closure="$(nix-store --query --requisites "$profile_store")"
+  rpath="$(patchelf --print-rpath "$binary")"
+  interpreter="$(patchelf --print-interpreter "$binary" 2>/dev/null || true)"
+  ldd_output="$(ldd "$binary" 2>&1 || true)"
+  if grep -q 'not found' <<<"$ldd_output"; then
+    printf 'error: linked library could not be resolved for %s\n%s\n' "$binary" "$ldd_output" >&2
+    return 1
+  fi
+  resolved_paths="$(grep -o '/nix/store/[^[:space:]]*' <<<"$ldd_output" || true)"
+  runtime_paths="$rpath:$interpreter:${resolved_paths//$'\n'/:}"
+
+  IFS=: read -r -a runtime_entries <<<"$runtime_paths"
+  for entry in "${runtime_entries[@]}"; do
+    [[ "$entry" == /nix/store/* ]] || continue
+    rest="${entry#/nix/store/}"
+    store_root="/nix/store/${rest%%/*}"
+    if ! grep -Fxq "$store_root" <<<"$closure"; then
+      printf 'error: linked runtime path is not retained by Nix profile %s: %s\n' \
+        "$profile" "$store_root" >&2
+      missing="true"
+    fi
+  done
+
+  if [[ "$missing" == "true" ]]; then
+    printf '%s\n' 'hint: add the missing runtime package to the selected flake shell before publishing' >&2
+    return 1
+  fi
+  log "validated Nix runtime closure for $binary against $profile"
+}
+
+is_jcode_selfdev_build() {
+  local saw_build="false" saw_package="false" saw_binary="false" expect=""
+  local arg
+  [[ -z "${CARGO_BUILD_TARGET:-}" ]] || return 1
+  for arg in "$@"; do
+    if [[ "$expect" == "package" ]]; then
+      [[ "$arg" == "jcode" ]] && saw_package="true"
+      expect=""
+      continue
+    elif [[ "$expect" == "binary" ]]; then
+      [[ "$arg" == "jcode" ]] && saw_binary="true"
+      expect=""
+      continue
+    fi
+    case "$arg" in
+      build) saw_build="true" ;;
+      -p|--package) expect="package" ;;
+      -p=jcode|--package=jcode) saw_package="true" ;;
+      --bin) expect="binary" ;;
+      --bin=jcode) saw_binary="true" ;;
+      --target|--target=*|--target-dir|--target-dir=*) return 1 ;;
+    esac
+  done
+  [[ "$saw_build" == "true" && "$saw_package" == "true" && "$saw_binary" == "true" ]] \
+    && uses_selfdev_profile "$@"
+}
+
+selfdev_jcode_binary_path() {
+  local target_root="${CARGO_TARGET_DIR:-$repo_root/target}"
+  if [[ "$target_root" != /* ]]; then
+    target_root="$repo_root/$target_root"
+  fi
+  printf '%s/selfdev/jcode\n' "$target_root"
+}
+
+validate_requested_cargo_output() {
+  if [[ -n "${JCODE_NIX_PROFILE_PATH:-}" ]] \
+    && is_jcode_selfdev_build "${cargo_argv[@]}"; then
+    validate_nix_runtime_binary "$(selfdev_jcode_binary_path)"
+  fi
 }
 
 remote_connect_timeout() {
@@ -750,7 +1177,7 @@ clear_remote_down() {
 remote_resolve_endpoint() {
   local ssh_bin="$1" remote="$2"
   local hostname="$remote" port=22 uses_proxy="false"
-  local config line key value
+  local config key value
   if config="$("$ssh_bin" -G "$remote" 2>/dev/null)"; then
     while IFS=' ' read -r key value; do
       case "$key" in
@@ -903,6 +1330,12 @@ run_local_cargo() {
     return "$status"
   fi
 
+  if is_jcode_selfdev_build "${cargo_argv[@]}"; then
+    cargo "${cargo_argv[@]}"
+    validate_requested_cargo_output
+    return 0
+  fi
+
   exec cargo "${cargo_argv[@]}"
 }
 
@@ -914,12 +1347,21 @@ maybe_enable_sccache "$@"
 configure_parallel_frontend "$@"
 select_build_jobs
 
-if [[ "$(uname -s)" == "Linux" ]] && [[ "$(uname -m)" == "x86_64" ]]; then
+if [[ "$(uname -s)" == "Linux" ]]; then
   configure_linux_linker
 fi
 
 if [[ "${1:-}" == "--print-setup" ]]; then
   print_setup
+  exit 0
+fi
+
+if [[ "${1:-}" == "--validate-nix-runtime" ]]; then
+  if [[ $# -ne 2 ]]; then
+    printf 'usage: scripts/dev_cargo.sh --validate-nix-runtime <binary>\n' >&2
+    exit 2
+  fi
+  validate_nix_runtime_binary "$2"
   exit 0
 fi
 
@@ -931,7 +1373,9 @@ done < <(build_cargo_argv "$@")
 if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
   if remote_cargo_preflight; then
     log "using remote cargo via scripts/remote_build.sh"
-    exec "$repo_root/scripts/remote_build.sh" "${cargo_argv[@]}"
+    "$repo_root/scripts/remote_build.sh" "${cargo_argv[@]}"
+    validate_requested_cargo_output
+    exit 0
   fi
   if [[ "$(remote_cargo_fallback_mode)" == "local" ]]; then
     log "remote cargo unavailable; falling back to local cargo (set JCODE_REMOTE_CARGO_FALLBACK=error to fail instead)"

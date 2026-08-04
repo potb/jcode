@@ -1,4 +1,7 @@
 /target
+/.direnv/
+/result
+/result-*
 Cargo.lock
 __pycache__/
 ios_simulator_screenshot.png
