@@ -49,6 +49,15 @@ pub fn get_repo_dir() -> Option<PathBuf> {
         return Some(repo);
     }
 
+    // Default self-dev clone location (`selfdev setup` clones here). Covers
+    // sessions launched outside any checkout with an installed binary.
+    if let Ok(dir) = storage::jcode_dir() {
+        let clone = dir.join("source").join("jcode");
+        if is_jcode_repo(&clone) {
+            return Some(clone);
+        }
+    }
+
     None
 }
 
