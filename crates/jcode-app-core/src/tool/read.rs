@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+use super::lsp_feedback;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
@@ -237,6 +238,10 @@ impl Tool for ReadTool {
             )),
             detail: None,
         }));
+
+        // Warm up the LSP server for this file in the background. Never
+        // blocks, never fails.
+        lsp_feedback::touch_background(&path);
 
         if truncated_line_count > 0 || end < total_lines {
             crate::logging::warn(&format!(

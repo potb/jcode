@@ -1,3 +1,4 @@
+use super::lsp_feedback;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
@@ -88,6 +89,7 @@ impl Tool for ApplyPatchTool {
 
         let mut results = Vec::new();
         let mut touched_paths = Vec::new();
+        let mut diagnostics_paths: Vec<std::path::PathBuf> = Vec::new();
 
         for hunk in &hunks {
             match hunk {
@@ -107,6 +109,7 @@ impl Tool for ApplyPatchTool {
                         params.intent.as_deref(),
                     );
                     touched_paths.push(path.clone());
+                    diagnostics_paths.push(resolved);
                     if diff.is_empty() {
                         results.push(format!("✓ {}: created", path));
                     } else {
@@ -187,6 +190,7 @@ impl Tool for ApplyPatchTool {
                                 );
                                 touched_paths.push(path.clone());
                                 touched_paths.push(dest.clone());
+                                diagnostics_paths.push(dest_resolved);
                                 if diff.is_empty() {
                                     results.push(format!(
                                         "✓ {}: modified ({} hunks), moved to {}",
@@ -214,6 +218,7 @@ impl Tool for ApplyPatchTool {
                                     params.intent.as_deref(),
                                 );
                                 touched_paths.push(path.clone());
+                                diagnostics_paths.push(resolved);
                                 if diff.is_empty() {
                                     results.push(format!(
                                         "✓ {}: modified ({} hunks)",
@@ -243,12 +248,44 @@ impl Tool for ApplyPatchTool {
         } else {
             let mut body = results.join("\n");
             config_watch.finish(&mut body);
+            // Bound the total time spent on LSP diagnostics across every
+            // touched file: each `diagnostics_after_write` call can itself
+            // take up to ~5s (cold server) or ~1.5s (warm), so N files could
+            // otherwise stall this tool call for N * several seconds. Cap to
+            // the first DIAGNOSTICS_MAX_FILES files (cross-file spirit of the
+            // spec) and an overall wall-clock budget; stop requesting more
+            // once either limit is hit, but keep the append for files that
+            // already completed.
+            const DIAGNOSTICS_MAX_FILES: usize = 5;
+            const DIAGNOSTICS_TOTAL_BUDGET: std::time::Duration =
+                std::time::Duration::from_secs(6);
+            let diagnostics_deadline = tokio::time::Instant::now() + DIAGNOSTICS_TOTAL_BUDGET;
+            for diag_path in diagnostics_paths.iter().take(DIAGNOSTICS_MAX_FILES) {
+            let Some(remaining) =
+                diagnostics_deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+            match tokio::time::timeout(
+                remaining,
+                lsp_feedback::diagnostics_after_write(diag_path),
+            )
+            .await
+            {
+                Ok(Some(block)) => {
+                    body.push_str("\n\n");
+                    body.push_str(&block);
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
             let output = ToolOutput::new(body);
             if touched_paths.len() == 1 {
-                Ok(output.with_title(touched_paths[0].clone()))
-            } else {
-                Ok(output.with_title(format!("{} files", touched_paths.len())))
-            }
+            Ok(output.with_title(touched_paths[0].clone()))
+        } else {
+            Ok(output.with_title(format!("{} files", touched_paths.len())))
+        }
         }
     }
 }

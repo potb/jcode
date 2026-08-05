@@ -1116,6 +1116,136 @@ impl Default for FeatureConfig {
     }
 }
 
+/// Language Server Protocol integration configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LspConfig {
+    /// Master switch. Default true; silent no-op when no servers on PATH.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-server overrides / custom servers, keyed by server id (e.g. "rust-analyzer").
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, LspServerConfig>,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: Default::default(),
+        }
+    }
+}
+
+/// Per-server override for the `[lsp]` config section. Unknown server ids
+/// define new servers; known (built-in) ids can be partially overridden.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LspServerConfig {
+    /// Disable a built-in server.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Command + args to spawn the server (stdio). Overrides built-in when set.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// File extensions (no dot) this server handles. Overrides built-in when set.
+    #[serde(default)]
+    pub extensions: Option<Vec<String>>,
+    /// Files/dirs marking the workspace root (e.g. "Cargo.toml"). Overrides built-in when set.
+    #[serde(default)]
+    pub root_markers: Option<Vec<String>>,
+    /// Raw initializationOptions JSON passed to the server.
+    #[serde(default)]
+    pub initialization_options: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod lsp_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_lsp_config_is_enabled_with_no_servers() {
+        let config = LspConfig::default();
+        assert!(config.enabled);
+        assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn spec_example_toml_parses() {
+        let toml_src = r#"
+            [lsp]
+            enabled = true
+
+            [lsp.servers.rust-analyzer]
+            disabled = false
+            command = ["rust-analyzer"]
+            extensions = ["rs"]
+            root_markers = ["Cargo.toml"]
+        "#;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            lsp: LspConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_src).expect("spec example should parse");
+        assert!(wrapper.lsp.enabled);
+
+        let server = wrapper
+            .lsp
+            .servers
+            .get("rust-analyzer")
+            .expect("rust-analyzer server entry should be present");
+        assert!(!server.disabled);
+        assert_eq!(server.command, Some(vec!["rust-analyzer".to_string()]));
+        assert_eq!(server.extensions, Some(vec!["rs".to_string()]));
+        assert_eq!(server.root_markers, Some(vec!["Cargo.toml".to_string()]));
+        assert_eq!(server.initialization_options, None);
+    }
+
+    #[test]
+    fn unknown_server_ids_parse_fine() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            lsp: LspConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str(
+            r#"
+            [lsp.servers.my-custom-server]
+            command = ["my-lsp", "--stdio"]
+            "#,
+        )
+        .expect("unknown server ids should define new servers");
+
+        let server = wrapper
+            .lsp
+            .servers
+            .get("my-custom-server")
+            .expect("custom server entry should be present");
+        assert_eq!(
+            server.command,
+            Some(vec!["my-lsp".to_string(), "--stdio".to_string()])
+        );
+        assert!(!server.disabled);
+        assert_eq!(server.extensions, None);
+    }
+
+    #[test]
+    fn lsp_config_missing_entirely_defaults() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            lsp: LspConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str("").expect("empty config should parse");
+        assert_eq!(wrapper.lsp, LspConfig::default());
+    }
+}
+
 /// Search engine used by the websearch tool.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]

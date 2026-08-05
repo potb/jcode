@@ -172,6 +172,14 @@ pub(super) async fn await_reload_signal(
             serde_json::json!({ "count": aborted }),
         );
 
+        // Same exec-skips-destructors problem as the background tasks above:
+        // live LSP server child processes are `kill_on_drop`, which never
+        // fires across `execve`. Best-effort shut them down (shutdown+exit
+        // requests) before the process image is replaced, bounded so a stuck
+        // server can never delay a reload.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), jcode_lsp::shutdown_all())
+            .await;
+
         let prefers_selfdev = signal.prefer_selfdev_binary;
 
         if let Some((binary, label)) = super::reload_exec_target(prefers_selfdev) {

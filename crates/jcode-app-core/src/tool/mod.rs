@@ -20,6 +20,8 @@ mod goal;
 pub mod inflight;
 mod invalid;
 mod ls;
+mod lsp;
+mod lsp_feedback;
 pub mod mcp;
 mod memory;
 mod multiedit;
@@ -326,6 +328,12 @@ impl Registry {
                 "integration_tools",
                 discover::DiscoverToolsTool::new(),
             );
+        }
+        if crate::config::config().lsp.enabled {
+            jcode_lsp::configure(crate::config::config().lsp.clone());
+            if jcode_lsp::is_enabled() {
+                Self::insert_tool(&mut tools_map, "lsp", lsp::LspTool::new());
+            }
         }
         let session_tools_ms = session_tools_start.elapsed().as_millis();
 

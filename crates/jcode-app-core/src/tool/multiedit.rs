@@ -1,10 +1,15 @@
+use super::lsp_feedback;
 use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
+
+const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
+const FILE_TOUCH_PREVIEW_MAX_BYTES: usize = 240;
 
 pub struct MultiEditTool;
 
@@ -16,6 +21,8 @@ impl MultiEditTool {
 
 #[derive(Deserialize)]
 struct MultiEditInput {
+    #[serde(default)]
+    intent: Option<String>,
     file_path: String,
     edits: Vec<EditOperation>,
 }
@@ -152,9 +159,37 @@ impl Tool for MultiEditTool {
         ));
 
         // Generate diff summary
+        let diff = generate_diff_summary(&original_content, &content);
         if !applied.is_empty() {
             output.push_str("\nDiff:\n");
-            output.push_str(&generate_diff_summary(&original_content, &content));
+            output.push_str(&diff);
+        }
+
+        // Publish file touch event for swarm coordination (multiedit
+        // previously skipped this; write.rs/edit.rs both publish).
+        if !applied.is_empty() {
+            let line_count = content.lines().count();
+            let detail = build_file_touch_preview(&diff);
+            Bus::global().publish(BusEvent::FileTouch(FileTouch {
+                session_id: ctx.session_id.clone(),
+                path: path.to_path_buf(),
+                op: FileOp::Edit,
+                intent: params
+                    .intent
+                    .clone()
+                    .filter(|value| !value.trim().is_empty()),
+                summary: Some(format!(
+                    "applied {} edits ({} lines)",
+                    applied.len(),
+                    line_count
+                )),
+                detail,
+            }));
+        }
+
+        if let Some(block) = lsp_feedback::diagnostics_after_write(&path).await {
+            output.push_str("\n\n");
+            output.push_str(&block);
         }
 
         super::config_edit_notice::append_config_edit_notice(
@@ -166,6 +201,34 @@ impl Tool for MultiEditTool {
 
         Ok(ToolOutput::new(output).with_title(params.file_path.clone()))
     }
+}
+
+fn build_file_touch_preview(diff: &str) -> Option<String> {
+    let trimmed = diff.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let mut preview = lines
+        .by_ref()
+        .take(FILE_TOUCH_PREVIEW_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut truncated = lines.next().is_some();
+
+    if preview.len() > FILE_TOUCH_PREVIEW_MAX_BYTES {
+        preview = crate::util::truncate_str(&preview, FILE_TOUCH_PREVIEW_MAX_BYTES)
+            .trim_end()
+            .to_string();
+        truncated = true;
+    }
+
+    if truncated {
+        preview.push_str("\n…");
+    }
+
+    Some(preview)
 }
 
 /// Generate a compact diff: "42- old" / "42+ new" (max 30 lines)

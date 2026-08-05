@@ -1,3 +1,4 @@
+use super::lsp_feedback;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
@@ -150,6 +151,11 @@ impl Tool for EditTool {
             &content,
             &new_content,
         );
+
+        if let Some(block) = lsp_feedback::diagnostics_after_write(&path).await {
+            body.push_str("\n\n");
+            body.push_str(&block);
+        }
 
         Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
     }

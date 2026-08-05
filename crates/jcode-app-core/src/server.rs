@@ -1299,6 +1299,12 @@ impl Server {
                     sigterm.recv().await;
                     crate::logging::info("Server received SIGTERM, shutting down gracefully");
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
+                    // Best-effort: let any live LSP servers shut down cleanly
+                    // (shutdown+exit requests) instead of leaking on process
+                    // exit. Bounded so a stuck server can never block exit.
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), jcode_lsp::shutdown_all())
+                            .await;
                     std::process::exit(0);
                 }
             });
@@ -1806,6 +1812,14 @@ impl Server {
                                     idle_duration / 60
                                 ));
                                 let _ = crate::registry::unregister_server(&idle_server_name).await;
+                                // Best-effort: same bounded LSP shutdown as the
+                                // SIGTERM path so idle-exit does not leak
+                                // language servers either.
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(1),
+                                    jcode_lsp::shutdown_all(),
+                                )
+                                .await;
                                 std::process::exit(EXIT_IDLE_TIMEOUT);
                             }
                         }
