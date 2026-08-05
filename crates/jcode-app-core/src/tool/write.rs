@@ -131,10 +131,15 @@ impl Tool for WriteTool {
             &params.content,
         );
 
-        if let Some(block) = lsp_feedback::diagnostics_after_write(&path).await {
+        if let Some(notice) = lsp_feedback::format_after_write(&path).await {
             body.push_str("\n\n");
-            body.push_str(&block);
+            body.push_str(&notice);
         }
+
+        if let Some(block) = lsp_feedback::diagnostics_after_write(&path).await {
+        body.push_str("\n\n");
+        body.push_str(&block);
+    }
 
         Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
     }

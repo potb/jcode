@@ -3421,6 +3421,7 @@ dependencies = [
  "jcode-build-support",
  "jcode-command-risk",
  "jcode-core",
+ "jcode-fmt",
  "jcode-import-core",
  "jcode-lsp",
  "jcode-message-types",
@@ -3652,6 +3653,19 @@ dependencies = [
  "tokenizers",
  "tract-hir",
  "tract-onnx",
+]
+
+[[package]]
+name = "jcode-fmt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jcode-config-types",
+ "jcode-logging",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

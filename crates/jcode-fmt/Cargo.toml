@@ -1,0 +1,22 @@
+[package]
+name = "jcode-fmt"
+version = "0.1.0"
+edition = "2024"
+description = "Auto-format-on-write layer for jcode: runs project formatters (rustfmt, prettier, ruff, ...) on agent writes/edits"
+publish = false
+
+[lib]
+name = "jcode_fmt"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "time"] }
+jcode-config-types = { path = "../jcode-config-types" }
+jcode-logging = { path = "../jcode-logging" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }

@@ -1,9 +1,11 @@
 //! Glue between the file tools (read/write/edit/multiedit/apply_patch) and
-//! `jcode-lsp`. Every entry point here is total: LSP failures, timeouts, or a
-//! disabled/missing server never affect the tool call itself.
+//! `jcode-lsp`/`jcode-fmt`. Every entry point here is total: formatter/LSP
+//! failures, timeouts, or a disabled/missing server never affect the tool
+//! call itself.
 //!
 //! See docs/superpowers/specs/2026-08-05-lsp-support-design.md
-//! ("Diagnostics on read/write/edit").
+//! ("Diagnostics on read/write/edit") and
+//! docs/superpowers/specs/2026-08-05-auto-format-design.md ("Auto-Format").
 
 use std::path::Path;
 
@@ -18,6 +20,19 @@ pub(crate) fn touch_background(path: &Path) {
     });
 }
 
+/// Blocking auto-format for a file that was just written. Runs BEFORE
+/// diagnostics so diagnostics see the formatted content. Returns a short
+/// notice like "formatted with prettier", or `None` when formatting is
+/// disabled, no formatter has evidence for this file, or every matching
+/// formatter failed/timed out.
+pub(crate) async fn format_after_write(path: &Path) -> Option<String> {
+    jcode_fmt::configure(crate::config::config().formatter.clone());
+    if !jcode_fmt::is_enabled() {
+        return None;
+    }
+    jcode_fmt::format_file(path).await
+}
+
 /// Blocking diagnostics fetch for a file that was just written. Returns the
 /// formatted `<diagnostics>` block, or `None` when LSP is disabled, the file
 /// is clean, or anything failed/timed out.
@@ -28,3 +43,4 @@ pub(crate) async fn diagnostics_after_write(path: &Path) -> Option<String> {
     }
     jcode_lsp::diagnostics_block(path).await
 }
+

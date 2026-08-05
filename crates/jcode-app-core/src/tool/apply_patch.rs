@@ -248,33 +248,53 @@ impl Tool for ApplyPatchTool {
         } else {
             let mut body = results.join("\n");
             config_watch.finish(&mut body);
-            // Bound the total time spent on LSP diagnostics across every
-            // touched file: each `diagnostics_after_write` call can itself
-            // take up to ~5s (cold server) or ~1.5s (warm), so N files could
-            // otherwise stall this tool call for N * several seconds. Cap to
-            // the first DIAGNOSTICS_MAX_FILES files (cross-file spirit of the
-            // spec) and an overall wall-clock budget; stop requesting more
-            // once either limit is hit, but keep the append for files that
-            // already completed.
+            // Bound the total time spent on formatting + LSP diagnostics
+            // across every touched file: each `format_after_write` /
+            // `diagnostics_after_write` call can itself take up to ~5s
+            // (formatter timeout / cold LSP server) or less, so N files
+            // could otherwise stall this tool call for N * several seconds.
+            // Cap to the first DIAGNOSTICS_MAX_FILES files (cross-file
+            // spirit of the spec) and an overall wall-clock budget shared by
+            // both format and diagnostics; stop requesting more once either
+            // limit is hit, but keep the append for files that already
+            // completed.
             const DIAGNOSTICS_MAX_FILES: usize = 5;
             const DIAGNOSTICS_TOTAL_BUDGET: std::time::Duration =
                 std::time::Duration::from_secs(6);
             let diagnostics_deadline = tokio::time::Instant::now() + DIAGNOSTICS_TOTAL_BUDGET;
             for diag_path in diagnostics_paths.iter().take(DIAGNOSTICS_MAX_FILES) {
-            let Some(remaining) =
-                diagnostics_deadline.checked_duration_since(tokio::time::Instant::now())
-            else {
-                break;
-            };
-            match tokio::time::timeout(
-                remaining,
-                lsp_feedback::diagnostics_after_write(diag_path),
-            )
-            .await
-            {
-                Ok(Some(block)) => {
-                    body.push_str("\n\n");
-                    body.push_str(&block);
+                let Some(remaining) =
+                    diagnostics_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    break;
+                };
+                match tokio::time::timeout(remaining, lsp_feedback::format_after_write(diag_path))
+                    .await
+                {
+                    Ok(Some(notice)) => {
+                        body.push_str("\n\n");
+                        body.push_str(&notice);
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+                let Some(remaining) =
+                    diagnostics_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    break;
+                };
+                match tokio::time::timeout(
+                    remaining,
+                    lsp_feedback::diagnostics_after_write(diag_path),
+                )
+                .await
+                {
+                    Ok(Some(block)) => {
+                        body.push_str("\n\n");
+                        body.push_str(&block);
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
                 }
                 Ok(None) => {}
                 Err(_) => break,

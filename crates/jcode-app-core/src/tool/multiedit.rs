@@ -187,6 +187,11 @@ impl Tool for MultiEditTool {
             }));
         }
 
+        if let Some(notice) = lsp_feedback::format_after_write(&path).await {
+            output.push_str("\n\n");
+            output.push_str(&notice);
+        }
+
         if let Some(block) = lsp_feedback::diagnostics_after_write(&path).await {
             output.push_str("\n\n");
             output.push_str(&block);

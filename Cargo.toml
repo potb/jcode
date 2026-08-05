@@ -21,6 +21,7 @@ members = [
     "crates/jcode-pdf",
     "crates/jcode-logging",
     "crates/jcode-lsp",
+    "crates/jcode-fmt",
     "crates/jcode-background-types",
     "crates/jcode-batch-types",
     "crates/jcode-build-support",

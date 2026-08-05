@@ -1159,6 +1159,131 @@ pub struct LspServerConfig {
     pub initialization_options: Option<serde_json::Value>,
 }
 
+/// Auto-format-on-write integration configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FormatterConfig {
+    /// Master switch. Default true; silent no-op when no formatter has evidence.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-formatter overrides / custom formatters, keyed by formatter id (e.g. "prettier").
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, FormatterServerConfig>,
+}
+
+impl Default for FormatterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: Default::default(),
+        }
+    }
+}
+
+/// Per-formatter override for the `[formatter]` config section. Unknown ids
+/// define new formatters; known (built-in) ids can be partially overridden.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FormatterServerConfig {
+    /// Disable a built-in formatter.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Command + args to run the formatter. Overrides built-in when set. Must
+    /// contain a `$FILE` placeholder (appended automatically if missing).
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    /// File extensions (no dot) this formatter handles. Overrides built-in when set.
+    #[serde(default)]
+    pub extensions: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod formatter_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_formatter_config_is_enabled_with_no_servers() {
+        let config = FormatterConfig::default();
+        assert!(config.enabled);
+        assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn spec_example_toml_parses() {
+        let toml_src = r#"
+            [formatter]
+            enabled = true
+
+            [formatter.servers.prettier]
+            disabled = false
+            command = ["prettier", "--write", "$FILE"]
+            extensions = ["ts", "tsx"]
+        "#;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            formatter: FormatterConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_src).expect("spec example should parse");
+        assert!(wrapper.formatter.enabled);
+
+        let server = wrapper
+            .formatter
+            .servers
+            .get("prettier")
+            .expect("prettier server entry should be present");
+        assert!(!server.disabled);
+        assert_eq!(
+            server.command,
+            Some(vec!["prettier".to_string(), "--write".to_string(), "$FILE".to_string()])
+        );
+        assert_eq!(server.extensions, Some(vec!["ts".to_string(), "tsx".to_string()]));
+    }
+
+    #[test]
+    fn unknown_server_ids_parse_fine() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            formatter: FormatterConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str(
+            r#"
+            [formatter.servers.my-custom-formatter]
+            command = ["my-fmt", "$FILE"]
+            "#,
+        )
+        .expect("unknown formatter ids should define new formatters");
+
+        let server = wrapper
+            .formatter
+            .servers
+            .get("my-custom-formatter")
+            .expect("custom formatter entry should be present");
+        assert_eq!(
+            server.command,
+            Some(vec!["my-fmt".to_string(), "$FILE".to_string()])
+        );
+        assert!(!server.disabled);
+        assert_eq!(server.extensions, None);
+    }
+
+    #[test]
+    fn formatter_config_missing_entirely_defaults() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            formatter: FormatterConfig,
+        }
+
+        let wrapper: Wrapper = toml::from_str("").expect("empty config should parse");
+        assert_eq!(wrapper.formatter, FormatterConfig::default());
+    }
+}
+
 #[cfg(test)]
 mod lsp_config_tests {
     use super::*;
