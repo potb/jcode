@@ -69,8 +69,8 @@ impl Tool for WebSearchTool {
                 },
                 "engine": {
                     "type": "string",
-                    "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
+                    "enum": ["exa", "duckduckgo", "bing", "searxng"],
+                    "description": "Engine. Defaults to exa (hosted Exa MCP, keyless); duckduckgo/bing HTML and searxng (JCODE_SEARXNG_URL) are fallbacks."
                 },
                 "bing_market": {
                     "type": "string",
@@ -167,6 +167,7 @@ impl WebSearchTool {
         allow_bing_api: bool,
     ) -> Result<Vec<SearchResult>> {
         match engine {
+            WebSearchEngine::Exa => self.search_exa(query, num_results).await,
             WebSearchEngine::Duckduckgo => self.search_duckduckgo(query, num_results).await,
             WebSearchEngine::Bing => {
                 self.search_bing(query, num_results, bing, allow_bing_api)
@@ -381,6 +382,143 @@ impl WebSearchTool {
 
         Ok(parse_searxng_results(parsed, num_results))
     }
+
+    /// Search via the hosted Exa MCP endpoint (`web_search_exa`). Works without
+    /// an API key; a configured key is forwarded as a bearer token when present.
+    async fn search_exa(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>> {
+        let config = crate::config::config();
+        let api_key = config
+            .websearch
+            .exa_api_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| k.to_string())
+            .or_else(|| {
+                std::env::var(&config.websearch.exa_api_key_env)
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+            });
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": { "query": query, "numResults": num_results }
+            }
+        });
+
+        let mut request = self
+            .client
+            .post(EXA_MCP_ENDPOINT)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .json(&body);
+        if let Some(key) = api_key {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+        }
+
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Exa search failed with status: {}",
+                response.status()
+            ));
+        }
+
+        let raw = response.text().await?;
+        let payload = parse_mcp_sse_payload(&raw)
+            .ok_or_else(|| anyhow::anyhow!("Exa returned an unparseable MCP response"))?;
+
+        if let Some(err) = payload.get("error") {
+            return Err(anyhow::anyhow!("Exa search error: {err}"));
+        }
+
+        let text = payload
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+
+        Ok(parse_exa_results(&text, num_results))
+    }
+}
+
+const EXA_MCP_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
+
+/// Extract the JSON body from an MCP response, which may be plain JSON or an
+/// SSE stream of `data:` lines.
+fn parse_mcp_sse_payload(raw: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        return Some(value);
+    }
+    raw.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|value| value.get("result").is_some() || value.get("error").is_some())
+}
+
+/// Parse Exa's `Title:` / `URL:` text blocks into structured results.
+fn parse_exa_results(text: &str, num_results: usize) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut current: Option<SearchResult> = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("Title:") {
+            if let Some(done) = current.take()
+                && !done.url.is_empty()
+            {
+                results.push(done);
+            }
+            current = Some(SearchResult {
+                title: title.trim().to_string(),
+                url: String::new(),
+                snippet: String::new(),
+            });
+        } else if let Some(url) = trimmed.strip_prefix("URL:") {
+            if let Some(entry) = current.as_mut() {
+                entry.url = url.trim().to_string();
+            }
+        } else if let Some(entry) = current.as_mut() {
+            if trimmed.is_empty()
+                || trimmed == "..."
+                || trimmed.starts_with("Published:")
+                || trimmed.starts_with("Author:")
+                || trimmed.starts_with("Highlights:")
+            {
+                continue;
+            }
+            if entry.snippet.len() < 500 {
+                if !entry.snippet.is_empty() {
+                    entry.snippet.push(' ');
+                }
+                entry
+                    .snippet
+                    .push_str(trimmed.trim_start_matches("- ").trim());
+            }
+        }
+    }
+
+    if let Some(done) = current
+        && !done.url.is_empty()
+    {
+        results.push(done);
+    }
+
+    results.truncate(num_results);
+    results
 }
 
 /// Map a parsed SearXNG JSON response to `SearchResult`s, dropping entries with
@@ -833,5 +971,40 @@ mod tests {
             Some(WebSearchEngine::Searxng)
         );
         assert_eq!(WebSearchEngine::Searxng.as_str(), "searxng");
+    }
+}
+
+#[cfg(test)]
+mod exa_tests {
+    use super::*;
+
+    #[test]
+    fn parses_exa_engine_name() {
+        assert_eq!(WebSearchEngine::parse("exa"), Some(WebSearchEngine::Exa));
+        assert_eq!(WebSearchEngine::Exa.as_str(), "exa");
+    }
+
+    #[test]
+    fn parses_mcp_sse_payload() {
+        let raw = "event: message\ndata: {\"result\":{\"content\":[]},\"jsonrpc\":\"2.0\",\"id\":1}\n";
+        let payload = parse_mcp_sse_payload(raw).expect("payload");
+        assert!(payload.get("result").is_some());
+    }
+
+    #[test]
+    fn parses_exa_result_blocks() {
+        let text = "Title: Async Traits\nURL: https://example.com/a\nPublished: N/A\nHighlights:\n- fast dispatch\n...\nTitle: Other\nURL: https://example.com/b\n- second\n";
+        let results = parse_exa_results(text, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Async Traits");
+        assert_eq!(results[0].url, "https://example.com/a");
+        assert!(results[0].snippet.contains("fast dispatch"));
+        assert_eq!(results[1].url, "https://example.com/b");
+    }
+
+    #[test]
+    fn truncates_exa_results() {
+        let text = "Title: A\nURL: https://a\nTitle: B\nURL: https://b\n";
+        assert_eq!(parse_exa_results(text, 1).len(), 1);
     }
 }

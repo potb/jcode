@@ -1109,8 +1109,11 @@ impl Default for FeatureConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WebSearchEngine {
-    /// DuckDuckGo HTML search, no API key required.
+    /// Exa neural search via the hosted Exa MCP endpoint. No API key required
+    /// by default; set `exa_api_key` (or `JCODE_EXA_API_KEY`) for higher limits.
     #[default]
+    Exa,
+    /// DuckDuckGo HTML search, no API key required.
     Duckduckgo,
     /// Bing search. Uses the Bing API when configured, otherwise Bing HTML search.
     Bing,
@@ -1123,6 +1126,7 @@ pub enum WebSearchEngine {
 impl WebSearchEngine {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Exa => "exa",
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Searxng => "searxng",
@@ -1131,6 +1135,7 @@ impl WebSearchEngine {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "exa" => Some(Self::Exa),
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "searxng" | "searx" => Some(Self::Searxng),
@@ -1159,18 +1164,24 @@ pub struct WebSearchConfig {
     pub searxng_url: Option<String>,
     /// Environment variable containing the SearXNG base URL.
     pub searxng_url_env: String,
+    /// Optional Exa API key. The hosted Exa MCP endpoint works without one.
+    pub exa_api_key: Option<String>,
+    /// Environment variable containing the Exa API key.
+    pub exa_api_key_env: String,
 }
 
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
-            engine: WebSearchEngine::Duckduckgo,
-            fallback_engines: vec![WebSearchEngine::Bing],
+            engine: WebSearchEngine::Exa,
+            fallback_engines: vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing],
             bing_api_key: None,
             bing_api_key_env: "JCODE_BING_API_KEY".to_string(),
             bing_market: "en-US".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
+            exa_api_key: None,
+            exa_api_key_env: "JCODE_EXA_API_KEY".to_string(),
         }
     }
 }
