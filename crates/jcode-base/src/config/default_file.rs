@@ -283,10 +283,14 @@ kv_cache_miss_notices = true
 update_channel = "stable"
 
 [websearch]
-# Preferred websearch engine: "duckduckgo", "bing", or "searxng".
-engine = "duckduckgo"
-# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
-fallback_engines = ["bing"]
+# Preferred websearch engine: "exa", "duckduckgo", "bing", or "searxng".
+# "exa" uses the hosted Exa MCP endpoint and needs no API key.
+engine = "exa"
+# Keyless HTML engines to try if the preferred engine fails.
+fallback_engines = ["duckduckgo", "bing"]
+# Optional Exa API key (higher rate limits). Prefer the env var.
+# exa_api_key_env = "JCODE_EXA_API_KEY"
+# exa_api_key = ""
 # Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
 # Fallback Bing searches intentionally use keyless HTML search.
 # bing_api_key_env = "JCODE_BING_API_KEY"
