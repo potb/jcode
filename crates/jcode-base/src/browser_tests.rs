@@ -323,3 +323,24 @@ fn completed_setup_without_the_binary_does_not_prompt() {
         true, false, false
     )));
 }
+
+// Regression: `xdg-open <xpi-url>` does not dispatch by the `.xpi`
+// extension, it dispatches by the file's MIME type, and `.xpi` is a zip
+// archive underneath. On a machine with no XPI-specific handler, that lands
+// on whatever the desktop's `application/zip` association happens to be, up
+// to and including an unrelated Minecraft mod manager repeatedly popping a
+// window for every swarm worker that hits this path. Firefox itself opens a
+// bare `.xpi` path as an extension install prompt, so real Firefox-family
+// binaries must be tried first, and `xdg-open` must be strictly a fallback
+// for a system with none of them on PATH.
+#[cfg(target_os = "linux")]
+#[test]
+fn xpi_launch_prefers_a_real_firefox_family_binary_over_xdg_open() {
+    assert_eq!(LINUX_XPI_LAUNCH_CANDIDATES.first(), Some(&"firefox"));
+    assert!(
+        !LINUX_XPI_LAUNCH_CANDIDATES.contains(&"xdg-open"),
+        "xdg-open must only ever be reached as a fallback after every \
+         Firefox-family candidate above has failed to spawn, never tried \
+         first alongside them"
+    );
+}
