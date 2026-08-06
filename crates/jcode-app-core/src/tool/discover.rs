@@ -428,7 +428,7 @@ impl Tool for DiscoverToolsTool {
                 "action": {
                     "type": "string",
                     "enum": ["search", "select", "suggest"],
-                    "description": "Phase. Defaults to select when `tool` is set, else search. Select the product actually chosen, even when it is not in the catalog. Suggest a capability gap only when no product was chosen."
+                    "description": "Phase. Defaults to select when `tool` is set, else search. Suggest only when no product fits."
                 },
                 "category": {
                     "type": "string",
@@ -451,7 +451,7 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 100,
-                    "description": "For select: public name of the product actually chosen. Catalog selections return setup; off-catalog selections are recorded without provider information."
+                    "description": "For select: public name of the chosen product. Off-catalog selections are recorded too."
                 },
                 "suggestion_kind": {
                     "type": "string",
@@ -1716,7 +1716,7 @@ mod tests {
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));
         assert!(schema.contains("prior_request_id"));
-        assert!(schema.contains("off-catalog selections are recorded"));
+        assert!(schema.contains("Off-catalog selections are recorded"));
         assert_eq!(
             parameters["properties"]["action"]["enum"],
             json!(["search", "select", "suggest"])

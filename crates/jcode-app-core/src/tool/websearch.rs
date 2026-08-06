@@ -70,7 +70,7 @@ impl Tool for WebSearchTool {
                 "engine": {
                     "type": "string",
                     "enum": ["exa", "duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to exa (hosted Exa MCP, keyless); duckduckgo/bing HTML and searxng (JCODE_SEARXNG_URL) are fallbacks."
+                    "description": "Engine. Defaults to exa (keyless hosted MCP); duckduckgo, bing, and searxng are fallbacks."
                 },
                 "bing_market": {
                     "type": "string",

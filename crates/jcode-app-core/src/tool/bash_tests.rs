@@ -848,9 +848,21 @@ fn gate_ctx(working_dir: &str) -> ToolContext {
     }
 }
 
+/// Serialize the tests that swap `HOME` out from under the process.
+///
+/// `RiskContext::from_env` reads `HOME` at assessment time, so two of these
+/// running concurrently (the test binary is multi-threaded) leaves one of them
+/// assessing against the *other* test's temp home: the deletion target is then
+/// merely "outside the working directory" (Confirm) instead of "is the home
+/// directory" (Catastrophic), and the block assertion fails intermittently.
+fn home_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::storage::lock_test_env()
+}
+
 #[tokio::test]
 async fn bash_refuses_to_delete_the_home_directory() {
     // The #604 incident, at the real tool boundary.
+    let _env_guard = home_env_lock();
     let temp = tempfile::tempdir().expect("temp home");
     let home = temp.path().to_string_lossy().to_string();
     let previous = std::env::var("HOME").ok();
@@ -953,6 +965,7 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
     // reimplementing it, so the gate lives at the only chokepoint. Assert that
     // directly: calling execute for a background job (the one path that returns
     // early) is still gated.
+    let _env_guard = home_env_lock();
     let temp = tempfile::tempdir().expect("temp home");
     let home = temp.path().to_string_lossy().to_string();
     let previous = std::env::var("HOME").ok();
