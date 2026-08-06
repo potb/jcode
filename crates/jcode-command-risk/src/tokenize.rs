@@ -169,11 +169,31 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 tokens.push(op);
             }
             '>' => {
+                // A leading file descriptor (`2>err`) is part of the redirect
+                // operator, not an argument. Dropping it keeps bare digits out
+                // of the target list.
+                if has_content && current.chars().all(|c| c.is_ascii_digit()) {
+                    current.clear();
+                    has_content = false;
+                }
                 flush!();
                 // `>>` appends and does not truncate, so it is far less
                 // destructive; only a single `>` clobbers.
                 if chars.peek() == Some(&'>') {
                     chars.next();
+                } else if chars.peek() == Some(&'&') {
+                    // `>&1` duplicates a file descriptor. Nothing is opened and
+                    // nothing is truncated, so the following word is a target
+                    // of neither. Treating it as a file was making every
+                    // `cmd 2>&1` look like a clobbering redirect.
+                    chars.next();
+                    while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        chars.next();
+                    }
+                    // A trailing `-` closes the descriptor, e.g. `2>&-`.
+                    if chars.peek() == Some(&'-') {
+                        chars.next();
+                    }
                 } else {
                     if chars.peek() == Some(&'|') {
                         chars.next();

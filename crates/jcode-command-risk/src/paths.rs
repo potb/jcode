@@ -58,6 +58,18 @@ const SYSTEM_PATHS_PROTECTED_RECURSIVELY: &[&str] = &[
     "/var/lib", "/System", "/Library",
 ];
 
+/// The standard character devices, which are write-only sinks and sources
+/// rather than storage. `cmd 2>/dev/null` is the single most common shell
+/// idiom there is, and writing to them destroys nothing, so they are carved
+/// out of the recursive `/dev` protection above. Without this carve-out the
+/// `/dev` prefix rule fires first and blocks ordinary output redirection.
+const EXEMPT_DEVICE_PATHS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"];
+
+/// Whether this path is one of the harmless standard character devices.
+fn is_exempt_device(path: &Path) -> bool {
+    EXEMPT_DEVICE_PATHS.iter().any(|p| path == Path::new(p))
+}
+
 /// The set of paths this policy protects, exposed for testing and docs.
 pub struct ProtectedPaths;
 
@@ -134,6 +146,12 @@ fn normalize(path: &Path) -> PathBuf {
 /// the crate and deserves to be testable in isolation.
 pub fn is_catastrophic_target(path: &Path, ctx: &RiskContext) -> bool {
     let path = normalize(path);
+
+    // Writing to (or even "deleting") a standard character device destroys no
+    // data, so these never reach the protected-path rules below.
+    if is_exempt_device(&path) {
+        return false;
+    }
 
     // Exact system roots, plus anything inside the ones whose contents are as
     // unrecoverable as the directory itself (`/etc/passwd`). `/home` and
@@ -226,11 +244,14 @@ pub fn classify_target(
     }
 
     // Raw device nodes are never a safe write target.
-    if expanded.starts_with("/dev")
-        && !expanded.starts_with("/dev/null")
-        && !expanded.starts_with("/dev/stdout")
-        && !expanded.starts_with("/dev/stderr")
-    {
+    // The standard character devices are the documented exception: they are
+    // sinks, not storage, so redirecting into them harms nothing and they
+    // carry no finding at all (they are outside the working directory, which
+    // would otherwise land them in the Confirm tier below).
+    if is_exempt_device(expanded) {
+        return None;
+    }
+    if expanded.starts_with("/dev") {
         return Some(RiskFinding {
             level: RiskLevel::Catastrophic,
             reason: "writes directly to a device node, which can destroy a \

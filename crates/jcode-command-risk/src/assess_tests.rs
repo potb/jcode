@@ -103,6 +103,20 @@ fn non_rm_destructive_tools_are_covered() {
     assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
 }
 
+/// Regression: the redirect-scoping fix once keyed operand classification on
+/// the always-destructive name list, which silently dropped the operands of
+/// every conditionally destructive tool. `find ~ -delete` still deletes home.
+#[test]
+fn conditionally_destructive_tools_still_see_their_operands() {
+    assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
+    assert_eq!(level("chmod -R 777 /home/u"), RiskLevel::Catastrophic);
+    assert_eq!(level("chown -R me /etc"), RiskLevel::Catastrophic);
+    assert!(level("find /home/u -exec rm {} ;") >= RiskLevel::Confirm);
+    // The recursive flag must still escalate a directory that is only
+    // protected against recursive destruction.
+    assert!(level("chmod -R 000 /home/u/other") >= RiskLevel::Confirm);
+}
+
 #[test]
 fn truncating_redirect_outside_cwd_is_caught() {
     assert!(level("echo '' > /home/u/other/important.conf") >= RiskLevel::Confirm);
@@ -405,4 +419,50 @@ fn ordinary_wrapped_commands_still_run_immediately() {
         noisy.is_empty(),
         "gate became noisy on normal work: {noisy:#?}"
     );
+}
+
+/// Redirection is the most common thing an agent writes. None of it may be
+/// mistaken for destruction.
+#[test]
+fn ordinary_redirection_is_never_gated() {
+    let ctx = ctx();
+    let mut noisy = Vec::new();
+    for command in [
+        // Discarding output: the single most common shell idiom there is.
+        "ls /etc 2>/dev/null",
+        "command -v cargo >/dev/null 2>&1",
+        "grep -r TODO . 2>/dev/null",
+        // Merging stderr into stdout truncates nothing.
+        "cargo test -p jcode-command-risk 2>&1",
+        "ls -d /home/u/proj 2>&1 | head",
+        "cat build.log 2>&1",
+        // Closing a descriptor.
+        "cargo build 2>&-",
+        // Writing into the working directory is routine.
+        "echo hi > out.txt",
+        "cargo build > build.log 2>&1",
+    ] {
+        let level = assess(command, &ctx).level;
+        if !level.runs_immediately() {
+            noisy.push(format!("{command} -> {level:?}"));
+        }
+    }
+    assert!(
+        noisy.is_empty(),
+        "gate became noisy on ordinary redirection: {noisy:#?}"
+    );
+}
+
+/// The redirect exemption must not become a laundering channel.
+#[test]
+fn redirection_into_real_files_is_still_assessed() {
+    let ctx = ctx();
+    // Clobbering a protected file is still catastrophic, fd prefix or not.
+    for command in ["echo x > /etc/passwd", "echo x 2> /etc/passwd"] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    // Real device nodes remain blocked.
+    assert_eq!(level("dd if=/dev/zero of=/dev/sda"), RiskLevel::Catastrophic);
+    // And a destructive verb is unaffected by trailing redirection.
+    assert_eq!(level("rm -rf ~ 2>/dev/null"), RiskLevel::Catastrophic);
 }

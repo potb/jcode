@@ -55,6 +55,38 @@ fn truncating_redirect_target_is_marked_but_append_is_not() {
 }
 
 #[test]
+fn fd_duplication_is_not_a_file_redirect() {
+    // Regression: `2>&1` was parsed as a truncating redirect whose "target"
+    // was the next word, so ordinary read-only commands had all their
+    // arguments path-classified and were blocked.
+    for command in ["ls /etc 2>&1", "cmd >&2", "cmd 2>&-"] {
+        let tokens = tokenize(command);
+        assert!(
+            !tokens.iter().any(|t| t.is_truncating_redirect_target),
+            "{command} duplicates a descriptor and truncates nothing"
+        );
+    }
+
+    // The duplication must not leave a stray `1` operand behind either.
+    let tokens = tokenize("ls /etc 2>&1");
+    let words: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(words, ["ls", "/etc"], "fd words are part of the operator");
+}
+
+#[test]
+fn leading_fd_is_stripped_from_a_real_redirect() {
+    // `2>err.log` still truncates err.log, and the `2` is not an operand.
+    let tokens = tokenize("cmd 2>err.log");
+    let words: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(words, ["cmd", "err.log"]);
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.is_truncating_redirect_target && t.text == "err.log")
+    );
+}
+
+#[test]
 fn recursive_flag_detected_in_bundles_and_long_form() {
     let cases = [
         ("-rf", true),
