@@ -217,3 +217,40 @@ fn ordinary_config_files_remain_editable() {
         assert!(is_catastrophic_target(Path::new(path), &ctx), "{path}");
     }
 }
+
+#[test]
+fn standard_character_devices_are_not_catastrophic() {
+    // Regression: `/dev` is protected recursively, which previously matched
+    // the standard character devices first and made the most common shell
+    // idiom there is (redirecting output into the null sink) unrunnable.
+    let ctx = ctx();
+    for path in ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"] {
+        assert!(
+            !is_catastrophic_target(Path::new(path), &ctx),
+            "{path} should be writable"
+        );
+        assert!(
+            classify_target(Path::new(path), path, false, &ctx).is_none(),
+            "{path} should produce no finding"
+        );
+    }
+}
+
+#[test]
+fn real_device_nodes_remain_catastrophic() {
+    // The exemption must be exact: block devices, nested paths, and lookalike
+    // names under /dev are still unacceptable write targets.
+    let ctx = ctx();
+    for path in [
+        "/dev/sda",
+        "/dev/nvme0n1",
+        "/dev/null/nested",
+        "/dev/nullx",
+        "/dev",
+    ] {
+        assert!(
+            is_catastrophic_target(Path::new(path), &ctx),
+            "{path} must stay protected"
+        );
+    }
+}

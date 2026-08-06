@@ -307,12 +307,29 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let mut targets: Vec<&Token> = tokens
-        .iter()
-        .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator)
-        .collect();
-    targets.extend(redirect_targets.iter().copied());
+    // Which words this segment could actually destroy.
+    //
+    // A program that has triggered (destructive by name, or by a
+    // conditionally destructive flag like `find -delete`) is assessed on all
+    // of its operands. A harmless program that merely redirects is assessed
+    // *only* on its redirect destinations: `ls /etc > out.txt` truncates
+    // `out.txt` and does nothing whatsoever to `/etc`. Classifying its read
+    // operands made every listing of a system path look like an attempt to
+    // destroy it.
+    let mut targets: Vec<&Token> = if triggered {
+        tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.is_flag() && !t.is_operator)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for redirect in &redirect_targets {
+        if !targets.iter().any(|t| std::ptr::eq(*t, *redirect)) {
+            targets.push(redirect);
+        }
+    }
 
     // A destructive command fed by a pipe takes its operands from the previous
     // command's output, which we cannot enumerate. `find ~ -type f | xargs rm`
@@ -343,7 +360,9 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let recursive = tokens.iter().any(|t| t.is_recursive_flag());
+    // A redirect never recurses, so a `-R` flag on a harmless program must not
+    // color its destination.
+    let recursive = triggered && tokens.iter().any(|t| t.is_recursive_flag());
 
     for target in targets {
         // `dd`-style `key=value` operands hide the path from a naive scan.
