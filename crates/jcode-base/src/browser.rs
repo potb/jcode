@@ -870,6 +870,19 @@ fn should_prompt_extension_install(status: &BrowserStatus) -> bool {
     status.binary_installed && !status.responding
 }
 
+/// Firefox-family binaries that open a bare `.xpi` path as their extension
+/// install prompt, in try-order. Extracted so the "never try `xdg-open`
+/// first" contract is unit-testable without actually spawning a browser.
+#[cfg(target_os = "linux")]
+const LINUX_XPI_LAUNCH_CANDIDATES: &[&str] = &[
+    "firefox",
+    "firefox-esr",
+    "librewolf",
+    "waterfox",
+    "floorp",
+    "zen",
+];
+
 async fn install_extension() -> Result<String> {
     let xpi = xpi_path();
     let mut msg = String::new();
@@ -885,9 +898,32 @@ async fn install_extension() -> Result<String> {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = tokio::process::Command::new("xdg-open")
-            .arg(&xpi_url)
-            .spawn();
+        // `xdg-open` on a `.xpi` file does not open it with a browser: `.xpi`
+        // is a zip archive, and `xdg-open` dispatches by MIME type, not
+        // extension-derived intent, so it lands on whatever the desktop's
+        // `application/zip` handler happens to be. Observed in the wild: a
+        // Minecraft mod manager (Prism Launcher) registers itself for zip and
+        // pops up every time a swarm worker calls this. Firefox itself opens
+        // a bare `.xpi` path as its extension install prompt, so try known
+        // Firefox-family binaries directly first and only fall back to
+        // `xdg-open` (still best-effort; it may reach the wrong handler) when
+        // none of them are on PATH.
+        let mut opened = false;
+        for bin in LINUX_XPI_LAUNCH_CANDIDATES {
+            if tokio::process::Command::new(bin)
+                .arg(&xpi_url)
+                .spawn()
+                .is_ok()
+            {
+                opened = true;
+                break;
+            }
+        }
+        if !opened {
+            let _ = tokio::process::Command::new("xdg-open")
+                .arg(&xpi_url)
+                .spawn();
+        }
     }
     #[cfg(target_os = "macos")]
     {
