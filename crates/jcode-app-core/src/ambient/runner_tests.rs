@@ -980,3 +980,52 @@ fn a_disabled_or_paused_runner_is_not_rescheduled() {
         None
     );
 }
+
+/// A manual trigger must survive the trip to disk.
+///
+/// `should_run` is evaluated on a freshly loaded `AmbientManager`, so an
+/// in-memory-only status change is invisible to it. Observed live: `jcode
+/// ambient trigger` printed "Ambient cycle triggered", the loop woke, re-read
+/// the old `Scheduled` status from disk, logged "not time to run" and slept
+/// again. The command reported success and did nothing.
+#[tokio::test]
+async fn a_manual_trigger_is_persisted_so_the_loop_can_see_it() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    // `should_run` short-circuits on `is_enabled()`, which the temp JCODE_HOME
+    // isolates away, so the assertion below would pass vacuously without this.
+    let _enabled = EnvVarGuard::set_path("JCODE_AMBIENT_ENABLED", std::path::Path::new("true"));
+    crate::config::invalidate_config_cache();
+
+    let mut state = crate::ambient::AmbientState::load().expect("load state");
+    state.status = crate::ambient::AmbientStatus::Scheduled {
+        next_wake: chrono::Utc::now() + chrono::Duration::hours(3),
+    };
+    state.save().expect("persist a distant scheduled wake");
+
+    assert!(
+        !crate::ambient::AmbientManager::new()
+            .expect("manager")
+            .should_run(),
+        "a distant scheduled wake must not run on its own"
+    );
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    runner.trigger().await;
+
+    let reloaded = crate::ambient::AmbientState::load().expect("reload state");
+    assert!(
+        matches!(reloaded.status, crate::ambient::AmbientStatus::Idle),
+        "trigger must persist Idle, got {:?}",
+        reloaded.status
+    );
+    assert!(
+        crate::ambient::AmbientManager::new()
+            .expect("manager")
+            .should_run(),
+        "a triggered cycle must be runnable from a freshly loaded manager"
+    );
+
+    crate::config::invalidate_config_cache();
+}

@@ -229,15 +229,29 @@ impl AmbientRunnerHandle {
 
     /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
     pub async fn trigger(&self) {
-        // Set status to idle so should_run returns true
-        let mut state = self.inner.state.write().await;
-        if matches!(
-            state.status,
-            AmbientStatus::Scheduled { .. } | AmbientStatus::Idle
-        ) {
-            state.status = AmbientStatus::Idle;
+        // Set status to Idle so `should_run` returns true.
+        //
+        // This MUST be persisted. `should_run` is evaluated on a freshly
+        // loaded `AmbientManager`, which reads state from disk, so an
+        // in-memory-only change is invisible to it: the loop woke, re-read the
+        // old `Scheduled` status, decided it was not time yet and went back to
+        // sleep. `jcode ambient trigger` reported success and did nothing,
+        // which is the worst shape a manual override can take.
+        {
+            let mut state = self.inner.state.write().await;
+            if matches!(
+                state.status,
+                AmbientStatus::Scheduled { .. } | AmbientStatus::Idle
+            ) {
+                state.status = AmbientStatus::Idle;
+                if let Err(e) = state.save() {
+                    logging::error(&format!(
+                        "Ambient runner: failed to persist manual trigger: {}",
+                        e
+                    ));
+                }
+            }
         }
-        drop(state);
         self.inner.wake_notify.notify_one();
     }
 
