@@ -194,6 +194,15 @@ mod colors {
             }
         }
         let _lock = lock_shared_state();
+        // Redirect JCODE_HOME BEFORE touching the config.
+        //
+        // `create_test_app` also does this, but it runs inside `body()`, which
+        // is too late: the setup save below would already have serialized the
+        // developer's real ~/.jcode/config.toml. That is not hypothetical. It
+        // expanded a hand-pruned config to its full 217-line default dump,
+        // which is exactly the "in-app settings change freezes today's
+        // defaults" failure the config file's own comments warn about.
+        crate::tui::app::tests::ensure_test_jcode_home_if_unset();
         let _restore = Restore;
         {
             let mut config = crate::config::Config::load();

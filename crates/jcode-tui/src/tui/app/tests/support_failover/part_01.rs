@@ -353,7 +353,7 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// `try_lock` fails because this thread holds the lock, the caller's own
 /// exclusion already covers the transition; a cross-thread `try_lock` miss
 /// falls back to the pre-serialization benign race for that one call.
-fn ensure_test_jcode_home_if_unset() {
+pub(crate) fn ensure_test_jcode_home_if_unset() {
     use std::sync::OnceLock;
 
     static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
