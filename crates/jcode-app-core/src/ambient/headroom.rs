@@ -128,6 +128,40 @@ pub(crate) fn openai_snapshot_is_usable(
     fetched && !has_error && has_limits
 }
 
+/// A provider's reported quota windows, reduced to the shape this module needs.
+///
+/// Both providers are normalized into this before selection so the "which
+/// windows count" rule is one pure function rather than two inline blocks
+/// welded to process-global caches.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProviderWindows {
+    /// Whether this provider's snapshot is usable at all.
+    pub usable: bool,
+    /// Utilization plus reset time for each window the provider reported.
+    pub windows: Vec<WindowUtilization>,
+}
+
+/// Every window that should be considered, across both providers.
+///
+/// Exists as its own function because a mutation test showed that deleting the
+/// entire OpenAI branch from [`current_subscription_headroom`] left all tests
+/// green: that function reads global caches, so nothing could assert both
+/// providers were consulted. A user with two subscriptions must be paced by
+/// whichever runs out first, so silently dropping one is a real failure that
+/// simply looks like "quota is fine".
+pub(crate) fn collect_windows(
+    anthropic: &ProviderWindows,
+    openai: &ProviderWindows,
+) -> Vec<WindowUtilization> {
+    let mut windows = Vec::new();
+    for provider in [anthropic, openai] {
+        if provider.usable {
+            windows.extend(provider.windows.iter().copied());
+        }
+    }
+    windows
+}
+
 /// Current headroom across the user's subscriptions, or `None` when neither
 /// provider has usable quota data.
 ///
@@ -144,56 +178,56 @@ pub(crate) fn openai_snapshot_is_usable(
 /// run flat out precisely when the meter is broken, so an errored snapshot is
 /// treated as no information and the caller falls back to `max_interval`.
 pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
-    let mut windows: Vec<WindowUtilization> = Vec::new();
-
     let anthropic = jcode_base::usage::get_sync();
     // `UsageData` has no `has_limits`, and an unfetched or errored snapshot is
     // all zeroes, indistinguishable from a genuinely untouched window by value
     // alone. Require a successful fetch that actually reported a window: a real
     // response always carries reset timestamps, so their absence means there is
     // nothing to reason about.
-    let anthropic_reported = anthropic_snapshot_is_usable(
-        anthropic.fetched_at.is_some(),
-        anthropic.last_error.is_some(),
-        anthropic.five_hour_resets_at.is_some(),
-        anthropic.seven_day_resets_at.is_some(),
-    );
-    if anthropic_reported {
-        windows.push(WindowUtilization {
-            utilization: anthropic.five_hour,
-            resets_at: anthropic.five_hour_resets_at.as_deref().and_then(parse_reset),
-        });
-        windows.push(WindowUtilization {
-            utilization: anthropic.seven_day,
-            resets_at: anthropic.seven_day_resets_at.as_deref().and_then(parse_reset),
-        });
-    }
+    let anthropic_windows = ProviderWindows {
+        usable: anthropic_snapshot_is_usable(
+            anthropic.fetched_at.is_some(),
+            anthropic.last_error.is_some(),
+            anthropic.five_hour_resets_at.is_some(),
+            anthropic.seven_day_resets_at.is_some(),
+        ),
+        windows: vec![
+            WindowUtilization {
+                utilization: anthropic.five_hour,
+                resets_at: anthropic.five_hour_resets_at.as_deref().and_then(parse_reset),
+            },
+            WindowUtilization {
+                utilization: anthropic.seven_day,
+                resets_at: anthropic.seven_day_resets_at.as_deref().and_then(parse_reset),
+            },
+        ],
+    };
 
     let openai = jcode_base::usage::get_openai_usage_sync();
     // `OpenAIUsageData` models absent windows as `None` rather than zero, so
     // `has_limits` already distinguishes "nothing reported" from "nothing used"
     // and an errored fetch simply carries no windows.
-    if openai_snapshot_is_usable(
-        openai.fetched_at.is_some(),
-        openai.last_error.is_some(),
-        openai.has_limits(),
-    ) {
-        for window in [
+    let openai_windows = ProviderWindows {
+        usable: openai_snapshot_is_usable(
+            openai.fetched_at.is_some(),
+            openai.last_error.is_some(),
+            openai.has_limits(),
+        ),
+        windows: [
             openai.five_hour.as_ref(),
             openai.seven_day.as_ref(),
             openai.spark.as_ref(),
         ]
         .into_iter()
         .flatten()
-        {
-            windows.push(WindowUtilization {
-                utilization: window.usage_ratio,
-                resets_at: window.resets_at.as_deref().and_then(parse_reset),
-            });
-        }
-    }
+        .map(|window| WindowUtilization {
+            utilization: window.usage_ratio,
+            resets_at: window.resets_at.as_deref().and_then(parse_reset),
+        })
+        .collect(),
+    };
 
-    binding_headroom(windows)
+    binding_headroom(collect_windows(&anthropic_windows, &openai_windows))
 }
 
 #[cfg(test)]

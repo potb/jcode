@@ -230,3 +230,73 @@ fn a_clean_snapshot_from_either_provider_is_usable() {
     assert!(anthropic_snapshot_is_usable(true, false, true, true));
     assert!(openai_snapshot_is_usable(true, false, true));
 }
+
+// -- window collection across providers -------------------------------------
+//
+// A mutation test showed the entire OpenAI branch could be deleted from
+// `current_subscription_headroom` with all 102 tests still green, because that
+// function reads process-global caches and nothing could observe it. The
+// collection rule therefore lives in `collect_windows`, and these pin it.
+
+fn provider(usable: bool, utilizations: &[f32]) -> ProviderWindows {
+    ProviderWindows {
+        usable,
+        windows: utilizations.iter().map(|u| window(*u, None)).collect(),
+    }
+}
+
+/// Both subscriptions must reach the selection step. Dropping either one is
+/// invisible in the result (it just looks like more headroom) but silently
+/// removes the constraint the user is actually bound by.
+#[test]
+fn windows_from_both_providers_are_collected() {
+    let collected = collect_windows(&provider(true, &[0.1, 0.2]), &provider(true, &[0.3, 0.4]));
+
+    assert_eq!(collected.len(), 4, "every window from both providers counts");
+}
+
+/// The specific mutation: OpenAI dropped entirely. Its window is the binding
+/// one here, so losing it changes the answer rather than merely the count.
+#[test]
+fn dropping_a_provider_loses_the_binding_constraint() {
+    let anthropic = provider(true, &[0.10]);
+    let openai = provider(true, &[0.95]);
+
+    let both = binding_headroom(collect_windows(&anthropic, &openai)).expect("a window");
+    let anthropic_only =
+        binding_headroom(collect_windows(&anthropic, &provider(false, &[]))).expect("a window");
+
+    assert!(
+        (both.remaining_fraction - 0.05).abs() < 1e-6,
+        "with both providers the 95%-spent window binds, got {}",
+        both.remaining_fraction
+    );
+    assert!(
+        (anthropic_only.remaining_fraction - 0.90).abs() < 1e-6,
+        "dropping OpenAI wrongly reports 90% headroom, got {}",
+        anthropic_only.remaining_fraction
+    );
+}
+
+/// An unusable snapshot contributes nothing, even when it carries windows.
+#[test]
+fn an_unusable_provider_contributes_no_windows() {
+    let collected = collect_windows(&provider(false, &[0.9]), &provider(true, &[0.2]));
+
+    assert_eq!(collected.len(), 1);
+    assert!((collected[0].utilization - 0.2).abs() < 1e-6);
+}
+
+/// Neither provider usable is "no information", which the caller turns into the
+/// conservative ceiling rather than a full window.
+#[test]
+fn no_usable_provider_yields_no_windows() {
+    assert!(collect_windows(&provider(false, &[0.9]), &provider(false, &[0.1])).is_empty());
+    assert!(
+        binding_headroom(collect_windows(
+            &provider(false, &[0.9]),
+            &provider(false, &[0.1])
+        ))
+        .is_none()
+    );
+}
