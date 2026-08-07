@@ -16,6 +16,7 @@ fn test_ambient_state_lifecycle() {
         memories_modified: 3,
         compactions: 0,
         proactive_work: None,
+        significance: None,
         next_schedule: None,
         started_at: chrono::Utc::now(),
         ended_at: chrono::Utc::now(),

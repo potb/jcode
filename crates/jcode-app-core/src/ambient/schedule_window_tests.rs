@@ -303,3 +303,29 @@ fn user_config_weekdays_9_to_23() {
         );
     }
 }
+
+/// The after-hours branch for the live config, driven through the SAME
+/// `evaluate` + `sleep_secs_until_open` the runner calls, including the sleep
+/// the daemon will actually pick at 23:00 tonight.
+#[test]
+fn user_config_after_2300_holds_until_morning() {
+    let windows = vec![parse_window("weekdays 09:00-23:00").unwrap()];
+
+    // Friday 23:00:01 — the moment tonight's window closes.
+    let now = local(2026, 8, 7, 23, 1);
+    let state = evaluate(&windows, &now);
+    assert!(!state.is_open(), "must hold once past 23:00");
+
+    let next = state.next_open_at().expect("must know when it reopens");
+    assert_eq!(next, local(2026, 8, 10, 9, 0), "Friday night waits for Monday");
+
+    // And the sleep the runner would choose: capped at the hourly re-check
+    // rather than parking for the ~58h until Monday.
+    let secs = sleep_secs_until_open(&now, Some(next), 3600);
+    assert_eq!(secs, 3600, "must re-check hourly, not sleep through the weekend");
+
+    // A weeknight instead reopens the next morning.
+    let tue_night = local(2026, 8, 4, 23, 30);
+    let state = evaluate(&windows, &tue_night);
+    assert_eq!(state.next_open_at().unwrap(), local(2026, 8, 5, 9, 0));
+}
