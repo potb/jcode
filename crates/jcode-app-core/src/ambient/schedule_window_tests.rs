@@ -269,3 +269,37 @@ fn day_range_wraps_the_week() {
     assert_eq!(w.days.len(), 4, "fri,sat,sun,mon");
     assert!(w.days.contains(&Weekday::Mon));
 }
+
+/// The user's actual configuration: weekdays 09:00-23:00.
+/// Verifies the real boundaries rather than trusting the generic cases.
+#[test]
+fn user_config_weekdays_9_to_23() {
+    let windows = vec![parse_window("weekdays 09:00-23:00").unwrap()];
+
+    // Friday 22:00 — inside, near the top edge.
+    assert!(evaluate(&windows, &local(2026, 8, 7, 22, 0)).is_open());
+    // Friday 23:00 — end is exclusive, so closed.
+    assert!(!evaluate(&windows, &local(2026, 8, 7, 23, 0)).is_open());
+    // Friday 08:59 — before opening.
+    assert!(!evaluate(&windows, &local(2026, 8, 7, 8, 59)).is_open());
+
+    // Friday 23:30 must wait for MONDAY, not Saturday.
+    let state = evaluate(&windows, &local(2026, 8, 7, 23, 30));
+    assert_eq!(
+        state.next_open_at().unwrap(),
+        local(2026, 8, 10, 9, 0),
+        "Friday night must skip the whole weekend"
+    );
+
+    // Tuesday 23:30 reopens Wednesday morning, not days later.
+    let state = evaluate(&windows, &local(2026, 8, 4, 23, 30));
+    assert_eq!(state.next_open_at().unwrap(), local(2026, 8, 5, 9, 0));
+
+    // Saturday is closed at every hour of the day.
+    for hour in [0, 9, 12, 22, 23] {
+        assert!(
+            !evaluate(&windows, &local(2026, 8, 8, hour, 0)).is_open(),
+            "Saturday {hour}:00 must be closed"
+        );
+    }
+}

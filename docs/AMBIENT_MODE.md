@@ -659,6 +659,51 @@ Semantics worth knowing:
 - **`jcode ambient trigger` overrides the window.** An explicit human request
   is not the scheduled work the constraint exists to hold back.
 
+### Notifications (what reaches your phone)
+
+Windows decide *when* the agent runs; this decides *when it interrupts you*.
+Both exist for the same reason: an agent that pages you for nothing is one
+you will mute, and a muted channel costs every future alert that mattered.
+
+Configure the channel under `[safety]`:
+
+```toml
+[safety]
+ntfy_topic = "jcode-<random>"      # ntfy.sh topics are PUBLIC to anyone who knows the name
+ntfy_server = "https://ntfy.sh"
+ntfy_detailed = true               # send the real summary, not just counts (default: false)
+```
+
+**Routine cycles are silent.** Most cycles are gardening: queue empty,
+memories healthy, nothing changed for you. Those send nothing.
+
+The decision is NOT a threshold on counts, because counts cannot express it.
+From real transcripts: a garden-only cycle reported `memories_modified = 2`,
+while the cycle announcing "#763 and #764 are both MERGED" reported `1`.
+Gardening *is* memory work, so the number says nothing about whether a human
+cares. Only the agent knows, so it declares it on `end_ambient_cycle`:
+
+| `significance` | Meaning | Notifies |
+|---|---|---|
+| `"routine"` | Gardening, memory upkeep, queue checks, "nothing to do" | No |
+| `"notable"` | Blocked on you, needs a decision, finished work you awaited | Yes |
+| *unset* | Agent did not say | No |
+
+Unset is silent because garden cycles are the majority and none of them
+declare anything, so notifying-on-unset would reproduce exactly the noise this
+removes. That default is only safe because three cases notify on **structure
+alone**, without the agent's cooperation:
+
+- **Pending permission requests** - the entire point of the channel.
+- **A failed cycle** - it may have died before reaching its own reporting
+  code, so its label (or silence) proves nothing.
+- **Proactive code changes** - code changed; never routine.
+
+So a cycle cannot mute a permission request or a crash by calling itself
+routine. When debugging a missing notification, check the log for
+`routine cycle, no notification sent` - that line means the gate decided,
+as distinct from a broken channel.
+
 ### Agent-Initiated Scheduling
 
 The ambient agent has a `schedule_ambient` tool to request its next wake-up:
