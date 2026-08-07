@@ -603,6 +603,62 @@ graph TB
     style FINAL fill:#e3f2fd
 ```
 
+### Active Windows (wall-clock constraints)
+
+Pace control answers *how often*; windows answer *when at all*. They are
+independent: a window says the agent may not run on Sunday, and headroom
+still decides how fast it runs on Tuesday.
+
+```toml
+[ambient]
+# Weekdays, business hours only. Nothing at night, nothing on weekends.
+active_windows = ["weekdays 09:00-19:00"]
+```
+
+**Allowed ranges, not forbidden ones.** An allow-list fails closed: a range you
+forgot to write is quiet time. A deny-list fails open, and the rule you forgot
+to write is the machine waking you at 3am.
+
+**Empty means unrestricted.** `active_windows = []` (the default) runs exactly
+as before, so existing configs are unaffected. Empty could not mean "never run"
+without silently disabling ambient for everyone who never asked for a
+constraint.
+
+Day specs: `mon`, `mon-fri`, `mon,wed,fri`, `weekdays`, `weekends`, `daily`.
+Day ranges may wrap the week (`fri-mon`). Times are `HH:MM-HH:MM`, start
+inclusive, end exclusive, with `24:00` accepted for end-of-day.
+
+A range whose end is at or before its start wraps past midnight, and the tail
+belongs to the day the window *opened*:
+
+```toml
+# Friday 22:00 through Saturday 02:00. Saturday itself stays quiet.
+active_windows = ["fri 22:00-02:00"]
+```
+
+Multiple windows union:
+
+```toml
+active_windows = ["weekdays 09:00-19:00", "sat 10:00-14:00"]
+```
+
+Semantics worth knowing:
+
+- **Local time.** Windows are wall-clock statements about your week, so they
+  follow you across DST instead of drifting an hour twice a year.
+- **Queued work is deferred, never dropped.** An item coming due inside a
+  closed window runs when the window next opens.
+- **Direct deliveries are exempt.** An item targeted at a session you are
+  sitting in is handed over regardless: you are present by definition, so
+  withholding it would be the constraint working against you.
+- **Sleeps until reopening**, re-checking hourly, rather than polling every
+  30s all weekend. The hourly ceiling keeps config edits and manual triggers
+  from being ignored for days.
+- **Fails open on a bad spec.** Unparseable entries are logged and skipped; if
+  none survive, ambient runs unrestricted rather than being disabled by a typo.
+- **`jcode ambient trigger` overrides the window.** An explicit human request
+  is not the scheduled work the constraint exists to hold back.
+
 ### Agent-Initiated Scheduling
 
 The ambient agent has a `schedule_ambient` tool to request its next wake-up:

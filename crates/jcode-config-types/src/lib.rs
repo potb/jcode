@@ -1285,6 +1285,28 @@ pub struct AmbientConfig {
     /// with whatever its initiative scope allows. Approvals are still recorded
     /// in the decision history with `via = "ambient_auto_approve"`.
     pub auto_approve_permissions: bool,
+    /// Wall-clock windows during which ambient may run (default: empty =
+    /// unrestricted).
+    ///
+    /// Expressed as *allowed* ranges rather than forbidden ones, because a
+    /// range you forgot to write is quiet time, whereas a deny-rule you forgot
+    /// to write is the machine waking you at 3am.
+    ///
+    /// Format: `"<days> HH:MM-HH:MM"`, where days is `mon`, `mon-fri`,
+    /// `mon,wed,fri`, `weekdays`, `weekends`, or `daily`. A range whose end is
+    /// at or before its start wraps past midnight (`"fri 18:00-02:00"`), and
+    /// the tail belongs to the day the window opened.
+    ///
+    /// Evaluated in LOCAL time, so windows follow you across DST instead of
+    /// drifting an hour twice a year.
+    ///
+    /// ```toml
+    /// active_windows = ["weekdays 09:00-19:00"]
+    /// ```
+    ///
+    /// Scheduled items that come due while closed are not dropped; they run
+    /// when the next window opens.
+    pub active_windows: Vec<String>,
 }
 
 impl Default for AmbientConfig {
@@ -1302,6 +1324,7 @@ impl Default for AmbientConfig {
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
             auto_approve_permissions: false,
+            active_windows: Vec::new(),
         }
     }
 }

@@ -10,6 +10,9 @@ mod paths;
 mod persistence;
 mod prompt;
 pub mod runner;
+pub mod schedule_window;
+#[cfg(test)]
+mod schedule_window_tests;
 pub mod scheduler;
 
 pub use directives::{
