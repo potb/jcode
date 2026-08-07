@@ -93,6 +93,41 @@ pub fn binding_headroom(
         })
 }
 
+/// Whether an Anthropic usage snapshot carries a reading worth acting on.
+///
+/// Split out from [`current_subscription_headroom`] because that function
+/// reads process-global caches and so cannot be exercised by a unit test. This
+/// rule is the one that actually decides whether ambient trusts the meter, and
+/// a mutation-test showed the inline version could be reverted with every test
+/// still green.
+///
+/// The failure mode being guarded is subtle: on a failed fetch the usage module
+/// stamps `fetched_at` and records `last_error` while leaving every utilization
+/// at its zero default, which is byte-identical to a pristine full window. So
+/// "has it been fetched?" is not sufficient; require no error, plus a reset
+/// timestamp, which a real response always carries.
+pub(crate) fn anthropic_snapshot_is_usable(
+    fetched: bool,
+    has_error: bool,
+    has_five_hour_reset: bool,
+    has_seven_day_reset: bool,
+) -> bool {
+    fetched && !has_error && (has_five_hour_reset || has_seven_day_reset)
+}
+
+/// Whether an OpenAI/Codex usage snapshot carries a reading worth acting on.
+///
+/// `OpenAIUsageData` models absent windows as `None` rather than zero, so
+/// `has_limits` already separates "nothing reported" from "nothing used"; the
+/// error check still matters because a failed fetch stamps `fetched_at` too.
+pub(crate) fn openai_snapshot_is_usable(
+    fetched: bool,
+    has_error: bool,
+    has_limits: bool,
+) -> bool {
+    fetched && !has_error && has_limits
+}
+
 /// Current headroom across the user's subscriptions, or `None` when neither
 /// provider has usable quota data.
 ///
@@ -117,9 +152,12 @@ pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
     // alone. Require a successful fetch that actually reported a window: a real
     // response always carries reset timestamps, so their absence means there is
     // nothing to reason about.
-    let anthropic_reported = anthropic.fetched_at.is_some()
-        && anthropic.last_error.is_none()
-        && (anthropic.five_hour_resets_at.is_some() || anthropic.seven_day_resets_at.is_some());
+    let anthropic_reported = anthropic_snapshot_is_usable(
+        anthropic.fetched_at.is_some(),
+        anthropic.last_error.is_some(),
+        anthropic.five_hour_resets_at.is_some(),
+        anthropic.seven_day_resets_at.is_some(),
+    );
     if anthropic_reported {
         windows.push(WindowUtilization {
             utilization: anthropic.five_hour,
@@ -135,7 +173,11 @@ pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
     // `OpenAIUsageData` models absent windows as `None` rather than zero, so
     // `has_limits` already distinguishes "nothing reported" from "nothing used"
     // and an errored fetch simply carries no windows.
-    if openai.fetched_at.is_some() && openai.last_error.is_none() && openai.has_limits() {
+    if openai_snapshot_is_usable(
+        openai.fetched_at.is_some(),
+        openai.last_error.is_some(),
+        openai.has_limits(),
+    ) {
         for window in [
             openai.five_hour.as_ref(),
             openai.seven_day.as_ref(),

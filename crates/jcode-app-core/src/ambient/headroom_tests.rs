@@ -167,3 +167,66 @@ fn an_errored_snapshot_is_no_information_not_full_headroom() {
         "zeroed utilization means a full window, which is why it must not leak"
     );
 }
+
+// -- snapshot usability -----------------------------------------------------
+//
+// These pin the rule that decides whether ambient trusts the quota meter at
+// all. It lives in its own function because `current_subscription_headroom`
+// reads process-global caches; a mutation test showed the previously-inline
+// version could be reverted to a bare `fetched_at.is_some()` with all 94 tests
+// still green, i.e. the most dangerous branch in this module was uncovered.
+
+/// The exact shape a failed Anthropic fetch produces: stamped, errored, and
+/// otherwise all zeroes. Trusting it reads as a pristine full window and runs
+/// ambient at its fastest pace exactly when the meter is broken.
+#[test]
+fn an_errored_anthropic_snapshot_is_not_usable() {
+    assert!(!anthropic_snapshot_is_usable(true, true, true, true));
+}
+
+/// Never fetched: no information, not a full window.
+#[test]
+fn an_unfetched_anthropic_snapshot_is_not_usable() {
+    assert!(!anthropic_snapshot_is_usable(false, false, true, true));
+}
+
+/// A successful fetch that reported no window at all. Real responses always
+/// carry a reset timestamp, so their absence means there is nothing to read,
+/// which is what an API-key (billed, not metered) account looks like.
+#[test]
+fn an_anthropic_snapshot_without_any_reset_timestamp_is_not_usable() {
+    assert!(!anthropic_snapshot_is_usable(true, false, false, false));
+}
+
+/// Either window alone is enough to act on.
+#[test]
+fn one_anthropic_reset_timestamp_is_enough() {
+    assert!(anthropic_snapshot_is_usable(true, false, true, false));
+    assert!(anthropic_snapshot_is_usable(true, false, false, true));
+}
+
+/// The live-probe case: `fetched=true, last_error=No OpenAI/Codex OAuth
+/// credentials found`, every window unset.
+#[test]
+fn an_errored_openai_snapshot_is_not_usable() {
+    assert!(!openai_snapshot_is_usable(true, true, false));
+    assert!(!openai_snapshot_is_usable(true, true, true));
+}
+
+#[test]
+fn an_openai_snapshot_without_limits_is_not_usable() {
+    assert!(!openai_snapshot_is_usable(true, false, false));
+}
+
+#[test]
+fn an_unfetched_openai_snapshot_is_not_usable() {
+    assert!(!openai_snapshot_is_usable(false, false, true));
+}
+
+/// A clean reading from either provider is usable, so the guards above cannot
+/// be satisfied by a function that simply always returns false.
+#[test]
+fn a_clean_snapshot_from_either_provider_is_usable() {
+    assert!(anthropic_snapshot_is_usable(true, false, true, true));
+    assert!(openai_snapshot_is_usable(true, false, true));
+}
