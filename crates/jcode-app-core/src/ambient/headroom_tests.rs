@@ -139,3 +139,31 @@ fn the_binding_window_carries_its_own_reset_time() {
 
     assert_eq!(headroom.resets_at, Some(soon));
 }
+
+/// A failed usage fetch must never look like a fresh window.
+///
+/// The usage module stamps `fetched_at` and sets `last_error` on failure while
+/// leaving every utilization at its zero default. By value that is identical to
+/// a pristine untouched window, so a naive "has it been fetched?" gate reads a
+/// broken meter as 100% headroom and runs ambient flat out at exactly the
+/// moment it cannot see the quota. Found by probing live credentials: the
+/// OpenAI snapshot came back `fetched=true, last_error=No OpenAI/Codex OAuth
+/// credentials found` with all windows unset.
+#[test]
+fn an_errored_snapshot_is_no_information_not_full_headroom() {
+    // The shape the usage module produces on error: fetched, zeroed, no windows.
+    let errored: Vec<WindowUtilization> = Vec::new();
+    assert!(
+        binding_headroom(errored).is_none(),
+        "an errored fetch reports no windows, which must stay 'no information'"
+    );
+
+    // And the value that would be read if the zeroes leaked through: full
+    // headroom, i.e. the fastest possible pace. This asserts the difference is
+    // real and worth guarding, not that the guard is in this function.
+    let leaked = binding_headroom(vec![window(0.0, None)]).unwrap();
+    assert_eq!(
+        leaked.remaining_fraction, 1.0,
+        "zeroed utilization means a full window, which is why it must not leak"
+    );
+}

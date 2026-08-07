@@ -100,18 +100,27 @@ pub fn binding_headroom(
 /// no network traffic of its own: a stale cache triggers that module's own
 /// background refresh and we use the previous value meanwhile.
 ///
-/// A snapshot that reports no limits at all is skipped rather than treated as a
-/// full window. That is the API-key case (usage is billed, not metered) and the
-/// not-yet-fetched case, and inventing headroom there would make ambient run at
-/// full speed on exactly the accounts where the meter is unknown.
+/// A snapshot without usable limits is skipped rather than treated as a full
+/// window. That covers the API-key case (usage is billed, not metered), the
+/// not-yet-fetched case, and a *failed* fetch. The last one is the trap: on
+/// error the usage module stamps `fetched_at` and records `last_error` while
+/// leaving every utilization at its zero default, which is byte-identical to a
+/// pristine untouched window. Reading that as full headroom would make ambient
+/// run flat out precisely when the meter is broken, so an errored snapshot is
+/// treated as no information and the caller falls back to `max_interval`.
 pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
     let mut windows: Vec<WindowUtilization> = Vec::new();
 
     let anthropic = jcode_base::usage::get_sync();
-    // `UsageData` has no `has_limits`; an unfetched snapshot is all zeroes and
-    // a missing reset timestamp, which is indistinguishable from a genuinely
-    // untouched window by value alone. `fetched_at` is the discriminator.
-    if anthropic.fetched_at.is_some() {
+    // `UsageData` has no `has_limits`, and an unfetched or errored snapshot is
+    // all zeroes, indistinguishable from a genuinely untouched window by value
+    // alone. Require a successful fetch that actually reported a window: a real
+    // response always carries reset timestamps, so their absence means there is
+    // nothing to reason about.
+    let anthropic_reported = anthropic.fetched_at.is_some()
+        && anthropic.last_error.is_none()
+        && (anthropic.five_hour_resets_at.is_some() || anthropic.seven_day_resets_at.is_some());
+    if anthropic_reported {
         windows.push(WindowUtilization {
             utilization: anthropic.five_hour,
             resets_at: anthropic.five_hour_resets_at.as_deref().and_then(parse_reset),
@@ -123,7 +132,10 @@ pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
     }
 
     let openai = jcode_base::usage::get_openai_usage_sync();
-    if openai.fetched_at.is_some() {
+    // `OpenAIUsageData` models absent windows as `None` rather than zero, so
+    // `has_limits` already distinguishes "nothing reported" from "nothing used"
+    // and an errored fetch simply carries no windows.
+    if openai.fetched_at.is_some() && openai.last_error.is_none() && openai.has_limits() {
         for window in [
             openai.five_hour.as_ref(),
             openai.seven_day.as_ref(),
