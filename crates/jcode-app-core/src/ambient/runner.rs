@@ -1088,9 +1088,20 @@ impl AmbientRunnerHandle {
                     if cycle_significance::should_notify(&outcome) {
                         self.inner.notifier.dispatch_cycle_summary(&transcript);
                     } else {
-                        logging::info(
-                            "Ambient runner: routine cycle, no notification sent",
-                        );
+                        // Name WHICH arm silenced it. "routine" (the agent
+                        // said so) and "unspecified" (it never set the field)
+                        // are operationally identical but mean very different
+                        // things: the second says the prompt is not landing,
+                        // which is invisible if both log the same line.
+                        logging::info(&format!(
+                            "Ambient runner: {} cycle, no notification sent",
+                            match outcome.significance {
+                                cycle_significance::CycleSignificance::Routine => "routine",
+                                cycle_significance::CycleSignificance::Notable => "notable",
+                                cycle_significance::CycleSignificance::Unspecified =>
+                                    "unspecified-significance",
+                            }
+                        ));
                     }
 
                     // Post-cycle memory consolidation (fire-and-forget)
