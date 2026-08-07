@@ -595,6 +595,13 @@ proactive_work = true
 work_branch_prefix = "ambient/"
 # Show ambient cycle in a terminal window (default: true)
 # visible = true
+# Auto-approve request_permission calls from ambient cycles instead of queueing
+# them for review (default: false). A queued request only resolves if you are
+# watching a channel that can send an answer back; with no such channel the
+# cycle stalls and the request is eventually expired, so the work never happens.
+# Enabling this trusts the ambient agent within its initiative scope. Decisions
+# are still recorded in the permission history as "ambient_auto_approve".
+# auto_approve_permissions = false
 
 [gateway]
 # Enable WebSocket gateway for iOS/web clients
@@ -691,6 +698,36 @@ mod tests {
     fn default_config_template_parses() {
         let template = Config::default_config_file_contents();
         toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+    }
+
+    /// End-to-end config wiring for `ambient.auto_approve_permissions`. The
+    /// field name, its serde name and the `[ambient]` section all have to
+    /// agree; if they drift the key parses to false and the only symptom is
+    /// ambient quietly stalling on permission requests again in production.
+    #[test]
+    fn ambient_auto_approve_permissions_round_trips_through_toml() {
+        let cfg: Config =
+            toml::from_str("[ambient]\nenabled = true\nauto_approve_permissions = true\n")
+                .expect("the documented snippet must parse");
+        assert!(
+            cfg.ambient.auto_approve_permissions,
+            "the key must be readable from [ambient] in config.toml"
+        );
+
+        // Absent must mean off: an existing config must never silently gain
+        // auto-approval on upgrade.
+        let bare: Config =
+            toml::from_str("[ambient]\nenabled = true\n").expect("parse without the key");
+        assert!(
+            !bare.ambient.auto_approve_permissions,
+            "omitting the key must default to false, never opt a user in"
+        );
+
+        // Unreadable settings are undiscoverable settings.
+        assert!(
+            Config::default_config_file_contents().contains("auto_approve_permissions"),
+            "the shipped template should document the setting"
+        );
     }
 
     /// Colors are only discoverable if the template mentions them, since most

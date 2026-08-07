@@ -517,6 +517,27 @@ pub fn build_ambient_system_prompt(
          (e.g. telegram, discord) or omit channel to send to all.\n",
     );
 
+    // When the user has pre-authorized ambient work, say so explicitly.
+    // Otherwise the agent keeps calling request_permission out of caution,
+    // which is now a no-op round trip that only wastes cycle budget.
+    if crate::config::config().ambient.auto_approve_permissions {
+        prompt.push_str(
+            "\n## Permissions\n\n\
+             The user has enabled `ambient.auto_approve_permissions`, so every \
+             `request_permission` call is approved immediately and never reaches \
+             a human. Do not use it as a safety net or a way to defer a decision: \
+             nobody is on the other end. Prefer just doing the work.\n\n\
+             This makes your own judgment the only real check. Stay inside the \
+             scope of the initiative or task you were given, keep changes on \
+             branches with PRs, and never take an action that would be hard to \
+             undo (force-push, merge, branch or data deletion, anything \
+             destructive or externally visible) unless it was explicitly asked \
+             for. When something falls outside your scope, stop and report it \
+             via `send_message` and in your cycle summary instead of approving \
+             yourself into it.\n",
+        );
+    }
+
     prompt
 }
 

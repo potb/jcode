@@ -15,7 +15,7 @@ pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
 pub use manager::AmbientManager;
-pub use persistence::{AmbientLock, ScheduledQueue};
+pub use persistence::{AmbientLock, ScheduledQueue, is_locked_by_another_process};
 #[cfg(test)]
 pub(crate) use prompt::format_duration_rough;
 pub use prompt::{

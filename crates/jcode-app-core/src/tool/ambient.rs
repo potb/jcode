@@ -680,6 +680,28 @@ impl Tool for RequestPermissionTool {
         };
 
         let system = get_safety_system();
+
+        // Auto-approve mode: the user has pre-authorized ambient work, so
+        // queueing here would only stall the cycle waiting for an answer that
+        // never comes. Record an approval decision so the audit trail still
+        // shows what was done and on whose authority.
+        if crate::config::config().ambient.auto_approve_permissions {
+            let msg = format!(
+                "Auto-approved by ambient.auto_approve_permissions (action '{}').",
+                params.action
+            );
+            system.record_decision(
+                &request_id,
+                true,
+                "ambient_auto_approve",
+                Some(msg.clone()),
+            )?;
+            return Ok(ToolOutput::new(format!(
+                "Permission approved: {} Proceed without waiting.",
+                msg
+            )));
+        }
+
         let result = system.request_permission(request);
 
         let output = match result {

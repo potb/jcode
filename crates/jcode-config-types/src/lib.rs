@@ -1275,6 +1275,16 @@ pub struct AmbientConfig {
     pub work_branch_prefix: String,
     /// Show ambient cycle in a terminal window (default: true)
     pub visible: bool,
+    /// Auto-approve `request_permission` calls made by ambient cycles instead of
+    /// queueing them for a human (default: false).
+    ///
+    /// A queued request only resolves if you are watching a channel that can
+    /// carry an answer back. With no such channel the cycle stalls and the
+    /// request is eventually expired, so the work silently never happens.
+    /// Turning this on trades that failure mode for trusting the ambient agent
+    /// with whatever its initiative scope allows. Approvals are still recorded
+    /// in the decision history with `via = "ambient_auto_approve"`.
+    pub auto_approve_permissions: bool,
 }
 
 impl Default for AmbientConfig {
@@ -1291,6 +1301,7 @@ impl Default for AmbientConfig {
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
+            auto_approve_permissions: false,
         }
     }
 }

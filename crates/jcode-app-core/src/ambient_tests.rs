@@ -455,3 +455,72 @@ fn test_scheduled_queue_items_accessor() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "s1");
 }
+
+/// With auto-approve on, `request_permission` is a no-op that always says yes,
+/// so the agent's own judgement is the ONLY remaining check on destructive
+/// work. That makes this prompt section a safety control, not documentation:
+/// if it silently stops being emitted, the agent keeps calling
+/// request_permission believing a human might say no, and nothing ever
+/// refuses. Assert it appears exactly when the flag is on.
+#[test]
+fn auto_approve_prompt_warns_that_no_human_will_answer() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_flag = std::env::var_os("JCODE_AMBIENT_AUTO_APPROVE");
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
+
+    let state = AmbientState::default();
+    let queue = vec![];
+    let health = MemoryGraphHealth::default();
+    let sessions = vec![];
+    let feedback: Vec<String> = vec![];
+    let budget = ResourceBudget {
+        provider: "anthropic-oauth".into(),
+        tokens_remaining_desc: "unknown".into(),
+        window_resets_desc: "unknown".into(),
+        user_usage_rate_desc: "0 tokens/min".into(),
+        cycle_budget_desc: "stay under 50k tokens".into(),
+    };
+
+    jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "true");
+    crate::config::invalidate_config_cache();
+    let on =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+
+    assert!(
+        on.contains("## Permissions"),
+        "auto-approve must add a Permissions section"
+    );
+    assert!(
+        on.contains("nobody is on the other end"),
+        "the agent must be told its requests reach no human, or it will treat \
+         request_permission as a safety net that does not exist"
+    );
+    for hazard in ["force-push", "merge", "destructive"] {
+        assert!(
+            on.contains(hazard),
+            "the irreversible-action warning must still name '{hazard}'"
+        );
+    }
+
+    jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "false");
+    crate::config::invalidate_config_cache();
+    let off =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+    assert!(
+        !off.contains("nobody is on the other end"),
+        "with approvals off a human DOES answer; telling the agent otherwise \
+         would wrongly discourage it from asking"
+    );
+
+    match prev_flag {
+        Some(v) => jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", v),
+        None => jcode_base::env::remove_var("JCODE_AMBIENT_AUTO_APPROVE"),
+    }
+    match prev_home {
+        Some(v) => jcode_base::env::set_var("JCODE_HOME", v),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+}

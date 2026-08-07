@@ -21,12 +21,88 @@ use crate::safety::SafetySystem;
 use crate::session::Session;
 use crate::tool;
 use crate::tool::ambient as ambient_tools;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
+
+/// The soonest of two optional deadlines.
+///
+/// The runner tracks direct-delivery and ambient-cycle queue deadlines
+/// separately because they are serviced differently, but when deciding how long
+/// to sleep only the nearer one matters.
+fn earliest_deadline(
+    a: Option<DateTime<Utc>>,
+    b: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (only, None) | (None, only) => only,
+    }
+}
+
+/// How long the idle loop should sleep.
+///
+/// `interval` is the adaptive maintenance interval and acts as the ceiling.
+/// A known deadline lowers it so queued work is not delayed by up to a full
+/// interval, but only when that deadline is still in the future: we are in the
+/// idle branch because something blocks running (a cycle in flight, ambient
+/// paused), and a past deadline would otherwise re-arm a ~1s timer every pass
+/// and spin the loop.
+///
+/// The remaining time is rounded UP to whole seconds. Truncating it instead
+/// collapses any deadline under a second to zero, which reads as "already
+/// past" and falls back to the full interval, sleeping hours through work due
+/// imminently. Rounding up also keeps the wake at or after the deadline, so
+/// the item is genuinely due on the next pass rather than one pass early.
+fn idle_sleep_secs(
+    now: DateTime<Utc>,
+    interval_secs: u64,
+    next_deadline: Option<DateTime<Utc>>,
+) -> u64 {
+    next_deadline
+        .map(|d| (d - now).num_milliseconds())
+        .filter(|ms| *ms > 0)
+        .map(|ms| interval_secs.min(((ms + 999) / 1000).max(1) as u64))
+        .unwrap_or(interval_secs)
+}
+
+/// The status a runner should adopt at startup, or `None` to leave it alone.
+///
+/// A persisted `Running` status means the previous process died mid-cycle
+/// (crash, restart, or a reload that swapped the binary underneath it).
+/// Nothing else ever clears it, and `should_run` treats `Running` as "already
+/// busy", so ambient would stay wedged forever.
+///
+/// It is only ours to reclaim when no OTHER live daemon holds the lock. If one
+/// does, that `Running` belongs to a cycle happening right now and resetting it
+/// to idle would let two cycles run at once.
+fn reclaimed_startup_status(
+    status: &AmbientStatus,
+    lock_is_foreign: bool,
+) -> Option<AmbientStatus> {
+    if lock_is_foreign {
+        return None;
+    }
+    matches!(status, AmbientStatus::Running { .. }).then_some(AmbientStatus::Idle)
+}
+
+/// Restore queue items abandoned by a cycle that died before finishing them.
+///
+/// Skipped entirely when another live process holds the lock: those items are
+/// claimed by a cycle running right now, and "recovering" them would hand the
+/// same work to a second cycle concurrently.
+fn recover_abandoned_queue_items(lock_is_foreign: bool) -> usize {
+    if lock_is_foreign {
+        return 0;
+    }
+    match AmbientManager::new() {
+        Ok(mut mgr) => mgr.recover_inflight_items(),
+        Err(_) => 0,
+    }
+}
 
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
@@ -538,6 +614,47 @@ impl AmbientRunnerHandle {
         }
         logging::info("Ambient runner: starting background loop");
 
+        // Recover after a process that died mid-cycle. Both the wedged status
+        // and any claimed-but-unfinished queue items are only *ours* to reclaim
+        // when no other live daemon holds the lock: otherwise that daemon is
+        // mid-cycle right now, and "recovering" would clear its status and
+        // duplicate the items it is actively working on back onto the queue.
+        // NOTE: both decisions below are unit-tested via
+        // `startup_recovery_defers_to_a_live_foreign_lock_holder`, but THIS
+        // line is not: proving it reads the real lock rather than a constant
+        // needs a genuine second daemon holding it. Keep the call trivial so
+        // inspection is enough.
+        let lock_is_foreign = crate::ambient::is_locked_by_another_process();
+        if lock_is_foreign {
+            logging::info(
+                "Ambient runner: another process holds the ambient lock; \
+                 leaving its in-flight cycle alone",
+            );
+        }
+
+        {
+            let mut s = self.inner.state.write().await;
+            if let Some(reclaimed) = reclaimed_startup_status(&s.status, lock_is_foreign) {
+                logging::warn(
+                    "Ambient runner: found an interrupted cycle from a previous process; \
+                     resetting status to idle",
+                );
+                s.status = reclaimed;
+                let _ = s.save();
+            }
+        }
+
+        // That dead cycle may also have been holding claimed queue items.
+        // No in-process undo could have run, so recover them here or the
+        // work is gone for good.
+        let recovered = recover_abandoned_queue_items(lock_is_foreign);
+        if recovered > 0 {
+            logging::warn(&format!(
+                "Ambient runner: recovered {} queue item(s) abandoned by an interrupted cycle",
+                recovered
+            ));
+        }
+
         let ambient_enabled = config().ambient.enabled;
 
         // Spawn reply pollers only when ambient mode is enabled; scheduled
@@ -625,37 +742,41 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
-                Ok(mut mgr) => {
-                    let ready_direct_items = mgr.take_ready_direct_items();
-                    let next_direct_due = mgr
-                        .queue()
-                        .items()
-                        .iter()
-                        .filter(|item| item.target.is_direct_delivery())
-                        .map(|item| item.scheduled_for)
-                        .min();
-                    // Update queue info for widget
-                    {
-                        let mut qc = self.inner.queue_count.write().await;
-                        *qc = mgr.queue().len();
+            let (should_run, ready_direct_items, next_direct_due, next_ambient_due) =
+                match AmbientManager::new() {
+                    Ok(mut mgr) => {
+                        let ready_direct_items = mgr.take_ready_direct_items();
+                        let next_direct_due = mgr
+                            .queue()
+                            .items()
+                            .iter()
+                            .filter(|item| item.target.is_direct_delivery())
+                            .map(|item| item.scheduled_for)
+                            .min();
+                        let next_ambient_due = mgr.next_ambient_item_due();
+                        // Update queue info for widget
+                        {
+                            let mut qc = self.inner.queue_count.write().await;
+                            *qc = mgr.queue().len();
+                        }
+                        {
+                            let mut qp = self.inner.next_queue_preview.write().await;
+                            *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                        }
+                        // Also run if there are pending email reply directives
+                        (
+                            ambient_allowed
+                                && (mgr.should_run() || ambient::has_pending_directives()),
+                            ready_direct_items,
+                            next_direct_due,
+                            next_ambient_due,
+                        )
                     }
-                    {
-                        let mut qp = self.inner.next_queue_preview.write().await;
-                        *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                    Err(e) => {
+                        logging::error(&format!("Ambient runner: failed to load manager: {}", e));
+                        (false, Vec::new(), None, None)
                     }
-                    // Also run if there are pending email reply directives
-                    (
-                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
-                        ready_direct_items,
-                        next_direct_due,
-                    )
-                }
-                Err(e) => {
-                    logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new(), None)
-                }
-            };
+                };
 
             if !ready_direct_items.is_empty() {
                 self.deliver_ready_direct_items(&provider, ready_direct_items)
@@ -663,20 +784,32 @@ impl AmbientRunnerHandle {
             }
 
             if !should_run {
+                // Never sleep past a deadline we already know about. The
+                // adaptive interval describes routine maintenance; a queued
+                // item has an explicit time the user or a previous cycle asked
+                // for, and sleeping through it silently delays the work by up
+                // to a full interval.
+                //
+                // Only *future* deadlines shorten the sleep. A deadline in the
+                // past cannot be met by waking sooner, and we are here because
+                // something else (a cycle already running, ambient paused)
+                // blocks the run. Re-arming a ~1s timer for it would spin the
+                // loop until that condition clears.
                 let sleep_secs = if ambient_allowed {
                     let interval = scheduler
                         .calculate_interval(None)
                         .as_secs()
                         .max(MAX_IDLE_POLL_SECS);
-                    let next_direct_secs = next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .unwrap_or(interval);
-                    interval.min(next_direct_secs.max(1))
+                    idle_sleep_secs(
+                        Utc::now(),
+                        interval,
+                        earliest_deadline(next_direct_due, next_ambient_due),
+                    )
                 } else {
-                    next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
-                        .unwrap_or(MAX_IDLE_POLL_SECS)
+                    // With ambient disabled only direct deliveries still need
+                    // servicing, so an ambient-only deadline must not shorten
+                    // the idle poll.
+                    idle_sleep_secs(Utc::now(), MAX_IDLE_POLL_SECS, next_direct_due)
                 };
 
                 logging::info(&format!(
@@ -730,6 +863,10 @@ impl AmbientRunnerHandle {
                     // Update state
                     if let Ok(mut mgr) = AmbientManager::new() {
                         let _ = mgr.record_cycle_result(result.clone());
+                        // The cycle finished, so its claim is settled. Drop the
+                        // crash-recovery record or the next startup would treat
+                        // completed work as abandoned and run it again.
+                        mgr.clear_inflight();
                     }
                     let mut s = self.inner.state.write().await;
                     s.record_cycle(&result);
@@ -836,14 +973,26 @@ impl AmbientRunnerHandle {
     }
 
     /// Build the ambient system prompt and initial message for a cycle.
+    ///
+    /// Also returns the queue items this cycle has claimed, so the caller can
+    /// restore them if the cycle never gets to run them.
     async fn build_cycle_context(
         &self,
         provider: &Arc<dyn Provider>,
-    ) -> anyhow::Result<(String, String)> {
+    ) -> anyhow::Result<(String, String, Vec<ScheduledItem>)> {
         let state = self.inner.state.read().await.clone();
 
-        let mgr = AmbientManager::new()?;
-        let queue_items: Vec<_> = mgr.queue().items().to_vec();
+        let mut mgr = AmbientManager::new()?;
+        // Claim the due items as they are handed to the cycle. The prompt below
+        // is the delivery mechanism, so anything left in the queue afterwards
+        // would be re-delivered to every subsequent cycle. Items not yet due
+        // stay queued and still appear, so the agent can see what is coming.
+        let claimed = mgr.take_ready_ambient_items();
+        let queue_items: Vec<_> = claimed
+            .iter()
+            .cloned()
+            .chain(mgr.queue().items().iter().cloned())
+            .collect();
 
         let memory_manager = MemoryManager::new();
         let graph_health = ambient::gather_memory_graph_health(&memory_manager);
@@ -872,7 +1021,7 @@ impl AmbientRunnerHandle {
 
         let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool.".to_string();
 
-        Ok((system_prompt, initial_message))
+        Ok((system_prompt, initial_message, claimed))
     }
 
     /// Run a single ambient cycle. Returns the cycle result.
@@ -881,13 +1030,44 @@ impl AmbientRunnerHandle {
         let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
-        let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
+        let (system_prompt, initial_message, claimed) =
+            self.build_cycle_context(provider).await?;
+
+        // A claimed item is only safely consumed once the cycle has actually
+        // had a chance to act on it. If the cycle cannot run at all, put the
+        // items back: losing scheduled work outright is worse than the replay
+        // this claiming was introduced to stop.
+        let restore_claimed = |reason: &str| {
+            if claimed.is_empty() {
+                return;
+            }
+            match AmbientManager::new() {
+                Ok(mut mgr) => {
+                    let count = claimed.len();
+                    mgr.requeue_items(claimed.clone());
+                    logging::warn(&format!(
+                        "Ambient cycle: returned {} claimed queue item(s) after {}",
+                        count, reason
+                    ));
+                }
+                Err(e) => logging::error(&format!(
+                    "Ambient cycle: could not return {} claimed queue item(s) after {}: {}",
+                    claimed.len(),
+                    reason,
+                    e
+                )),
+            }
+        };
 
         // Visible mode: spawn a full TUI instead of running headlessly
         if visible {
-            return self
+            let outcome = self
                 .run_cycle_visible(started_at, system_prompt, initial_message)
                 .await;
+            if outcome.is_err() {
+                restore_claimed("the visible cycle failed to start");
+            }
+            return outcome;
         }
 
         // Headless mode: run agent directly
@@ -941,7 +1121,7 @@ impl AmbientRunnerHandle {
             what you accomplished and schedule your next wake. \
             If you are not done, continue what you were doing.";
 
-        let _ = agent.run_once_capture(continuation).await;
+        let continuation_result = agent.run_once_capture(continuation).await;
 
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {
@@ -959,6 +1139,14 @@ impl AmbientRunnerHandle {
         // Forced end
         ambient_tools::unregister_ambient_session(&ambient_session_id);
         logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
+        // Both turns errored, so the agent never got to act on its instructions
+        // (provider outage, auth failure, immediate crash). Treat the claim as
+        // unconsumed rather than dropping the scheduled work on the floor. If at
+        // least one turn ran, the agent did see the items and we let the claim
+        // stand, since re-delivering work it may have half-finished is worse.
+        if run_result.is_err() && continuation_result.is_err() {
+            restore_claimed("both cycle turns failed before the agent could act");
+        }
         let forced = AmbientCycleResult {
             summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
                 .to_string(),
