@@ -218,12 +218,14 @@ impl NotificationDispatcher {
             return;
         }
 
-        // ntfy.sh — uses SAFE body (may be publicly readable)
+        // ntfy.sh — defaults to the SAFE body, because the topic is readable
+        // by anyone who knows its name. `ntfy_detailed` opts into the short
+        // human summary, which is far more useful but names real work.
         if let Some(ref topic) = self.config.ntfy_topic {
             let client = self.client.clone();
             let url = format!("{}/{}", self.config.ntfy_server, topic);
             let title = title.to_string();
-            let body = safe_body.to_string();
+            let body = ntfy_body(self.config.ntfy_detailed, safe_body, desktop_body).to_string();
             tokio::spawn(async move {
                 if let Err(e) = send_ntfy(&client, &url, &title, &body, priority).await {
                     logging::error(&format!("ntfy notification failed: {}", e));
@@ -872,6 +874,19 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
+/// Which body ntfy should carry.
+///
+/// ntfy topics are readable by anyone who knows the name, so the default is
+/// the sanitized stats-only body. `detailed` opts into the short human
+/// summary: much more useful, but it names branches, PRs and paths.
+fn ntfy_body<'a>(detailed: bool, safe_body: &'a str, desktop_body: &'a str) -> &'a str {
+    if detailed {
+        desktop_body
+    } else {
+        safe_body
+    }
+}
+
 /// Sanitized body for potentially public channels (ntfy.sh).
 /// Only includes counts and status — no model-generated text.
 /// Longest desktop-notification body worth sending.
@@ -1241,6 +1256,40 @@ mod desktop_body_tests {
             memories_modified: 1,
             conversation: conversation.map(str::to_string),
         }
+    }
+
+    /// ntfy topics are public to anyone who knows the name, so the default
+    /// must stay on the sanitized body. A regression here silently publishes
+    /// model-generated text naming branches, PRs and paths.
+    #[test]
+    fn ntfy_defaults_to_the_sanitized_body() {
+        assert_eq!(ntfy_body(false, "SAFE", "SUMMARY"), "SAFE");
+    }
+
+    /// Opting in must actually change what is sent. Without this, the config
+    /// key reads as wired while ntfy keeps carrying the stats line, which is
+    /// exactly the inert-flag class of bug `proactive_work` already was.
+    #[test]
+    fn ntfy_detailed_opts_into_the_short_summary() {
+        assert_eq!(ntfy_body(true, "SAFE", "SUMMARY"), "SUMMARY");
+    }
+
+    /// ntfy must never receive the detailed body, whose transcript embedding
+    /// is both enormous and the most sensitive text jcode holds.
+    #[test]
+    fn ntfy_detailed_uses_the_capped_desktop_body_not_the_transcript() {
+        let huge = "SECRET_TRANSCRIPT_MARKER ".repeat(2000);
+        let t = transcript("Did the thing.", Some(&huge), 0);
+
+        let sent = ntfy_body(
+            true,
+            &format_cycle_body_safe(&t),
+            &format_cycle_body_desktop(&t),
+        )
+        .to_string();
+
+        assert!(!sent.contains("SECRET_TRANSCRIPT_MARKER"));
+        assert!(sent.len() <= DESKTOP_BODY_MAX_CHARS + 8);
     }
 
     /// The regression. The desktop channel used to receive the DETAILED body,

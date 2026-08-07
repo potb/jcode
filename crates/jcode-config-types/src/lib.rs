@@ -1353,6 +1353,14 @@ pub struct SafetyConfig {
     pub ntfy_topic: Option<String>,
     /// ntfy.sh server URL (default: https://ntfy.sh)
     pub ntfy_server: String,
+    /// Send the short human summary to ntfy instead of the stats-only body
+    /// (default: false).
+    ///
+    /// PRIVACY: ntfy.sh topics are readable by anyone who knows the topic
+    /// name, so the summary (which can name branches, PRs and file paths)
+    /// becomes readable by them too. Only enable with an unguessable topic.
+    /// The default stays on the stats-only body, which leaks nothing.
+    pub ntfy_detailed: bool,
     /// Enable desktop notifications via notify-send (default: true)
     pub desktop_notifications: bool,
     /// Enable email notifications (default: false)
@@ -1416,6 +1424,7 @@ impl Default for SafetyConfig {
         Self {
             ntfy_topic: None,
             ntfy_server: "https://ntfy.sh".to_string(),
+            ntfy_detailed: false,
             desktop_notifications: true,
             email_enabled: false,
             email_to: None,
