@@ -905,3 +905,78 @@ fn a_corrupt_inflight_record_is_survivable_and_self_clearing() {
 
     crate::config::invalidate_config_cache();
 }
+
+/// A cycle's own `schedule_ambient` request is a preference, not an override.
+///
+/// `record_cycle` writes the agent's requested wake as a `Scheduled` status
+/// before the runner computes its interval. The old guard only matched
+/// `Running | Idle`, so a cycle that requested a distant wake kept it and the
+/// computed interval was discarded. That mattered because `should_run` gates on
+/// the persisted value, not the runner's sleep: observed live, the runner
+/// logged "next cycle in 789s" while state.json said the next wake was three
+/// hours out, and the three hours won.
+#[test]
+fn an_agents_requested_wake_never_outlasts_the_budgeted_interval() {
+    use super::reconciled_next_wake;
+    let now = chrono::Utc::now();
+    let computed = now + chrono::Duration::minutes(13);
+
+    let distant_request = crate::ambient::AmbientStatus::Scheduled {
+        next_wake: now + chrono::Duration::hours(3),
+    };
+    assert_eq!(
+        reconciled_next_wake(&distant_request, computed),
+        Some(computed),
+        "a request beyond the budgeted interval is pulled forward"
+    );
+
+    // The reverse is honoured: asking to wake sooner is always allowed, since
+    // the interval is a budget ceiling and not a minimum spacing.
+    let soon = now + chrono::Duration::minutes(2);
+    let eager_request = crate::ambient::AmbientStatus::Scheduled { next_wake: soon };
+    assert_eq!(
+        reconciled_next_wake(&eager_request, computed),
+        Some(soon),
+        "a nearer request is kept"
+    );
+
+    // No request at all: the computed interval stands.
+    assert_eq!(
+        reconciled_next_wake(&crate::ambient::AmbientStatus::Idle, computed),
+        Some(computed)
+    );
+    assert_eq!(
+        reconciled_next_wake(
+            &crate::ambient::AmbientStatus::Running {
+                detail: "running agent".to_string()
+            },
+            computed
+        ),
+        Some(computed)
+    );
+}
+
+/// Disabled and Paused are not ours to reschedule.
+///
+/// Overwriting either with a `Scheduled` status would silently re-enable
+/// ambient, or clear the reason it was paused, on nothing more than a cycle
+/// having finished.
+#[test]
+fn a_disabled_or_paused_runner_is_not_rescheduled() {
+    use super::reconciled_next_wake;
+    let computed = chrono::Utc::now() + chrono::Duration::minutes(13);
+
+    assert_eq!(
+        reconciled_next_wake(&crate::ambient::AmbientStatus::Disabled, computed),
+        None
+    );
+    assert_eq!(
+        reconciled_next_wake(
+            &crate::ambient::AmbientStatus::Paused {
+                reason: "user session active".to_string()
+            },
+            computed
+        ),
+        None
+    );
+}

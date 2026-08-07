@@ -69,6 +69,29 @@ fn idle_sleep_secs(
         .unwrap_or(interval_secs)
 }
 
+/// The wake time to persist after a cycle, given what the cycle asked for.
+///
+/// A cycle can request its own next wake via `schedule_ambient`, which
+/// `record_cycle` writes as a `Scheduled` status before the runner gets here.
+/// That request is a preference, not an override: `computed` is what the
+/// resource budget actually allows, and the documented contract is that an
+/// agent asking to wake later than necessary is pulled forward.
+///
+/// Keeping the two in agreement matters beyond tidiness. `should_run` gates on
+/// the persisted value, so letting a distant request win silently reimposed
+/// that distance on the whole loop while the runner's own sleep said otherwise.
+fn reconciled_next_wake(
+    current: &AmbientStatus,
+    computed: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    match current {
+        AmbientStatus::Scheduled { next_wake } => Some((*next_wake).min(computed)),
+        AmbientStatus::Running { .. } | AmbientStatus::Idle => Some(computed),
+        // Disabled or Paused: not ours to reschedule.
+        _ => None,
+    }
+}
+
 /// The status a runner should adopt at startup, or `None` to leave it alone.
 ///
 /// A persisted `Running` status means the previous process died mid-cycle
@@ -956,16 +979,24 @@ impl AmbientRunnerHandle {
             };
             let sleep_secs = idle_sleep_secs(Utc::now(), interval.as_secs().max(30), next_due);
 
-            // Update state with scheduled wake
+            // Update state with scheduled wake.
+            //
+            // The cycle may have asked for its own next wake via
+            // `schedule_ambient`, which `record_cycle` already wrote as a
+            // `Scheduled` status. That request is a *preference*, not an
+            // override: the interval computed above is what the resource
+            // budget allows, and AMBIENT_MODE.md's stated contract is that an
+            // agent asking to wake later than necessary gets pulled forward.
+            // Taking the sooner of the two also keeps the runner's own sleep
+            // and the persisted `next_wake` in agreement, which they were not
+            // when the agent's request won: `should_run` gates on the
+            // persisted value, so a cycle that requested a distant wake
+            // silently reimposed that distance on the whole loop.
             {
+                let computed = Utc::now() + chrono::Duration::seconds(sleep_secs as i64);
                 let mut s = self.inner.state.write().await;
-                if matches!(
-                    s.status,
-                    AmbientStatus::Running { .. } | AmbientStatus::Idle
-                ) {
-                    s.status = AmbientStatus::Scheduled {
-                        next_wake: Utc::now() + chrono::Duration::seconds(sleep_secs as i64),
-                    };
+                if let Some(next_wake) = reconciled_next_wake(&s.status, computed) {
+                    s.status = AmbientStatus::Scheduled { next_wake };
                     let _ = s.save();
                 }
             }
