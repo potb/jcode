@@ -9,7 +9,7 @@
 use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
-    CycleStatus, ScheduleTarget, ScheduledItem, schedule_window,
+    CycleStatus, ScheduleTarget, ScheduledItem, cycle_significance, schedule_window,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -1070,8 +1070,28 @@ impl AmbientRunnerHandle {
                     };
                     let _ = self.inner.safety.save_transcript(&transcript);
 
-                    // Send notifications (fire-and-forget)
-                    self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    // Send notifications (fire-and-forget), but only when the
+                    // cycle earned one. Garden-only cycles are the vast
+                    // majority; pushing them to a phone trains the user to
+                    // ignore the channel, which costs the alerts that matter.
+                    let outcome = cycle_significance::CycleOutcome {
+                        significance: cycle_significance::CycleSignificance::parse(
+                            result.significance.as_deref(),
+                        ),
+                        pending_permissions: transcript.pending_permissions,
+                        did_proactive_work: result
+                            .proactive_work
+                            .as_deref()
+                            .is_some_and(|w| !w.trim().is_empty()),
+                        failed: !matches!(result.status, CycleStatus::Complete),
+                    };
+                    if cycle_significance::should_notify(&outcome) {
+                        self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    } else {
+                        logging::info(
+                            "Ambient runner: routine cycle, no notification sent",
+                        );
+                    }
 
                     // Post-cycle memory consolidation (fire-and-forget)
                     tokio::spawn(async move {
@@ -1352,6 +1372,10 @@ impl AmbientRunnerHandle {
             memories_modified: 0,
             compactions: 0,
             proactive_work: None,
+            // Left unset deliberately. This is an Incomplete cycle, and the
+            // notification decision treats a failure as notable on structure
+            // alone, so it must not be labelled routine here.
+            significance: None,
             next_schedule: None,
             started_at,
             ended_at: Utc::now(),
@@ -1436,6 +1460,7 @@ impl AmbientRunnerHandle {
                     memories_modified: 0,
                     compactions: 0,
                     proactive_work: None,
+                    significance: None,
                     next_schedule: None,
                     started_at,
                     ended_at: Utc::now(),
