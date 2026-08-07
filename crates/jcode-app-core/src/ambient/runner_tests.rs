@@ -1029,3 +1029,113 @@ async fn a_manual_trigger_is_persisted_so_the_loop_can_see_it() {
 
     crate::config::invalidate_config_cache();
 }
+
+// ---------------------------------------------------------------------------
+// Wall-clock window gating
+// ---------------------------------------------------------------------------
+
+/// The window must actually gate cycle start. Without this the pure window
+/// module can be perfectly correct while wired to nothing.
+#[test]
+fn closed_window_blocks_cycle_start() {
+    use super::may_start_cycle;
+
+    assert!(
+        may_start_cycle(true, true, true),
+        "open window and wanting to run must start a cycle"
+    );
+    assert!(
+        !may_start_cycle(true, false, true),
+        "a closed window must block a cycle even when everything else says run"
+    );
+    assert!(
+        !may_start_cycle(false, true, true),
+        "ambient disabled still blocks regardless of the window"
+    );
+    assert!(
+        !may_start_cycle(true, true, false),
+        "an open window must not force a run that was not wanted"
+    );
+}
+
+/// A closed window must park the runner near the reopening instead of polling
+/// every 30s, but a direct delivery still pulls it awake early.
+#[test]
+fn closed_window_sleeps_until_open() {
+    use super::closed_window_sleep_secs;
+    use chrono::{Duration, Local, Utc};
+
+    let now_utc = Utc::now();
+    let now_local = Local::now();
+
+    // Reopens in 10 minutes, nothing else pending → sleep ~10 minutes.
+    let secs = closed_window_sleep_secs(
+        now_utc,
+        now_local,
+        Some(now_local + Duration::minutes(10)),
+        None,
+    );
+    assert!(
+        (590..=600).contains(&secs),
+        "expected ~600s until the window opens, got {secs}"
+    );
+
+    // A direct delivery inside the closed period still wins: those bypass the
+    // window because the user is sitting in that session.
+    let secs = closed_window_sleep_secs(
+        now_utc,
+        now_local,
+        Some(now_local + Duration::minutes(10)),
+        Some(now_utc + Duration::minutes(2)),
+    );
+    assert!(
+        (110..=120).contains(&secs),
+        "a direct delivery must shorten the closed-window sleep, got {secs}"
+    );
+
+    // Far-off reopening is capped so config edits and manual triggers are seen.
+    let secs = closed_window_sleep_secs(
+        now_utc,
+        now_local,
+        Some(now_local + Duration::days(2)),
+        None,
+    );
+    assert_eq!(
+        secs, 3600,
+        "a distant reopening must clamp to the hourly re-check"
+    );
+}
+
+/// An explicit `jcode ambient trigger` must run even at 3am on a Sunday.
+///
+/// The window exists to stop the agent waking ITSELF outside working hours.
+/// A human asking for a cycle right now is not that, and refusing them
+/// silently is the "reported success and did nothing" failure the trigger path
+/// already had to fix once.
+#[tokio::test]
+async fn manual_trigger_overrides_closed_window() {
+    use crate::safety::SafetySystem;
+    use std::sync::Arc;
+
+    let handle = AmbientRunnerHandle::new(Arc::new(SafetySystem::new()));
+
+    assert!(
+        !*handle.inner.manual_override.read().await,
+        "override must start clear, or windows would never apply"
+    );
+
+    handle.trigger().await;
+
+    assert!(
+        *handle.inner.manual_override.read().await,
+        "an explicit trigger must set the one-shot window bypass"
+    );
+
+    // The bypass must actually open a closed window.
+    let window_open = false;
+    let manual_override = *handle.inner.manual_override.read().await;
+    assert!(
+        super::may_start_cycle(true, window_open || manual_override, true),
+        "a triggered cycle must start despite the window being closed"
+    );
+}

@@ -129,6 +129,8 @@ struct EndCycleInput {
     #[serde(default)]
     proactive_work: Option<String>,
     #[serde(default)]
+    significance: Option<String>,
+    #[serde(default)]
     next_schedule: Option<NextScheduleInput>,
 }
 
@@ -177,6 +179,11 @@ impl Tool for EndAmbientCycleTool {
                     "type": "string",
                     "description": "Description of proactive code changes, if any"
                 },
+                "significance": {
+                    "type": "string",
+                    "enum": ["routine", "notable"],
+                    "description": "Does the user need to see this cycle? Use \"routine\" for garden/maintenance cycles where nothing changed for them (this sends NO notification, which is the default). Use \"notable\" only when they would want to know: you are blocked on them, you found something needing a decision, or you finished work they were waiting on. Permission requests, failures and code changes always notify regardless."
+                },
                 "next_schedule": {
                     "type": "object",
                     "description": "When to wake next and what to do",
@@ -223,6 +230,7 @@ impl Tool for EndAmbientCycleTool {
             memories_modified: params.memories_modified,
             compactions: params.compactions,
             proactive_work: params.proactive_work,
+            significance: params.significance,
             next_schedule: next_schedule.clone(),
             started_at: now, // approximate; the runner will override if it tracks start time
             ended_at: now,

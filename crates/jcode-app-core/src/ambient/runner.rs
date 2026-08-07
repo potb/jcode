@@ -9,7 +9,7 @@
 use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
-    CycleStatus, ScheduleTarget, ScheduledItem,
+    CycleStatus, ScheduleTarget, ScheduledItem, cycle_significance, schedule_window,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -21,12 +21,77 @@ use crate::safety::SafetySystem;
 use crate::session::Session;
 use crate::tool;
 use crate::tool::ambient as ambient_tools;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
+
+/// Ceiling on how long a closed window may park the runner.
+///
+/// A window that opens on Monday morning is legitimately days away, but
+/// sleeping that whole span would ignore a config edit, a manual trigger or a
+/// clock change until it elapsed. Waking hourly to re-evaluate costs nothing
+/// and keeps the runner responsive to the world changing underneath it.
+const MAX_CLOSED_WINDOW_SLEEP_SECS: u64 = 3600;
+
+/// The windows configured for ambient, warning once about unparseable specs.
+///
+/// A typo must not silently widen an allow-list into "always on", so bad
+/// entries are reported rather than dropped in silence.
+fn configured_windows() -> Vec<schedule_window::ScheduleWindow> {
+    let specs = config().ambient.active_windows.clone();
+    let (windows, bad) = schedule_window::parse_windows(&specs);
+    if !bad.is_empty() {
+        logging::warn(&format!(
+            "Ambient: ignoring unparseable active_windows entries: {}. \
+             Expected e.g. \"weekdays 09:00-19:00\".",
+            bad.join(", ")
+        ));
+    }
+    windows
+}
+
+/// Evaluate the configured windows against the current local time.
+///
+/// Fails OPEN: when nothing is configured, or every entry is invalid, ambient
+/// runs as it always did. A time constraint the user never expressed must not
+/// be invented, and a config typo must not silently disable ambient outright.
+fn current_window_state() -> schedule_window::WindowState {
+    let windows = configured_windows();
+    schedule_window::evaluate(&windows, &Local::now())
+}
+
+/// Whether an ambient cycle may start right now.
+///
+/// Extracted from the idle loop so the window constraint is testable on its
+/// own. Inlined in the loop it was reachable only by running the daemon across
+/// a real weekend, which is precisely how a constraint ends up wired to
+/// nothing while its own unit tests stay green.
+fn may_start_cycle(ambient_allowed: bool, window_open: bool, wants_to_run: bool) -> bool {
+    ambient_allowed && window_open && wants_to_run
+}
+
+/// How long to idle when a wall-clock window is closed.
+///
+/// An ambient deadline inside the closed period must NOT shorten this: it
+/// cannot be serviced before the window opens, so honouring it would spin the
+/// loop. A direct-delivery deadline still counts, since those go to a session
+/// the user is actively in and are not subject to the window.
+fn closed_window_sleep_secs(
+    now_utc: DateTime<Utc>,
+    now_local: DateTime<Local>,
+    next_open: Option<DateTime<Local>>,
+    next_direct_due: Option<DateTime<Utc>>,
+) -> u64 {
+    let until_open = schedule_window::sleep_secs_until_open(
+        &now_local,
+        next_open,
+        MAX_CLOSED_WINDOW_SLEEP_SECS,
+    );
+    idle_sleep_secs(now_utc, until_open, next_direct_due)
+}
 
 /// The soonest of two optional deadlines.
 ///
@@ -153,6 +218,14 @@ struct AmbientRunnerInner {
     /// Soft interrupt queue for the currently-running ambient agent (if any).
     /// Telegram replies push messages here so they arrive mid-cycle.
     active_cycle_queue: RwLock<Option<SoftInterruptQueue>>,
+    /// A human asked for a cycle right now, so wall-clock windows do not apply.
+    ///
+    /// `active_windows` exists to stop the agent waking ITSELF at night or on
+    /// weekends. Someone typing `jcode ambient trigger` at 2am is not the
+    /// scheduled work that constraint holds back, and silently ignoring them
+    /// is the same "reported success and did nothing" failure the trigger path
+    /// already had to fix once.
+    manual_override: RwLock<bool>,
 }
 
 impl AmbientRunnerHandle {
@@ -169,6 +242,7 @@ impl AmbientRunnerHandle {
                 notifier: NotificationDispatcher::new(),
                 active_user_sessions: RwLock::new(0),
                 active_cycle_queue: RwLock::new(None),
+                manual_override: RwLock::new(false),
             }),
         }
     }
@@ -251,6 +325,11 @@ impl AmbientRunnerHandle {
                     ));
                 }
             }
+        }
+        // Bypass wall-clock windows for this cycle only.
+        {
+            let mut over = self.inner.manual_override.write().await;
+            *over = true;
         }
         self.inner.wake_notify.notify_one();
     }
@@ -361,9 +440,17 @@ impl AmbientRunnerHandle {
             AmbientStatus::Disabled => "disabled".to_string(),
         };
 
+        // Surface the wall-clock window so "why is it not running?" is
+        // answerable from `ambient:status` rather than only from the logs.
+        let windows = configured_windows();
+        let window_state = schedule_window::evaluate(&windows, &Local::now());
+
         serde_json::json!({
             "enabled": config().ambient.enabled,
             "status": status_str,
+            "active_windows": schedule_window::describe(&windows),
+            "window_open": window_state.is_open(),
+            "window_next_open": window_state.next_open_at().map(|t| t.to_rfc3339()),
             "loop_running": running,
             "total_cycles": state.total_cycles,
             "last_run": state.last_run.map(|t| t.to_rfc3339()),
@@ -735,6 +822,26 @@ impl AmbientRunnerHandle {
             let ambient_allowed =
                 ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
 
+            // Wall-clock windows: the user's "not at night, not on weekends".
+            //
+            // This gates ambient *cycles* only. Direct deliveries into a
+            // session the user is sitting in are excluded on purpose: the user
+            // is present by definition, so refusing to hand them their own
+            // scheduled item would be the constraint working against them.
+            let window_state = current_window_state();
+            // A pending manual trigger opens the window for this pass. Read it
+            // without consuming: it is only spent once a cycle actually starts,
+            // so a trigger arriving while a previous cycle still holds the lock
+            // is not silently swallowed.
+            let manual_override = *self.inner.manual_override.read().await;
+            let window_open = window_state.is_open() || manual_override;
+            if ambient_allowed && !window_open {
+                logging::info(&format!(
+                    "Ambient runner: outside active windows ({}), holding",
+                    schedule_window::describe(&configured_windows())
+                ));
+            }
+
             if ambient_allowed {
                 // Update scheduler's user-active state
                 let active_sessions = *self.inner.active_user_sessions.read().await;
@@ -802,8 +909,11 @@ impl AmbientRunnerHandle {
                         }
                         // Also run if there are pending email reply directives
                         (
-                            ambient_allowed
-                                && (mgr.should_run() || ambient::has_pending_directives()),
+                            may_start_cycle(
+                                ambient_allowed,
+                                window_open,
+                                mgr.should_run() || ambient::has_pending_directives(),
+                            ),
                             ready_direct_items,
                             next_direct_due,
                             next_ambient_due,
@@ -832,7 +942,23 @@ impl AmbientRunnerHandle {
                 // something else (a cycle already running, ambient paused)
                 // blocks the run. Re-arming a ~1s timer for it would spin the
                 // loop until that condition clears.
-                let sleep_secs = if ambient_allowed {
+                let sleep_secs = if ambient_allowed && !window_open {
+                    // Closed window: sleep until it opens rather than polling.
+                    // An ambient deadline falling inside the closed period must
+                    // NOT shorten this; it cannot be serviced before the window
+                    // opens, and honouring it would spin the loop. The item is
+                    // not lost, it simply runs when the window opens.
+                    //
+                    // A direct-delivery deadline still counts, since those are
+                    // handed to a session the user is actively in and are not
+                    // subject to the window.
+                    closed_window_sleep_secs(
+                        Utc::now(),
+                        Local::now(),
+                        window_state.next_open_at(),
+                        next_direct_due,
+                    )
+                } else if ambient_allowed {
                     let interval = scheduler
                         .calculate_interval(None)
                         .as_secs()
@@ -877,6 +1003,16 @@ impl AmbientRunnerHandle {
                     continue;
                 }
             };
+
+            // The manual override is spent here, not at read time: a cycle is
+            // genuinely starting, so the one-shot bypass has done its job.
+            // Clearing it earlier would drop a trigger that arrived while the
+            // lock was held; clearing it never would leave windows disabled
+            // for good after a single 2am trigger.
+            if manual_override {
+                let mut over = self.inner.manual_override.write().await;
+                *over = false;
+            }
 
             // Run a cycle
             logging::info("Ambient runner: starting ambient cycle");
@@ -934,8 +1070,39 @@ impl AmbientRunnerHandle {
                     };
                     let _ = self.inner.safety.save_transcript(&transcript);
 
-                    // Send notifications (fire-and-forget)
-                    self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    // Send notifications (fire-and-forget), but only when the
+                    // cycle earned one. Garden-only cycles are the vast
+                    // majority; pushing them to a phone trains the user to
+                    // ignore the channel, which costs the alerts that matter.
+                    let outcome = cycle_significance::CycleOutcome {
+                        significance: cycle_significance::CycleSignificance::parse(
+                            result.significance.as_deref(),
+                        ),
+                        pending_permissions: transcript.pending_permissions,
+                        did_proactive_work: result
+                            .proactive_work
+                            .as_deref()
+                            .is_some_and(|w| !w.trim().is_empty()),
+                        failed: !matches!(result.status, CycleStatus::Complete),
+                    };
+                    if cycle_significance::should_notify(&outcome) {
+                        self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    } else {
+                        // Name WHICH arm silenced it. "routine" (the agent
+                        // said so) and "unspecified" (it never set the field)
+                        // are operationally identical but mean very different
+                        // things: the second says the prompt is not landing,
+                        // which is invisible if both log the same line.
+                        logging::info(&format!(
+                            "Ambient runner: {} cycle, no notification sent",
+                            match outcome.significance {
+                                cycle_significance::CycleSignificance::Routine => "routine",
+                                cycle_significance::CycleSignificance::Notable => "notable",
+                                cycle_significance::CycleSignificance::Unspecified =>
+                                    "unspecified-significance",
+                            }
+                        ));
+                    }
 
                     // Post-cycle memory consolidation (fire-and-forget)
                     tokio::spawn(async move {
@@ -1216,6 +1383,10 @@ impl AmbientRunnerHandle {
             memories_modified: 0,
             compactions: 0,
             proactive_work: None,
+            // Left unset deliberately. This is an Incomplete cycle, and the
+            // notification decision treats a failure as notable on structure
+            // alone, so it must not be labelled routine here.
+            significance: None,
             next_schedule: None,
             started_at,
             ended_at: Utc::now(),
@@ -1300,6 +1471,7 @@ impl AmbientRunnerHandle {
                     memories_modified: 0,
                     compactions: 0,
                     proactive_work: None,
+                    significance: None,
                     next_schedule: None,
                     started_at,
                     ended_at: Utc::now(),

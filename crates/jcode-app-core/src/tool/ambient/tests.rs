@@ -16,6 +16,7 @@ fn test_cycle_result_store_and_take() {
         memories_modified: 1,
         compactions: 0,
         proactive_work: None,
+        significance: None,
         next_schedule: None,
         started_at: Utc::now(),
         ended_at: Utc::now(),

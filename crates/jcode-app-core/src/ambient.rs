@@ -10,6 +10,12 @@ mod paths;
 mod persistence;
 mod prompt;
 pub mod runner;
+pub mod cycle_significance;
+#[cfg(test)]
+mod cycle_significance_tests;
+pub mod schedule_window;
+#[cfg(test)]
+mod schedule_window_tests;
 pub mod scheduler;
 
 pub use directives::{
@@ -151,6 +157,11 @@ pub struct AmbientCycleResult {
     pub memories_modified: u32,
     pub compactions: u32,
     pub proactive_work: Option<String>,
+    /// The agent's own claim about whether the user needs to see this cycle
+    /// ("routine" / "notable"). Absent when it did not say; see
+    /// `cycle_significance` for how that is resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significance: Option<String>,
     pub next_schedule: Option<ScheduleRequest>,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,

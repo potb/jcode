@@ -232,6 +232,7 @@ fn test_ambient_state_record_cycle() {
         memories_modified: 3,
         compactions: 1,
         proactive_work: None,
+        significance: None,
         next_schedule: None,
         started_at: Utc::now() - Duration::seconds(30),
         ended_at: Utc::now(),
@@ -256,6 +257,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
         memories_modified: 0,
         compactions: 0,
         proactive_work: None,
+        significance: None,
         next_schedule: Some(ScheduleRequest {
             wake_in_minutes: Some(15),
             wake_at: None,

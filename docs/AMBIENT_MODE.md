@@ -603,6 +603,107 @@ graph TB
     style FINAL fill:#e3f2fd
 ```
 
+### Active Windows (wall-clock constraints)
+
+Pace control answers *how often*; windows answer *when at all*. They are
+independent: a window says the agent may not run on Sunday, and headroom
+still decides how fast it runs on Tuesday.
+
+```toml
+[ambient]
+# Weekdays, business hours only. Nothing at night, nothing on weekends.
+active_windows = ["weekdays 09:00-19:00"]
+```
+
+**Allowed ranges, not forbidden ones.** An allow-list fails closed: a range you
+forgot to write is quiet time. A deny-list fails open, and the rule you forgot
+to write is the machine waking you at 3am.
+
+**Empty means unrestricted.** `active_windows = []` (the default) runs exactly
+as before, so existing configs are unaffected. Empty could not mean "never run"
+without silently disabling ambient for everyone who never asked for a
+constraint.
+
+Day specs: `mon`, `mon-fri`, `mon,wed,fri`, `weekdays`, `weekends`, `daily`.
+Day ranges may wrap the week (`fri-mon`). Times are `HH:MM-HH:MM`, start
+inclusive, end exclusive, with `24:00` accepted for end-of-day.
+
+A range whose end is at or before its start wraps past midnight, and the tail
+belongs to the day the window *opened*:
+
+```toml
+# Friday 22:00 through Saturday 02:00. Saturday itself stays quiet.
+active_windows = ["fri 22:00-02:00"]
+```
+
+Multiple windows union:
+
+```toml
+active_windows = ["weekdays 09:00-19:00", "sat 10:00-14:00"]
+```
+
+Semantics worth knowing:
+
+- **Local time.** Windows are wall-clock statements about your week, so they
+  follow you across DST instead of drifting an hour twice a year.
+- **Queued work is deferred, never dropped.** An item coming due inside a
+  closed window runs when the window next opens.
+- **Direct deliveries are exempt.** An item targeted at a session you are
+  sitting in is handed over regardless: you are present by definition, so
+  withholding it would be the constraint working against you.
+- **Sleeps until reopening**, re-checking hourly, rather than polling every
+  30s all weekend. The hourly ceiling keeps config edits and manual triggers
+  from being ignored for days.
+- **Fails open on a bad spec.** Unparseable entries are logged and skipped; if
+  none survive, ambient runs unrestricted rather than being disabled by a typo.
+- **`jcode ambient trigger` overrides the window.** An explicit human request
+  is not the scheduled work the constraint exists to hold back.
+
+### Notifications (what reaches your phone)
+
+Windows decide *when* the agent runs; this decides *when it interrupts you*.
+Both exist for the same reason: an agent that pages you for nothing is one
+you will mute, and a muted channel costs every future alert that mattered.
+
+Configure the channel under `[safety]`:
+
+```toml
+[safety]
+ntfy_topic = "jcode-<random>"      # ntfy.sh topics are PUBLIC to anyone who knows the name
+ntfy_server = "https://ntfy.sh"
+ntfy_detailed = true               # send the real summary, not just counts (default: false)
+```
+
+**Routine cycles are silent.** Most cycles are gardening: queue empty,
+memories healthy, nothing changed for you. Those send nothing.
+
+The decision is NOT a threshold on counts, because counts cannot express it.
+From real transcripts: a garden-only cycle reported `memories_modified = 2`,
+while the cycle announcing "#763 and #764 are both MERGED" reported `1`.
+Gardening *is* memory work, so the number says nothing about whether a human
+cares. Only the agent knows, so it declares it on `end_ambient_cycle`:
+
+| `significance` | Meaning | Notifies |
+|---|---|---|
+| `"routine"` | Gardening, memory upkeep, queue checks, "nothing to do" | No |
+| `"notable"` | Blocked on you, needs a decision, finished work you awaited | Yes |
+| *unset* | Agent did not say | No |
+
+Unset is silent because garden cycles are the majority and none of them
+declare anything, so notifying-on-unset would reproduce exactly the noise this
+removes. That default is only safe because three cases notify on **structure
+alone**, without the agent's cooperation:
+
+- **Pending permission requests** - the entire point of the channel.
+- **A failed cycle** - it may have died before reaching its own reporting
+  code, so its label (or silence) proves nothing.
+- **Proactive code changes** - code changed; never routine.
+
+So a cycle cannot mute a permission request or a crash by calling itself
+routine. When debugging a missing notification, check the log for
+`routine cycle, no notification sent` - that line means the gate decided,
+as distinct from a broken channel.
+
 ### Agent-Initiated Scheduling
 
 The ambient agent has a `schedule_ambient` tool to request its next wake-up:

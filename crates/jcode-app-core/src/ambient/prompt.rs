@@ -508,6 +508,19 @@ pub fn build_ambient_system_prompt(
          When done, you MUST call end_ambient_cycle with a summary of \
          everything you did, including compaction count. Always schedule \
          your next wake time with context for what you plan to do next.\n\n\
+         Set `significance` on every end_ambient_cycle call, and default to \
+         \"routine\". It decides whether the user's PHONE buzzes.\n\
+         - \"routine\": gardening, memory upkeep, queue checks, \"nothing to \
+         do\", re-verifying something already known. Sends NO notification. \
+         This is most cycles, and touching memories does not change that: \
+         gardening IS memory work.\n\
+         - \"notable\": ONLY when the user would want their phone to buzz. \
+         You are blocked on them, something needs their decision, or you \
+         finished work they were waiting on. If in doubt, choose routine: \
+         a missed notification costs one cycle of delay, whereas noise \
+         trains them to ignore the channel and costs every future alert.\n\
+         Permission requests, failures and code changes always notify on \
+         their own, so you never need \"notable\" to reach the user for those.\n\n\
          ## Messaging Check-ins\n\n\
          You have a `send_message` tool. Use it to keep the user informed \
          about what you're doing. Send a brief message when you start a cycle \
