@@ -455,3 +455,131 @@ fn test_scheduled_queue_items_accessor() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "s1");
 }
+
+/// With auto-approve on, `request_permission` is a no-op that always says yes,
+/// so the agent's own judgement is the ONLY remaining check on destructive
+/// work. That makes this prompt section a safety control, not documentation:
+/// if it silently stops being emitted, the agent keeps calling
+/// request_permission believing a human might say no, and nothing ever
+/// refuses. Assert it appears exactly when the flag is on.
+#[test]
+fn auto_approve_prompt_warns_that_no_human_will_answer() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_flag = std::env::var_os("JCODE_AMBIENT_AUTO_APPROVE");
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
+
+    let state = AmbientState::default();
+    let queue = vec![];
+    let health = MemoryGraphHealth::default();
+    let sessions = vec![];
+    let feedback: Vec<String> = vec![];
+    let budget = ResourceBudget {
+        provider: "anthropic-oauth".into(),
+        tokens_remaining_desc: "unknown".into(),
+        window_resets_desc: "unknown".into(),
+        user_usage_rate_desc: "0 tokens/min".into(),
+        cycle_budget_desc: "stay under 50k tokens".into(),
+    };
+
+    jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "true");
+    crate::config::invalidate_config_cache();
+    let on =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+
+    assert!(
+        on.contains("## Permissions"),
+        "auto-approve must add a Permissions section"
+    );
+    assert!(
+        on.contains("nobody is on the other end"),
+        "the agent must be told its requests reach no human, or it will treat \
+         request_permission as a safety net that does not exist"
+    );
+    for hazard in ["force-push", "merge", "destructive"] {
+        assert!(
+            on.contains(hazard),
+            "the irreversible-action warning must still name '{hazard}'"
+        );
+    }
+
+    jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "false");
+    crate::config::invalidate_config_cache();
+    let off =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+    assert!(
+        !off.contains("nobody is on the other end"),
+        "with approvals off a human DOES answer; telling the agent otherwise \
+         would wrongly discourage it from asking"
+    );
+
+    match prev_flag {
+        Some(v) => jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", v),
+        None => jcode_base::env::remove_var("JCODE_AMBIENT_AUTO_APPROVE"),
+    }
+    match prev_home {
+        Some(v) => jcode_base::env::set_var("JCODE_HOME", v),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// `ambient.proactive_work` must actually reach the prompt.
+///
+/// It previously did not. The runner read the field nowhere, and the prompt
+/// hardcoded "only if enabled" with nothing ever substituting whether it was:
+/// a config knob with no consumer. The agent was told to evaluate a condition
+/// it had no access to, so it stayed cautious and mostly gardened, which is
+/// what "the agent does not do much" looked like from outside.
+#[test]
+fn proactive_work_setting_reaches_the_prompt() {
+    fn prompt_with(enabled: bool) -> String {
+        let _guard = jcode_base::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        jcode_base::env::set_var("JCODE_HOME", temp.path());
+        jcode_base::env::set_var("JCODE_AMBIENT_PROACTIVE", if enabled { "true" } else { "false" });
+        jcode_base::config::invalidate_config_cache();
+
+        let budget = ResourceBudget {
+            provider: "anthropic-oauth".into(),
+            tokens_remaining_desc: "unknown".into(),
+            window_resets_desc: "unknown".into(),
+            user_usage_rate_desc: "0 tokens/min".into(),
+            cycle_budget_desc: "stay under 50k tokens".into(),
+        };
+        let out = build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &budget,
+            0,
+        );
+        jcode_base::env::remove_var("JCODE_AMBIENT_PROACTIVE");
+        jcode_base::config::invalidate_config_cache();
+        out
+    }
+
+    let enabled = prompt_with(true);
+    assert!(
+        enabled.contains("is ENABLED"),
+        "an enabled setting must be stated in the prompt"
+    );
+    assert!(
+        !enabled.contains("garden-only"),
+        "an enabled cycle must not be told it is garden-only"
+    );
+
+    let disabled = prompt_with(false);
+    assert!(
+        disabled.contains("is DISABLED") && disabled.contains("garden-only"),
+        "a disabled setting must be stated too, so the agent stops guessing"
+    );
+
+    assert_ne!(
+        enabled, disabled,
+        "the flag must change the prompt; identical output means it is inert"
+    );
+}

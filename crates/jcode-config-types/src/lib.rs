@@ -1275,6 +1275,16 @@ pub struct AmbientConfig {
     pub work_branch_prefix: String,
     /// Show ambient cycle in a terminal window (default: true)
     pub visible: bool,
+    /// Auto-approve `request_permission` calls made by ambient cycles instead of
+    /// queueing them for a human (default: false).
+    ///
+    /// A queued request only resolves if you are watching a channel that can
+    /// carry an answer back. With no such channel the cycle stalls and the
+    /// request is eventually expired, so the work silently never happens.
+    /// Turning this on trades that failure mode for trusting the ambient agent
+    /// with whatever its initiative scope allows. Approvals are still recorded
+    /// in the decision history with `via = "ambient_auto_approve"`.
+    pub auto_approve_permissions: bool,
 }
 
 impl Default for AmbientConfig {
@@ -1291,6 +1301,7 @@ impl Default for AmbientConfig {
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
+            auto_approve_permissions: false,
         }
     }
 }
@@ -1342,6 +1353,14 @@ pub struct SafetyConfig {
     pub ntfy_topic: Option<String>,
     /// ntfy.sh server URL (default: https://ntfy.sh)
     pub ntfy_server: String,
+    /// Send the short human summary to ntfy instead of the stats-only body
+    /// (default: false).
+    ///
+    /// PRIVACY: ntfy.sh topics are readable by anyone who knows the topic
+    /// name, so the summary (which can name branches, PRs and file paths)
+    /// becomes readable by them too. Only enable with an unguessable topic.
+    /// The default stays on the stats-only body, which leaks nothing.
+    pub ntfy_detailed: bool,
     /// Enable desktop notifications via notify-send (default: true)
     pub desktop_notifications: bool,
     /// Enable email notifications (default: false)
@@ -1405,6 +1424,7 @@ impl Default for SafetyConfig {
         Self {
             ntfy_topic: None,
             ntfy_server: "https://ntfy.sh".to_string(),
+            ntfy_detailed: false,
             desktop_notifications: true,
             email_enabled: false,
             email_to: None,

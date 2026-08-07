@@ -126,6 +126,7 @@ impl NotificationDispatcher {
         );
         let safe_body = format_cycle_body_safe(transcript);
         let detailed_body = format_cycle_body_detailed(transcript);
+        let desktop_body = format_cycle_body_desktop(transcript);
 
         let priority = if transcript.pending_permissions > 0 {
             Priority::High
@@ -137,6 +138,7 @@ impl NotificationDispatcher {
             &title,
             &safe_body,
             &detailed_body,
+            &desktop_body,
             priority,
             Some(&transcript.session_id),
         );
@@ -163,6 +165,8 @@ impl NotificationDispatcher {
             &title,
             &safe_body,
             &detailed_body,
+            // Already a few lines, and it is the case the user must act on.
+            &detailed_body,
             Priority::High,
             Some(request_id),
             Some(&email_html),
@@ -172,13 +176,15 @@ impl NotificationDispatcher {
     /// Send through all configured channels (fire-and-forget).
     ///
     /// `safe_body` is sanitized (no secrets) — used for ntfy (potentially public).
-    /// `detailed_body` includes full info — used for email and desktop (private channels).
+    /// `detailed_body` includes full info — used for email (private channel).
+    /// `desktop_body` is short enough to survive a notification daemon's truncation.
     /// `cycle_id` is embedded as Message-ID in emails for reply tracking.
     fn send_all(
         &self,
         title: &str,
         safe_body: &str,
         detailed_body: &str,
+        desktop_body: &str,
         priority: Priority,
         cycle_id: Option<&str>,
     ) {
@@ -186,6 +192,7 @@ impl NotificationDispatcher {
             title,
             safe_body,
             detailed_body,
+            desktop_body,
             priority,
             cycle_id,
             None,
@@ -200,6 +207,7 @@ impl NotificationDispatcher {
         title: &str,
         safe_body: &str,
         detailed_body: &str,
+        desktop_body: &str,
         priority: Priority,
         cycle_id: Option<&str>,
         email_html_override: Option<&str>,
@@ -210,12 +218,14 @@ impl NotificationDispatcher {
             return;
         }
 
-        // ntfy.sh — uses SAFE body (may be publicly readable)
+        // ntfy.sh — defaults to the SAFE body, because the topic is readable
+        // by anyone who knows its name. `ntfy_detailed` opts into the short
+        // human summary, which is far more useful but names real work.
         if let Some(ref topic) = self.config.ntfy_topic {
             let client = self.client.clone();
             let url = format!("{}/{}", self.config.ntfy_server, topic);
             let title = title.to_string();
-            let body = safe_body.to_string();
+            let body = ntfy_body(self.config.ntfy_detailed, safe_body, desktop_body).to_string();
             tokio::spawn(async move {
                 if let Err(e) = send_ntfy(&client, &url, &title, &body, priority).await {
                     logging::error(&format!("ntfy notification failed: {}", e));
@@ -223,10 +233,11 @@ impl NotificationDispatcher {
             });
         }
 
-        // Desktop notification — uses DETAILED body (local machine, private)
+        // Desktop notification — uses the SHORT body. Notification daemons
+        // truncate rather than scroll, so a long body hides its own point.
         if self.config.desktop_notifications {
             let title = title.to_string();
-            let body = detailed_body.to_string();
+            let body = desktop_body.to_string();
             let urgency = match priority {
                 Priority::Default => "normal",
                 Priority::High | Priority::Urgent => "critical",
@@ -863,8 +874,83 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
+/// Which body ntfy should carry.
+///
+/// ntfy topics are readable by anyone who knows the name, so the default is
+/// the sanitized stats-only body. `detailed` opts into the short human
+/// summary: much more useful, but it names branches, PRs and paths.
+fn ntfy_body<'a>(detailed: bool, safe_body: &'a str, desktop_body: &'a str) -> &'a str {
+    if detailed {
+        desktop_body
+    } else {
+        safe_body
+    }
+}
+
 /// Sanitized body for potentially public channels (ntfy.sh).
 /// Only includes counts and status — no model-generated text.
+/// Longest desktop-notification body worth sending.
+///
+/// Notification daemons truncate rather than scroll, so anything past a short
+/// prefix is not "extra detail the user can scroll to", it is invisible. The
+/// previous behaviour passed the DETAILED body here, which embeds the full
+/// conversation transcript: a measured 20.8 KB into a dunst popup that shows a
+/// few lines. The one thing the user actually needed from it, whether a cycle
+/// is blocked on them, sat thousands of characters past the cut.
+const DESKTOP_BODY_MAX_CHARS: usize = 320;
+
+/// A glanceable cycle summary for a desktop popup.
+///
+/// The agent's own summary opens with what it did and why, so the first
+/// paragraph carries the useful signal; the rest is reasoning that belongs in
+/// the transcript. A pending-permission count is prepended because that is the
+/// case where the user must act, and it must survive truncation.
+fn format_cycle_body_desktop(transcript: &AmbientTranscript) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if transcript.pending_permissions > 0 {
+        parts.push(format!(
+            "\u{26a0} {} permission request(s) pending",
+            transcript.pending_permissions
+        ));
+    }
+
+    // First non-empty paragraph of the summary: the agent leads with its
+    // conclusion, so this is the sentence worth surfacing.
+    if let Some(summary) = transcript.summary.as_ref() {
+        if let Some(paragraph) = summary
+            .split("\n\n")
+            .map(str::trim)
+            .find(|p| !p.is_empty())
+        {
+            parts.push(truncate_on_char_boundary(paragraph, DESKTOP_BODY_MAX_CHARS));
+        }
+    }
+
+    if parts.is_empty() {
+        parts.push(format!("Status: {:?}", transcript.status));
+    }
+
+    parts.join("\n\n")
+}
+
+/// Truncate to at most `max` characters, cutting at a character boundary and
+/// marking the elision so a clipped body is not mistaken for a complete one.
+fn truncate_on_char_boundary(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    // Prefer breaking at the last word so the cut does not land mid-token.
+    if let Some(idx) = out.rfind(char::is_whitespace) {
+        if idx >= max / 2 {
+            out.truncate(idx);
+        }
+    }
+    out.push('\u{2026}');
+    out
+}
+
 fn format_cycle_body_safe(transcript: &AmbientTranscript) -> String {
     let mut lines = Vec::new();
 
@@ -1148,5 +1234,146 @@ mod tests {
         let decoded: MacosNotificationEnvelope =
             serde_json::from_slice(&encoded).expect("decode envelope");
         assert_eq!(decoded, envelope);
+    }
+}
+
+#[cfg(test)]
+mod desktop_body_tests {
+    use super::*;
+
+    fn transcript(summary: &str, conversation: Option<&str>, pending: usize) -> AmbientTranscript {
+        AmbientTranscript {
+            session_id: "test_desktop".to_string(),
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+            status: crate::safety::TranscriptStatus::Complete,
+            provider: "claude".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            actions: Vec::new(),
+            pending_permissions: pending,
+            summary: Some(summary.to_string()),
+            compactions: 0,
+            memories_modified: 1,
+            conversation: conversation.map(str::to_string),
+        }
+    }
+
+    /// ntfy topics are public to anyone who knows the name, so the default
+    /// must stay on the sanitized body. A regression here silently publishes
+    /// model-generated text naming branches, PRs and paths.
+    #[test]
+    fn ntfy_defaults_to_the_sanitized_body() {
+        assert_eq!(ntfy_body(false, "SAFE", "SUMMARY"), "SAFE");
+    }
+
+    /// Opting in must actually change what is sent. Without this, the config
+    /// key reads as wired while ntfy keeps carrying the stats line, which is
+    /// exactly the inert-flag class of bug `proactive_work` already was.
+    #[test]
+    fn ntfy_detailed_opts_into_the_short_summary() {
+        assert_eq!(ntfy_body(true, "SAFE", "SUMMARY"), "SUMMARY");
+    }
+
+    /// ntfy must never receive the detailed body, whose transcript embedding
+    /// is both enormous and the most sensitive text jcode holds.
+    #[test]
+    fn ntfy_detailed_uses_the_capped_desktop_body_not_the_transcript() {
+        let huge = "SECRET_TRANSCRIPT_MARKER ".repeat(2000);
+        let t = transcript("Did the thing.", Some(&huge), 0);
+
+        let sent = ntfy_body(
+            true,
+            &format_cycle_body_safe(&t),
+            &format_cycle_body_desktop(&t),
+        )
+        .to_string();
+
+        assert!(!sent.contains("SECRET_TRANSCRIPT_MARKER"));
+        assert!(sent.len() <= DESKTOP_BODY_MAX_CHARS + 8);
+    }
+
+    /// The regression. The desktop channel used to receive the DETAILED body,
+    /// which embeds the whole conversation transcript: measured at 20.8 KB on a
+    /// real cycle. Notification daemons truncate rather than scroll, so the
+    /// user saw an arbitrary opening fragment and nothing else.
+    #[test]
+    fn the_desktop_body_never_carries_the_conversation_transcript() {
+        let huge = "SECRET_TRANSCRIPT_MARKER ".repeat(2000);
+        let t = transcript("Did the thing.", Some(&huge), 0);
+
+        let body = format_cycle_body_desktop(&t);
+
+        assert!(
+            !body.contains("SECRET_TRANSCRIPT_MARKER"),
+            "conversation must not reach a desktop popup"
+        );
+        assert!(
+            body.chars().count() <= DESKTOP_BODY_MAX_CHARS + 64,
+            "body was {} chars",
+            body.chars().count()
+        );
+    }
+
+    /// What the user actually needs: the agent's own conclusion, not a stats
+    /// line. The "safe" body reports only counts, which is why a blocked cycle
+    /// was indistinguishable from a productive one.
+    #[test]
+    fn the_desktop_body_leads_with_the_agents_conclusion() {
+        let t = transcript(
+            "#763 and #764 are still OPEN, so I wrote no code.\n\nMore reasoning follows here.",
+            None,
+            0,
+        );
+
+        let body = format_cycle_body_desktop(&t);
+
+        assert!(body.contains("#763 and #764 are still OPEN"));
+        assert!(
+            !body.contains("More reasoning follows"),
+            "only the first paragraph belongs in a popup"
+        );
+    }
+
+    /// A pending permission is the one case demanding action, so it must lead
+    /// and must survive truncation of a long summary.
+    #[test]
+    fn a_pending_permission_survives_truncation() {
+        let t = transcript(&"x".repeat(5000), None, 2);
+
+        let body = format_cycle_body_desktop(&t);
+
+        assert!(body.contains("2 permission request(s) pending"));
+        assert!(body.starts_with('\u{26a0}'), "got {:?}", &body[..8.min(body.len())]);
+    }
+
+    /// Truncation must be visible, so a clipped summary is not read as whole.
+    #[test]
+    fn a_truncated_body_is_marked_as_elided() {
+        let t = transcript(&"word ".repeat(500), None, 0);
+
+        let body = format_cycle_body_desktop(&t);
+
+        assert!(body.ends_with('\u{2026}'), "got {:?}", body);
+    }
+
+    /// A short summary passes through untouched, so the cap never mangles the
+    /// common case.
+    #[test]
+    fn a_short_summary_is_not_truncated() {
+        let t = transcript("Nothing to do; queue empty.", None, 0);
+
+        let body = format_cycle_body_desktop(&t);
+
+        assert_eq!(body, "Nothing to do; queue empty.");
+    }
+
+    /// Multi-byte characters must not be split mid-character.
+    #[test]
+    fn truncation_respects_character_boundaries() {
+        let text = "é".repeat(500);
+        let out = truncate_on_char_boundary(&text, 100);
+
+        assert!(out.chars().count() <= 100);
+        assert!(out.ends_with('\u{2026}'));
     }
 }

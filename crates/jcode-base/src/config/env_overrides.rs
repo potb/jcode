@@ -574,6 +574,11 @@ impl Config {
                 self.ambient.proactive_work = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_AUTO_APPROVE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.ambient.auto_approve_permissions = parsed;
+            }
+        }
 
         // Safety / notifications
         if let Ok(v) = std::env::var("JCODE_NTFY_TOPIC") {

@@ -483,9 +483,9 @@ pub fn build_ambient_system_prompt(
          2. Garden the memory graph -- consolidate duplicates, resolve \
             contradictions, prune dead memories, verify stale facts, \
             extract from missed sessions.\n\
-         3. Scout for proactive work (only if enabled and past cold start) -- \
-            look at recent sessions and git history to identify useful work \
-            the user would appreciate.\n\n\
+         3. Scout for proactive work, if enabled below -- look at recent \
+            sessions and git history to identify useful work the user would \
+            appreciate.\n\n\
          For gardening: focus on highest-value maintenance first. Duplicates \
          and contradictions before pruning. Verify stale facts only if you \
          have budget left.\n\n\
@@ -516,6 +516,58 @@ pub fn build_ambient_system_prompt(
          without opening jcode. You can optionally target a specific channel \
          (e.g. telegram, discord) or omit channel to send to all.\n",
     );
+
+    // Tell the agent whether proactive work is actually enabled.
+    //
+    // The prompt used to say "only if enabled" while nothing ever substituted
+    // whether it WAS enabled, and `ambient.proactive_work` was read nowhere in
+    // the runner: a config knob with no consumer. The agent was left guessing
+    // at a condition it could not evaluate, so it stayed cautious and mostly
+    // gardened, which reads as "the agent does not do much".
+    if crate::config::config().ambient.proactive_work {
+        prompt.push_str(
+            "\n## Proactive Work\n\n\
+             `ambient.proactive_work` is ENABLED. Once the queue and gardening \
+             are handled, actively look for useful work rather than ending the \
+             cycle early: stale branches, failing or flaky tests, TODOs left in \
+             recent commits, dependency or documentation drift. Prefer small, \
+             self-contained changes you can finish and verify within one cycle.\n\n\
+             Be conservative about what you pick, not about whether to pick \
+             anything. A bad surprise is worse than no surprise, so check the \
+             feedback memories first and skip anything resembling work the user \
+             has rejected before.\n\n",
+        );
+    } else {
+        prompt.push_str(
+            "\n## Proactive Work\n\n\
+             `ambient.proactive_work` is DISABLED, so this is a garden-only \
+             cycle. Execute queued items and maintain the memory graph, but do \
+             not go looking for code changes to make. If you notice something \
+             worth doing, record it in the cycle summary instead of acting on \
+             it.\n\n",
+        );
+    }
+
+    // When the user has pre-authorized ambient work, say so explicitly.
+    // Otherwise the agent keeps calling request_permission out of caution,
+    // which is now a no-op round trip that only wastes cycle budget.
+    if crate::config::config().ambient.auto_approve_permissions {
+        prompt.push_str(
+            "\n## Permissions\n\n\
+             The user has enabled `ambient.auto_approve_permissions`, so every \
+             `request_permission` call is approved immediately and never reaches \
+             a human. Do not use it as a safety net or a way to defer a decision: \
+             nobody is on the other end. Prefer just doing the work.\n\n\
+             This makes your own judgment the only real check. Stay inside the \
+             scope of the initiative or task you were given, keep changes on \
+             branches with PRs, and never take an action that would be hard to \
+             undo (force-push, merge, branch or data deletion, anything \
+             destructive or externally visible) unless it was explicitly asked \
+             for. When something falls outside your scope, stop and report it \
+             via `send_message` and in your cycle summary instead of approving \
+             yourself into it.\n",
+        );
+    }
 
     prompt
 }

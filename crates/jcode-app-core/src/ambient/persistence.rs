@@ -116,15 +116,30 @@ impl ScheduledQueue {
     /// Remove and return ready items targeted at a specific direct-delivery session,
     /// leaving ambient-targeted queue items intact for the ambient agent to process.
     pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
+        self.take_ready_matching(|item| item.target.is_direct_delivery())
+    }
+
+    /// Remove and return ready items that an ambient cycle handles itself.
+    ///
+    /// The complement of [`Self::take_ready_direct_items`]: these are the items
+    /// a cycle receives in its prompt, so they must be removed as they are
+    /// handed over, or every later cycle replays them.
+    pub fn take_ready_ambient_items(&mut self) -> Vec<ScheduledItem> {
+        self.take_ready_matching(|item| !item.target.is_direct_delivery())
+    }
+
+    /// Drain the due items matching `predicate`, highest priority first.
+    fn take_ready_matching(
+        &mut self,
+        predicate: impl Fn(&ScheduledItem) -> bool,
+    ) -> Vec<ScheduledItem> {
         let now = Utc::now();
-        let mut ready_direct = Vec::new();
+        let mut ready = Vec::new();
         let mut remaining = Vec::with_capacity(self.items.len());
 
         for item in self.items.drain(..) {
-            let is_ready = item.scheduled_for <= now;
-            let is_direct_target = item.target.is_direct_delivery();
-            if is_ready && is_direct_target {
-                ready_direct.push(item);
+            if item.scheduled_for <= now && predicate(&item) {
+                ready.push(item);
             } else {
                 remaining.push(item);
             }
@@ -132,18 +147,19 @@ impl ScheduledQueue {
 
         self.items = remaining;
 
-        if !ready_direct.is_empty() {
+        if !ready.is_empty() {
             let _ = self.save();
         }
 
-        ready_direct.sort_by(|a, b| {
+        ready.sort_by(|a, b| {
             b.priority
                 .cmp(&a.priority)
                 .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
         });
 
-        ready_direct
+        ready
     }
+
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
         self.items.iter().min_by_key(|i| i.scheduled_for)
@@ -182,6 +198,11 @@ impl AmbientLock {
             if let Ok(contents) = std::fs::read_to_string(&path)
                 && let Ok(pid) = contents.trim().parse::<u32>()
                 && is_pid_alive(pid)
+                // A lock naming *this* process cannot be held by a cycle that
+                // is still running: `jcode server reload` re-execs in place and
+                // keeps the PID, so a lock left by the pre-exec image looks
+                // alive and would deadlock the runner against its own ghost.
+                && pid != std::process::id()
             {
                 return Ok(None); // Another instance is running
             }
@@ -209,6 +230,25 @@ impl AmbientLock {
 impl Drop for AmbientLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+/// Whether a *different* live process currently holds the ambient lock.
+///
+/// Startup recovery uses this to tell "the previous process died and left work
+/// behind" from "another daemon is running a cycle right now". Recovering in
+/// the second case would duplicate that cycle's items back onto the queue.
+/// Our own PID does not count, since `server reload` re-execs in place.
+pub fn is_locked_by_another_process() -> bool {
+    let Ok(path) = lock_path() else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    match contents.trim().parse::<u32>() {
+        Ok(pid) => pid != std::process::id() && is_pid_alive(pid),
+        Err(_) => false,
     }
 }
 

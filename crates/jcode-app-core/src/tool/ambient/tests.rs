@@ -496,3 +496,101 @@ async fn test_schedule_tool_requires_time() {
         .expect_err("should require wake_in_minutes or wake_at");
     assert!(err.to_string().contains("wake_in_minutes"));
 }
+
+/// With `ambient.auto_approve_permissions` on, the tool must resolve the
+/// request itself instead of parking it in the queue. A queued request is the
+/// exact failure this setting exists to prevent: with no channel able to carry
+/// an answer back, it sits until it is expired and the cycle's work is lost.
+#[tokio::test]
+async fn test_request_permission_auto_approves_when_configured() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_flag = std::env::var_os("JCODE_AMBIENT_AUTO_APPROVE");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
+    jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "true");
+    jcode_base::config::invalidate_config_cache();
+
+    let session_id = "ambient_auto_approve_test";
+    register_ambient_session(session_id);
+
+    let tool = RequestPermissionTool::new();
+    let ctx = ToolContext {
+        session_id: session_id.to_string(),
+        message_id: "msg_1".to_string(),
+        tool_call_id: "call_1".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+    let out = tool
+        .execute(
+            json!({
+                "action": "create_pull_request",
+                "description": "Open the knip config PR",
+                "rationale": "Pre-authorized by the initiative"
+            }),
+            ctx,
+        )
+        .await
+        .expect("auto-approve should succeed");
+
+    assert!(
+        out.output.contains("Permission approved"),
+        "expected an approval, got: {}",
+        out.output
+    );
+    assert!(
+        get_safety_system()
+            .pending_requests()
+            .is_empty(),
+        "auto-approved requests must not be left queued for a human"
+    );
+
+    // The whole justification for auto-approving is that the audit trail still
+    // shows what was done and on whose authority. An in-memory approval that
+    // never reaches disk would leave the user with no record at all, so assert
+    // the persisted file, not just the tool's return value.
+    let history_file = temp.path().join("safety").join("history.json");
+    assert!(
+        history_file.exists(),
+        "an auto-approval must be persisted to {}",
+        history_file.display()
+    );
+    let decisions: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&history_file).expect("read history"))
+            .expect("history is valid json");
+    let entries = decisions.as_array().expect("history is an array");
+    assert_eq!(entries.len(), 1, "exactly one decision: {decisions}");
+    let d = &entries[0];
+    assert_eq!(
+        d["approved"], true,
+        "the decision must record an APPROVAL, not merely that it was seen"
+    );
+    assert_eq!(
+        d["decided_via"], "ambient_auto_approve",
+        "the trail must attribute this to the auto-approve config, not a human"
+    );
+    assert!(
+        d["request_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "a decision with no request id cannot be traced back: {d}"
+    );
+    assert!(
+        d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("create_pull_request")),
+        "the trail must name the action that was approved: {d}"
+    );
+
+    unregister_ambient_session(session_id);
+    match prev_flag {
+        Some(v) => jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", v),
+        None => jcode_base::env::remove_var("JCODE_AMBIENT_AUTO_APPROVE"),
+    }
+    match prev_home {
+        Some(v) => jcode_base::env::set_var("JCODE_HOME", v),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+    jcode_base::config::invalidate_config_cache();
+}
