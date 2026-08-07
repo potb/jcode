@@ -934,9 +934,27 @@ impl AmbientRunnerHandle {
             // Release lock
             let _ = lock.release();
 
-            // Calculate next sleep interval
+            // Calculate next sleep interval.
+            //
+            // The same rule as the idle path applies here: the adaptive
+            // interval describes routine maintenance, so it must not sleep past
+            // a deadline the user or a previous cycle explicitly asked for. A
+            // cycle that finishes just before a queued item is due would
+            // otherwise leave it waiting a full interval, and this is the more
+            // likely path of the two, since scheduling an item is exactly the
+            // kind of thing a cycle does on its way out.
             let interval = scheduler.calculate_interval(None);
-            let sleep_secs = interval.as_secs().max(30);
+            let next_due = match AmbientManager::new() {
+                Ok(mgr) => mgr.next_item_due(),
+                Err(e) => {
+                    logging::error(&format!(
+                        "Ambient runner: failed to load manager for next wake: {}",
+                        e
+                    ));
+                    None
+                }
+            };
+            let sleep_secs = idle_sleep_secs(Utc::now(), interval.as_secs().max(30), next_due);
 
             // Update state with scheduled wake
             {

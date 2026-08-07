@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod directives;
+pub mod headroom;
 mod manager;
 mod paths;
 mod persistence;

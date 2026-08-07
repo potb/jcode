@@ -1,0 +1,141 @@
+//! Tests for subscription headroom selection.
+
+use super::*;
+
+fn window(utilization: f32, resets_at: Option<DateTime<Utc>>) -> WindowUtilization {
+    WindowUtilization {
+        utilization,
+        resets_at,
+    }
+}
+
+#[test]
+fn no_reported_windows_is_no_information() {
+    // Distinct from "no quota left": the scheduler must not read an absent
+    // signal as an exhausted one, nor as a full one.
+    assert!(binding_headroom(Vec::new()).is_none());
+}
+
+#[test]
+fn the_most_consumed_window_binds() {
+    // A fresh 5-hour window must not mask a nearly-spent weekly one, which is
+    // exactly the shape a heavy week produces.
+    let headroom = binding_headroom(vec![window(0.10, None), window(0.90, None)]).unwrap();
+
+    assert!(
+        (headroom.remaining_fraction - 0.10).abs() < 1e-6,
+        "expected the 90%-consumed window to bind, got {}",
+        headroom.remaining_fraction
+    );
+}
+
+#[test]
+fn windows_from_either_provider_compete_on_equal_terms() {
+    // With two subscriptions the binding constraint can come from either, so
+    // selection must not privilege the order they were collected in.
+    let anthropic_first = binding_headroom(vec![window(0.20, None), window(0.75, None)]).unwrap();
+    let openai_first = binding_headroom(vec![window(0.75, None), window(0.20, None)]).unwrap();
+
+    assert_eq!(anthropic_first, openai_first);
+}
+
+#[test]
+fn an_exhausted_window_leaves_no_headroom() {
+    let headroom = binding_headroom(vec![window(1.0, None)]).unwrap();
+
+    assert_eq!(headroom.remaining_fraction, 0.0);
+}
+
+#[test]
+fn out_of_range_utilization_is_clamped_not_trusted() {
+    // A malformed reading must not produce a negative remaining fraction, which
+    // would flow into the interval arithmetic as a negative cycle count.
+    let over = binding_headroom(vec![window(1.4, None)]).unwrap();
+    let under = binding_headroom(vec![window(-0.3, None)]).unwrap();
+
+    assert_eq!(over.remaining_fraction, 0.0);
+    assert_eq!(under.remaining_fraction, 1.0);
+}
+
+#[test]
+fn a_non_finite_reading_is_discarded_rather_than_compared() {
+    // NaN has no ordering, so leaving it in the comparison could win `max_by`
+    // and poison every downstream multiplication.
+    let headroom = binding_headroom(vec![window(f32::NAN, None), window(0.5, None)]).unwrap();
+
+    assert!((headroom.remaining_fraction - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn only_non_finite_readings_are_no_information() {
+    assert!(binding_headroom(vec![window(f32::NAN, None)]).is_none());
+}
+
+#[test]
+fn seconds_until_reset_reports_the_remaining_window() {
+    let now = Utc::now();
+    let headroom = SubscriptionHeadroom {
+        remaining_fraction: 0.5,
+        resets_at: Some(now + chrono::Duration::minutes(30)),
+    };
+
+    let secs = headroom.seconds_until_reset(now).unwrap();
+    assert!((secs - 1800.0).abs() < 2.0, "got {}", secs);
+}
+
+#[test]
+fn a_lapsed_reset_is_unknown_not_zero() {
+    // Quota snapshots are cached, so a reset in the past means the reading is
+    // stale. Reporting 0 would divide the window down to nothing and pin the
+    // interval at the ceiling on data we simply have not refreshed yet.
+    let now = Utc::now();
+    let headroom = SubscriptionHeadroom {
+        remaining_fraction: 0.5,
+        resets_at: Some(now - chrono::Duration::minutes(5)),
+    };
+
+    assert!(headroom.seconds_until_reset(now).is_none());
+}
+
+#[test]
+fn a_missing_reset_is_unknown() {
+    let headroom = SubscriptionHeadroom {
+        remaining_fraction: 0.5,
+        resets_at: None,
+    };
+
+    assert!(headroom.seconds_until_reset(Utc::now()).is_none());
+}
+
+#[test]
+fn reset_timestamps_parse_in_both_shapes_providers_send() {
+    let rfc3339 = parse_reset("2026-08-07T16:30:00+00:00").expect("rfc3339");
+    let trailing_z = parse_reset("2026-08-07T16:30:00Z").expect("trailing Z");
+    let fractional = parse_reset("2026-08-07T16:30:00.123Z").expect("fractional seconds");
+
+    assert_eq!(rfc3339, trailing_z);
+    assert_eq!(fractional.timestamp(), trailing_z.timestamp());
+}
+
+#[test]
+fn an_unparseable_reset_is_dropped_rather_than_defaulted() {
+    // Defaulting to "now" would look like an expiring window and throttle
+    // ambient on a formatting change.
+    assert!(parse_reset("not a timestamp").is_none());
+    assert!(parse_reset("").is_none());
+}
+
+#[test]
+fn the_binding_window_carries_its_own_reset_time() {
+    // The horizon must come from the window that actually binds; pairing a
+    // spent window's fraction with a roomy window's reset would spread the
+    // remaining quota over the wrong span.
+    let now = Utc::now();
+    let soon = now + chrono::Duration::minutes(10);
+    let later = now + chrono::Duration::hours(20);
+
+    let headroom = binding_headroom(vec![window(0.2, Some(later)), window(0.95, Some(soon))])
+        .expect("a binding window");
+
+    assert_eq!(headroom.resets_at, Some(soon));
+}

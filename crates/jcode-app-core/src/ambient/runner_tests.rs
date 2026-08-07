@@ -285,6 +285,76 @@ fn future_ambient_queue_item_is_a_deadline_but_not_yet_due() {
     crate::config::invalidate_config_cache();
 }
 
+/// The post-cycle sleep is bounded by the next queued item whatever its target.
+///
+/// The idle path already honoured deadlines, but the sleep taken *after* a
+/// cycle used the bare adaptive interval. That is the likelier path to matter:
+/// scheduling follow-up work is exactly what a cycle does on its way out, so
+/// the item it just queued was the one at risk of waiting a full interval.
+/// `next_item_due` must therefore see direct-delivery items too, not only the
+/// ambient-targeted ones `next_ambient_item_due` reports.
+#[test]
+fn the_next_deadline_spans_every_target_kind() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    crate::config::invalidate_config_cache();
+
+    let mut mgr = crate::ambient::AmbientManager::new().expect("manager");
+    assert!(
+        mgr.next_item_due().is_none(),
+        "an empty queue imposes no deadline"
+    );
+
+    let ambient_at = chrono::Utc::now() + chrono::Duration::minutes(45);
+    let direct_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let mut add = |when: chrono::DateTime<chrono::Utc>, target: ScheduleTarget| {
+        mgr.schedule(crate::ambient::ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(when),
+            context: "queued work".to_string(),
+            priority: Priority::Normal,
+            target,
+            created_by_session: "test".to_string(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule item");
+    };
+
+    add(ambient_at, ScheduleTarget::Ambient);
+    add(
+        direct_at,
+        ScheduleTarget::Session {
+            session_id: "session_test".to_string(),
+        },
+    );
+
+    assert_eq!(
+        mgr.next_item_due(),
+        Some(direct_at),
+        "the soonest item wins regardless of target"
+    );
+    assert_eq!(
+        mgr.next_ambient_item_due(),
+        Some(ambient_at),
+        "the ambient-only view still excludes direct deliveries"
+    );
+
+    // And the sleep actually shortens to it, rather than taking the interval.
+    let interval = 15 * 60;
+    assert_eq!(
+        super::idle_sleep_secs(chrono::Utc::now(), interval, mgr.next_item_due()),
+        10 * 60,
+        "a 10-minute deadline must not wait out a 15-minute interval"
+    );
+
+    crate::config::invalidate_config_cache();
+}
+
 /// Due ambient items must leave the queue when a cycle claims them. They are
 /// delivered by being written into the cycle's prompt, so if they survive that
 /// hand-off every later cycle is told to do the same work again and

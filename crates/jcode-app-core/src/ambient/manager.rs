@@ -73,6 +73,15 @@ impl AmbientManager {
             .is_some_and(|due| Utc::now() >= due)
     }
 
+    /// Earliest scheduled time across every queue item, whatever its target.
+    ///
+    /// The runner must not sleep past this: it is a time the user or a previous
+    /// cycle explicitly asked for, unlike the adaptive interval, which only
+    /// describes routine maintenance.
+    pub fn next_item_due(&self) -> Option<DateTime<Utc>> {
+        self.queue.items().iter().map(|item| item.scheduled_for).min()
+    }
+
     pub fn record_cycle_result(&mut self, result: AmbientCycleResult) -> Result<()> {
         self.state.record_cycle(&result);
         self.state.save()?;

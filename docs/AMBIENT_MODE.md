@@ -348,7 +348,61 @@ x-ratelimit-reset-requests: 2026-02-08T15:00:00Z
 
 When headers aren't available, fall back to conservative defaults and adjust based on whether rate limit errors occur.
 
+### Subscription Headroom (what actually runs)
+
+The header-driven algorithm below was never reached in practice. Nothing
+populated `RateLimitInfo`, so every caller passed `None` and the interval
+collapsed to a constant `max_interval_minutes` — the adaptive path was dead
+code. Subscription auth is the reason: OAuth requests do not carry
+`x-ratelimit-*` headers at all. The quota lives in the usage endpoint that
+already backs the TUI info widget.
+
+So the real signal is a **utilization fraction per rolling window** plus a reset
+time, read from the cached snapshots in `jcode-base`'s `usage` module (no extra
+network traffic). Both Anthropic and OpenAI/Codex report that shape, and a user
+with both subscriptions is bound by whichever window is closest to exhaustion.
+
+```
+# Every reported window, both providers (5-hour, weekly, spark)
+binding = max(windows, key=utilization)      # closest to exhaustion wins
+remaining = 1 - binding.utilization
+
+# Ambient's share of what is left
+usable = remaining * (1 - user_budget_reserve)
+
+# Pace is inversely proportional to remaining quota, scaled so a full window
+# under the default reserve lands exactly on min_interval.
+interval = min_interval * (default_ambient_share / usable)
+
+# Never idle past a refill, then clamp to the configured bounds.
+interval = min(interval, time_until_reset)
+interval = clamp(interval, min_interval, max_interval)
+```
+
+Window *duration* deliberately does not enter the arithmetic. Spreading the
+remaining quota over the time left before reset inverts the intent: a fresh
+7-day window would pace slower than a fresh 5-hour one, because the same
+per-cycle cost is charged as a fraction of a much longer window. The fraction
+left right now is the signal; duration only says how soon it refills, which
+caps the interval.
+
+Properties worth preserving:
+
+- **Monotonic** — less headroom never yields a shorter interval.
+- **Bounded** — `min_interval_minutes` and `max_interval_minutes` are hard
+  bounds no quota reading can breach.
+- **Fails conservative** — no quota data (API key auth, or usage not yet
+  fetched) falls back to `max_interval_minutes`. Absent data is never read as a
+  full window.
+- **Backoff still applies** — a 429 doubles the interval on top of this.
+
+With `min = 5` and `max = 15`, a fresh window runs every 5 minutes and stretches
+to 15 once roughly 70% of the window is spent.
+
 ### Adaptive Interval Algorithm
+
+> Historical: the header-driven path. Retained for callers that do have
+> `RateLimitInfo`; unreached under subscription auth.
 
 ```
 # Known from headers or defaults
@@ -791,6 +845,11 @@ allow_api_keys = false
 min_interval_minutes = 5
 
 # Maximum interval between cycles in minutes (default: 120)
+#
+# This is a hard ceiling, and also the interval used whenever quota data is
+# unavailable. Cycles run closer to `min_interval_minutes` while the
+# subscription window has headroom (see "Subscription Headroom" above), so the
+# gap between the two bounds is the range ambient actually paces within.
 max_interval_minutes = 120
 
 # Pause ambient when user has active session (default: true)
@@ -801,6 +860,17 @@ proactive_work = true
 
 # Proactive work branch prefix (default: "ambient/")
 work_branch_prefix = "ambient/"
+
+# Show ambient cycles in the session picker (default: false)
+visible = false
+
+# Auto-approve the agent's `request_permission` calls (default: false)
+#
+# Ambient runs unattended, so a permission request otherwise stalls the cycle
+# waiting for a human who is not watching. When enabled, requests are approved
+# automatically and recorded in the audit trail, and the cycle prompt tells the
+# agent this is in effect.
+auto_approve_permissions = false
 ```
 
 ---

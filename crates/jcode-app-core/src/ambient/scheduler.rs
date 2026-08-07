@@ -2,6 +2,7 @@
 //!
 //! Tracks per-call token usage (user vs ambient), maintains a rolling usage log,
 //! and computes adaptive intervals for ambient cycles based on rate limit headroom.
+use super::headroom::{SubscriptionHeadroom, current_subscription_headroom};
 use crate::storage;
 use chrono::{Duration as ChronoDuration, Utc};
 use std::path::PathBuf;
@@ -22,6 +23,19 @@ const SAVE_INTERVAL: usize = 10;
 
 /// Records older than this are pruned on save.
 const PRUNE_AGE_HOURS: i64 = 24;
+
+/// Ambient's share of quota under the default reserve, used as the reference
+/// point that maps "quota left" onto "interval".
+///
+/// Pinning the scale here means a full window under the default reserve lands
+/// exactly on `min_interval_minutes`, so the configured floor is the pace the
+/// user actually gets when there is room, rather than an arbitrary fraction of
+/// it. Raising `user_budget_reserve` above the default lengthens intervals
+/// proportionally; lowering it is capped by the floor.
+const DEFAULT_AMBIENT_SHARE: f64 = 1.0 - DEFAULT_USER_BUDGET_RESERVE as f64;
+
+/// Fraction of remaining quota reserved for the user by default.
+const DEFAULT_USER_BUDGET_RESERVE: f32 = 0.8;
 
 pub struct UsageLog {
     records: Vec<UsageRecord>,
@@ -156,7 +170,7 @@ impl Default for AmbientSchedulerConfig {
             min_interval_minutes: 5,
             max_interval_minutes: 120,
             pause_on_active_session: true,
-            user_budget_reserve: 0.8,
+            user_budget_reserve: DEFAULT_USER_BUDGET_RESERVE,
         }
     }
 }
@@ -185,14 +199,26 @@ impl AdaptiveScheduler {
     }
 
     /// Core interval calculation following the algorithm in AMBIENT_MODE.md.
+    ///
+    /// Prefers per-request rate-limit headers when a caller has them. Nothing
+    /// populates those under subscription auth, so absent them this falls back
+    /// to the OAuth quota snapshot (see [`headroom_interval`]) rather than
+    /// straight to `max_interval`.
     pub fn calculate_interval(&self, rate_limit_info: Option<&RateLimitInfo>) -> Duration {
         let max = Duration::from_secs(self.config.max_interval_minutes as u64 * 60);
         let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60);
 
-        // If no rate limit info, fall back to max interval.
         let info = match rate_limit_info {
             Some(i) => i,
-            None => return self.apply_backoff(max),
+            None => {
+                return match current_subscription_headroom() {
+                    Some(headroom) => self.headroom_interval(&headroom, Utc::now()),
+                    // No quota data at all (API key, or usage not yet fetched):
+                    // stay at the configured ceiling, which is the pre-existing
+                    // conservative behaviour.
+                    None => self.apply_backoff(max),
+                };
+            }
         };
 
         // window_remaining = reset_time - now
@@ -243,6 +269,65 @@ impl AdaptiveScheduler {
         };
 
         let interval = Duration::from_secs_f64(interval_secs);
+        self.apply_backoff(interval.clamp(min, max))
+    }
+
+    /// Interval implied by how much of the subscription window is left.
+    ///
+    /// Pace is inversely proportional to remaining quota: a fresh window runs
+    /// at the configured floor, and the interval stretches toward the ceiling
+    /// as the window is consumed. Scaled so the default reserve puts a full
+    /// window exactly at `min_interval_minutes`, and a higher reserve (more of
+    /// the quota held back for the user) lengthens every interval.
+    ///
+    /// The window's *duration* deliberately does not enter the arithmetic. An
+    /// earlier version spread the remaining quota across the time left before
+    /// reset, which inverted the intended behaviour: a fresh 7-day window paced
+    /// slower than a fresh 5-hour one, because the same "cost per cycle" was
+    /// being charged as a fraction of a much longer window. What a subscription
+    /// actually reports is the fraction left right now, and this recomputes
+    /// every cycle, so the fraction alone is the signal. Duration only tells us
+    /// how soon it refills, which is used as a cap below.
+    ///
+    /// Monotonic in remaining quota by construction: less headroom never yields
+    /// a shorter interval. Clamped to the configured bounds, so
+    /// `max_interval_minutes` stays a hard ceiling and `min_interval_minutes` a
+    /// hard floor that no quota reading can breach.
+    pub fn headroom_interval(
+        &self,
+        headroom: &SubscriptionHeadroom,
+        now: chrono::DateTime<Utc>,
+    ) -> Duration {
+        let max = Duration::from_secs(self.config.max_interval_minutes as u64 * 60);
+        let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60);
+
+        // An exhausted window backs off to the ceiling and waits for the reset
+        // (or for the user's own consumption to roll out of the window).
+        if headroom.remaining_fraction <= 0.0 {
+            return self.apply_backoff(max);
+        }
+
+        let ambient_share = (1.0 - self.config.user_budget_reserve as f64).clamp(0.0, 1.0);
+        if ambient_share <= 0.0 {
+            // Every last token is reserved for the user.
+            return self.apply_backoff(max);
+        }
+
+        let usable = headroom.remaining_fraction as f64 * ambient_share;
+        if usable <= 0.0 {
+            return self.apply_backoff(max);
+        }
+
+        let interval_secs = min.as_secs_f64() * (DEFAULT_AMBIENT_SHARE / usable);
+        let mut interval = Duration::from_secs_f64(interval_secs.max(0.0));
+
+        // Never idle past a refill. If the window resets in less time than the
+        // backed-off interval, waking at the reset is strictly better than
+        // sleeping through it and discovering the fresh quota an interval late.
+        if let Some(until_reset) = headroom.seconds_until_reset(now) {
+            interval = interval.min(Duration::from_secs_f64(until_reset));
+        }
+
         self.apply_backoff(interval.clamp(min, max))
     }
 
@@ -493,5 +578,169 @@ mod tests {
         log.prune();
         assert_eq!(log.records.len(), 1);
         assert_eq!(log.records[0].total_tokens(), 200);
+    }
+
+    // -- headroom-driven intervals ------------------------------------------
+
+    fn headroom_scheduler() -> AdaptiveScheduler {
+        AdaptiveScheduler::new(AmbientSchedulerConfig {
+            min_interval_minutes: 5,
+            max_interval_minutes: 15,
+            user_budget_reserve: 0.8,
+            ..Default::default()
+        })
+    }
+
+    fn headroom(remaining: f32, window: ChronoDuration) -> SubscriptionHeadroom {
+        SubscriptionHeadroom {
+            remaining_fraction: remaining,
+            resets_at: Some(Utc::now() + window),
+        }
+    }
+
+    #[test]
+    fn a_fresh_window_runs_at_the_configured_floor() {
+        // The whole point of wiring quota in: with room to spare, ambient
+        // should not be sitting at the ceiling.
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval =
+            scheduler.headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), now);
+
+        assert_eq!(interval, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn a_nearly_spent_window_backs_off_to_the_ceiling() {
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval =
+            scheduler.headroom_interval(&headroom(0.02, ChronoDuration::hours(5)), now);
+
+        assert_eq!(interval, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn an_exhausted_window_backs_off_to_the_ceiling() {
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval =
+            scheduler.headroom_interval(&headroom(0.0, ChronoDuration::hours(5)), now);
+
+        assert_eq!(interval, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn less_headroom_never_means_a_shorter_interval() {
+        // Monotonicity is the safety property: whatever the constants, spending
+        // more quota must never make ambient run harder.
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+        let window = ChronoDuration::hours(5);
+
+        let mut previous = Duration::from_secs(0);
+        for step in 0..=20 {
+            let remaining = 1.0 - (step as f32 / 20.0);
+            let interval = scheduler.headroom_interval(&headroom(remaining, window), now);
+            assert!(
+                interval >= previous,
+                "interval shrank at remaining={}: {:?} < {:?}",
+                remaining,
+                interval,
+                previous
+            );
+            previous = interval;
+        }
+    }
+
+    #[test]
+    fn the_configured_ceiling_is_never_exceeded() {
+        // A quota reading must not be able to stretch ambient past the interval
+        // the user configured, however pessimistic the arithmetic gets.
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval = scheduler.headroom_interval(
+            &headroom(0.001, ChronoDuration::days(7)),
+            now,
+        );
+
+        assert!(interval <= Duration::from_secs(15 * 60), "got {:?}", interval);
+    }
+
+    #[test]
+    fn an_unknown_reset_time_still_produces_a_bounded_interval() {
+        // Utilization without a reset timestamp is a real provider response; it
+        // must degrade to a sane interval rather than dividing by nothing.
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval = scheduler.headroom_interval(
+            &SubscriptionHeadroom {
+                remaining_fraction: 0.5,
+                resets_at: None,
+            },
+            now,
+        );
+
+        assert!(
+            interval >= Duration::from_secs(5 * 60) && interval <= Duration::from_secs(15 * 60),
+            "got {:?}",
+            interval
+        );
+    }
+
+    #[test]
+    fn a_lapsed_reset_falls_back_instead_of_collapsing_the_window() {
+        // A stale snapshot's reset time is in the past. Treating that as zero
+        // seconds remaining would pin the interval at the ceiling on nothing
+        // more than a cache that has not refreshed.
+        let scheduler = headroom_scheduler();
+        let now = Utc::now();
+
+        let interval = scheduler.headroom_interval(
+            &SubscriptionHeadroom {
+                remaining_fraction: 1.0,
+                resets_at: Some(now - ChronoDuration::minutes(5)),
+            },
+            now,
+        );
+
+        assert_eq!(interval, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn rate_limit_backoff_still_applies_to_headroom_intervals() {
+        // Backoff is the response to an actual 429, so it has to survive the
+        // new path; otherwise a fresh window would cancel it out.
+        let mut scheduler = headroom_scheduler();
+        let now = Utc::now();
+        let fresh = headroom(1.0, ChronoDuration::hours(5));
+
+        let before = scheduler.headroom_interval(&fresh, now);
+        scheduler.on_rate_limit_hit();
+        let after = scheduler.headroom_interval(&fresh, now);
+
+        assert!(after > before, "{:?} should exceed {:?}", after, before);
+    }
+
+    #[test]
+    fn a_full_user_reserve_leaves_ambient_at_the_ceiling() {
+        // Reserving everything for the user is a coherent request, and must not
+        // divide by zero on its way to the answer.
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            min_interval_minutes: 5,
+            max_interval_minutes: 15,
+            user_budget_reserve: 1.0,
+            ..Default::default()
+        });
+
+        let interval = scheduler
+            .headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), Utc::now());
+
+        assert_eq!(interval, Duration::from_secs(15 * 60));
     }
 }
