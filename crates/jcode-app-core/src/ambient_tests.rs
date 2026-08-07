@@ -524,3 +524,62 @@ fn auto_approve_prompt_warns_that_no_human_will_answer() {
     }
     crate::config::invalidate_config_cache();
 }
+
+/// `ambient.proactive_work` must actually reach the prompt.
+///
+/// It previously did not. The runner read the field nowhere, and the prompt
+/// hardcoded "only if enabled" with nothing ever substituting whether it was:
+/// a config knob with no consumer. The agent was told to evaluate a condition
+/// it had no access to, so it stayed cautious and mostly gardened, which is
+/// what "the agent does not do much" looked like from outside.
+#[test]
+fn proactive_work_setting_reaches_the_prompt() {
+    fn prompt_with(enabled: bool) -> String {
+        let _guard = jcode_base::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        jcode_base::env::set_var("JCODE_HOME", temp.path());
+        jcode_base::env::set_var("JCODE_AMBIENT_PROACTIVE", if enabled { "true" } else { "false" });
+        jcode_base::config::invalidate_config_cache();
+
+        let budget = ResourceBudget {
+            provider: "anthropic-oauth".into(),
+            tokens_remaining_desc: "unknown".into(),
+            window_resets_desc: "unknown".into(),
+            user_usage_rate_desc: "0 tokens/min".into(),
+            cycle_budget_desc: "stay under 50k tokens".into(),
+        };
+        let out = build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &budget,
+            0,
+        );
+        jcode_base::env::remove_var("JCODE_AMBIENT_PROACTIVE");
+        jcode_base::config::invalidate_config_cache();
+        out
+    }
+
+    let enabled = prompt_with(true);
+    assert!(
+        enabled.contains("is ENABLED"),
+        "an enabled setting must be stated in the prompt"
+    );
+    assert!(
+        !enabled.contains("garden-only"),
+        "an enabled cycle must not be told it is garden-only"
+    );
+
+    let disabled = prompt_with(false);
+    assert!(
+        disabled.contains("is DISABLED") && disabled.contains("garden-only"),
+        "a disabled setting must be stated too, so the agent stops guessing"
+    );
+
+    assert_ne!(
+        enabled, disabled,
+        "the flag must change the prompt; identical output means it is inert"
+    );
+}
