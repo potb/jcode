@@ -205,13 +205,31 @@ impl AdaptiveScheduler {
     /// to the OAuth quota snapshot (see [`headroom_interval`]) rather than
     /// straight to `max_interval`.
     pub fn calculate_interval(&self, rate_limit_info: Option<&RateLimitInfo>) -> Duration {
+        self.calculate_interval_with(rate_limit_info, current_subscription_headroom())
+    }
+
+    /// [`calculate_interval`] with the quota reading supplied explicitly.
+    ///
+    /// The production entry point reads process-global usage caches, which no
+    /// unit test can populate. A mutation test exploited exactly that: severing
+    /// the headroom call so the interval always returned `max_interval` (the
+    /// original dead-code bug this feature exists to fix) left every test
+    /// green. Taking the reading as a parameter makes the wiring itself
+    /// assertable.
+    ///
+    /// [`calculate_interval`]: Self::calculate_interval
+    pub fn calculate_interval_with(
+        &self,
+        rate_limit_info: Option<&RateLimitInfo>,
+        headroom: Option<SubscriptionHeadroom>,
+    ) -> Duration {
         let max = Duration::from_secs(self.config.max_interval_minutes as u64 * 60);
         let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60);
 
         let info = match rate_limit_info {
             Some(i) => i,
             None => {
-                return match current_subscription_headroom() {
+                return match headroom {
                     Some(headroom) => self.headroom_interval(&headroom, Utc::now()),
                     // No quota data at all (API key, or usage not yet fetched):
                     // stay at the configured ceiling, which is the pre-existing
@@ -448,8 +466,112 @@ mod tests {
             ..Default::default()
         };
         let scheduler = AdaptiveScheduler::new(config);
-        let interval = scheduler.calculate_interval(None);
+        // No headers AND no quota reading: the conservative ceiling. Passing
+        // the reading explicitly matters here — this used to call
+        // `calculate_interval(None)`, which consults process-global usage
+        // caches, so it asserted the ceiling only because those caches happen
+        // to be empty under `cargo test`. That made it a test of the
+        // environment rather than of the code, and it would have kept passing
+        // if the headroom path were deleted outright.
+        let interval = scheduler.calculate_interval_with(None, None);
         assert_eq!(interval, Duration::from_secs(120 * 60));
+    }
+
+    /// The wiring itself: a quota reading must reach the interval.
+    ///
+    /// Severing the headroom call so `None` headers always returned
+    /// `max_interval` is precisely the dead-code bug this feature fixes, and a
+    /// mutation test showed it passed every other test in the suite.
+    #[test]
+    fn a_quota_reading_reaches_the_interval_rather_than_the_ceiling() {
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            min_interval_minutes: 5,
+            max_interval_minutes: 120,
+            user_budget_reserve: 0.8,
+            ..Default::default()
+        });
+
+        let fresh = SubscriptionHeadroom {
+            remaining_fraction: 1.0,
+            resets_at: Some(Utc::now() + ChronoDuration::hours(5)),
+        };
+        let interval = scheduler.calculate_interval_with(None, Some(fresh));
+
+        assert_eq!(
+            interval,
+            Duration::from_secs(5 * 60),
+            "a full window must pace at the floor, not the ceiling"
+        );
+        assert_ne!(
+            interval,
+            Duration::from_secs(120 * 60),
+            "returning max_interval here is the original dead-code bug"
+        );
+    }
+
+    /// Different readings must yield different intervals, so the reading is
+    /// genuinely consumed rather than merely accepted and discarded.
+    #[test]
+    fn the_interval_tracks_the_quota_reading() {
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            min_interval_minutes: 5,
+            max_interval_minutes: 120,
+            user_budget_reserve: 0.8,
+            ..Default::default()
+        });
+        let window = ChronoDuration::hours(5);
+        let at = |remaining: f32| {
+            scheduler.calculate_interval_with(
+                None,
+                Some(SubscriptionHeadroom {
+                    remaining_fraction: remaining,
+                    resets_at: Some(Utc::now() + window),
+                }),
+            )
+        };
+
+        let plenty = at(1.0);
+        let half = at(0.5);
+        let scarce = at(0.1);
+
+        assert!(
+            plenty < half && half < scarce,
+            "interval must lengthen as quota is consumed: {:?} {:?} {:?}",
+            plenty,
+            half,
+            scarce
+        );
+    }
+
+    /// Explicit rate-limit headers still win over the quota reading, so the
+    /// legacy path is not accidentally bypassed.
+    #[test]
+    fn explicit_rate_limit_headers_take_precedence_over_quota() {
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            min_interval_minutes: 5,
+            max_interval_minutes: 120,
+            user_budget_reserve: 0.8,
+            ..Default::default()
+        });
+
+        // Headers say the window is spent; the quota reading says it is fresh.
+        let info = RateLimitInfo {
+            limit_tokens: Some(100_000),
+            remaining_tokens: Some(0),
+            limit_requests: None,
+            remaining_requests: None,
+            reset_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        };
+        let fresh = SubscriptionHeadroom {
+            remaining_fraction: 1.0,
+            resets_at: Some(Utc::now() + ChronoDuration::hours(5)),
+        };
+
+        assert_eq!(
+            scheduler.calculate_interval_with(Some(&info), Some(fresh)),
+            Duration::from_secs(120 * 60),
+            "exhausted headers must back off despite a fresh quota reading"
+        );
     }
 
     #[test]
