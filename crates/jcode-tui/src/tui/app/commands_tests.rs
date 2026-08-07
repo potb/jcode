@@ -187,6 +187,17 @@ mod colors {
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
+                // Re-assert the redirect before the restoring save.
+                //
+                // Drop order is the reason: this runs during unwind, after
+                // whatever `body()` did, and a sibling test that clears
+                // JCODE_HOME on ITS drop can land this save on the
+                // developer's real ~/.jcode/config.toml. Fixing only the
+                // setup save (as the first pass did) leaves this teardown
+                // save as a second, rarer path to the same corruption --
+                // which then dropped `ambient.active_windows` from a live
+                // config while a stale test binary was still running.
+                crate::tui::app::tests::ensure_test_jcode_home_if_unset();
                 let mut config = crate::config::Config::load();
                 config.display.colors.clear();
                 let _ = config.save();
