@@ -307,8 +307,14 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
-            assert!(!message.to_ascii_lowercase().contains("threshold"));
+            // The follow-up stays neutral: it names the todos to validate
+            // instead of exposing evaluator vocabulary or thresholds.
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("todo a"));
+            assert!(message.contains("todo b"));
+            let lowered = message.to_ascii_lowercase();
+            assert!(!lowered.contains("threshold"));
+            assert!(!lowered.contains("confidence"));
         }
         _ => panic!("expected confidence-summary follow-up"),
     }
