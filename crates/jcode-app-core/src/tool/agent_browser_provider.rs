@@ -7,7 +7,7 @@
 use super::{ToolContext, ToolOutput};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 use super::browser::{BrowserInput, BrowserProvider};
@@ -301,6 +301,8 @@ pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> 
             let tab_id = input
                 .tab_id
                 .ok_or_else(|| anyhow::anyhow!("tab_id is required for select_tab"))?;
+            // agent-browser >=0.30 requires stable `t<N>` handles and rejects bare
+            // integers; older builds accept the `t<N>` form too, so always send it.
             args.extend(["tab".into(), format!("t{tab_id}")]);
         }
         "get_active_tab" => args.extend(["get".into(), "url".into()]),
@@ -347,6 +349,17 @@ async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
     let mut command = tokio::process::Command::new(&bin);
     command.arg("--json");
     command.arg("--session").arg(&session);
+
+    // Opt-in reuse of the user's real Chrome profile so existing logins and
+    // cookies apply. agent-browser copies the profile to a temp snapshot, so the
+    // user's live profile is never mutated. This is the capability the Firefox
+    // bridge got for free by driving the user's actual browser.
+    if let Ok(profile) = std::env::var("JCODE_BROWSER_PROFILE")
+        && !profile.is_empty()
+    {
+        command.arg("--profile").arg(profile);
+    }
+
     for arg in args {
         command.arg(arg);
     }
@@ -475,21 +488,23 @@ fn format_tabs(result: &Value) -> String {
         } else {
             " "
         };
-        let index = tab
-            .get("index")
-            .and_then(|v| v.as_i64())
-            .map(|i| format!("t{i}"))
+        // agent-browser >=0.30 returns stable string handles in `tabId`; older
+        // builds return a positional `index`.
+        let handle = tab
+            .get("tabId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                tab.get("index")
+                    .and_then(|v| v.as_i64())
+                    .map(|i| format!("t{i}"))
+            })
             .unwrap_or_else(|| "?".into());
         let title = tab.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        lines.push(format!("{marker} {index}  {title}  {url}"));
+        lines.push(format!("{marker} {handle}  {title}  {url}"));
     }
     lines.join("\n")
-}
-
-#[allow(dead_code)]
-fn unused_map_helper() -> Map<String, Value> {
-    Map::new()
 }
 
 #[cfg(test)]

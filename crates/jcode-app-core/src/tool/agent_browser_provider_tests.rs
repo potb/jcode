@@ -223,3 +223,54 @@ fn every_jcode_action_has_a_mapping() {
         );
     }
 }
+
+#[test]
+fn tab_list_renders_new_and_old_tab_id_shapes() {
+    // agent-browser >=0.30 shape: stable string handles.
+    let new_shape = json!({"tabs":[
+        {"active":true,"tabId":"t1","title":"A","url":"https://a.test"},
+        {"active":false,"tabId":"t2","title":"B","url":"https://b.test"}
+    ]});
+    let rendered = super::format_tabs(&new_shape);
+    assert!(rendered.contains("t1"), "{rendered}");
+    assert!(rendered.contains("t2"), "{rendered}");
+    assert!(rendered.starts_with('*'), "active tab must be marked: {rendered}");
+
+    // Older shape: positional index only.
+    let old_shape = json!({"tabs":[
+        {"active":false,"index":0,"title":"A","url":"https://a.test"},
+        {"active":true,"index":1,"title":"B","url":"https://b.test"}
+    ]});
+    let rendered = super::format_tabs(&old_shape);
+    assert!(rendered.contains("t0"), "{rendered}");
+    assert!(rendered.contains("t1"), "{rendered}");
+}
+
+#[test]
+fn select_tab_always_uses_t_prefixed_handle() {
+    // Bare integers are rejected by agent-browser >=0.30.
+    let plan = build_command("select_tab", &input(json!({"action":"select_tab","tab_id":3})))
+        .unwrap();
+    assert_eq!(plan.args, vec!["tab", "t3"]);
+}
+
+#[test]
+fn get_content_html_and_title_map_to_get_subcommands() {
+    let html = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"html","selector":"#main"})),
+    )
+    .unwrap();
+    assert_eq!(html.args, vec!["get", "html", "#main"]);
+
+    let title = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"title"})),
+    )
+    .unwrap();
+    assert_eq!(title.args, vec!["get", "title"]);
+
+    // Default format falls back to body text.
+    let text = build_command("get_content", &input(json!({"action":"get_content"}))).unwrap();
+    assert_eq!(text.args, vec!["get", "text", "body"]);
+}
