@@ -64,7 +64,10 @@ EOF
 Description=Run the jcode upstream merge agent every ${INTERVAL_HOURS}h
 
 [Timer]
-OnBootSec=15min
+# OnBootSec alone leaves NEXT empty when the machine booted long ago, so the
+# timer sits armed and never fires. OnActiveSec schedules the first run
+# relative to enabling it, which is what "install and it starts working" means.
+OnActiveSec=15min
 OnUnitActiveSec=${INTERVAL_HOURS}h
 Persistent=true
 
