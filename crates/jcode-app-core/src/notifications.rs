@@ -224,6 +224,11 @@ impl NotificationDispatcher {
     /// Like `send_all`, but with an optional pre-built HTML body for the email channel.
     /// When `email_html_override` is Some, it's used directly as the email body instead
     /// of converting `detailed_body` through `markdown_to_html_email`.
+    ///
+    /// The parameters are the four per-channel body variants plus routing
+    /// metadata; grouping them into a struct would only move the same fields to
+    /// each call site.
+    #[allow(clippy::too_many_arguments)]
     fn send_all_with_email_override(
         &self,
         title: &str,
@@ -954,10 +959,10 @@ fn format_cycle_body_desktop(transcript: &AmbientTranscript) -> String {
 
     // First non-empty paragraph of the summary: the agent leads with its
     // conclusion, so this is the sentence worth surfacing.
-    if let Some(summary) = transcript.summary.as_ref() {
-        if let Some(paragraph) = summary.split("\n\n").map(str::trim).find(|p| !p.is_empty()) {
-            parts.push(truncate_on_char_boundary(paragraph, DESKTOP_BODY_MAX_CHARS));
-        }
+    if let Some(summary) = transcript.summary.as_ref()
+        && let Some(paragraph) = summary.split("\n\n").map(str::trim).find(|p| !p.is_empty())
+    {
+        parts.push(truncate_on_char_boundary(paragraph, DESKTOP_BODY_MAX_CHARS));
     }
 
     if parts.is_empty() {
@@ -975,10 +980,10 @@ fn truncate_on_char_boundary(text: &str, max: usize) -> String {
     }
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     // Prefer breaking at the last word so the cut does not land mid-token.
-    if let Some(idx) = out.rfind(char::is_whitespace) {
-        if idx >= max / 2 {
-            out.truncate(idx);
-        }
+    if let Some(idx) = out.rfind(char::is_whitespace)
+        && idx >= max / 2
+    {
+        out.truncate(idx);
     }
     out.push('\u{2026}');
     out

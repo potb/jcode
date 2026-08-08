@@ -1,3 +1,8 @@
+// These tests intentionally hold the process-wide test-env lock across awaits:
+// the env mutation they serialize must stay exclusive for the whole test, which
+// is the same rationale recorded at the other suites' allow sites.
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};

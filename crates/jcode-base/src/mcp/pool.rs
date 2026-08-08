@@ -424,6 +424,9 @@ pub fn get_shared_pool() -> Option<Arc<SharedMcpPool>> {
 
 #[cfg(test)]
 mod tests {
+    // Holding the process-wide test-env lock across awaits is deliberate: the
+    // env mutation must stay exclusive for the whole test.
+    #![allow(clippy::await_holding_lock)]
     use super::{ConnectAttempt, SharedMcpPool};
     use crate::mcp::protocol::McpConfig;
     use std::sync::Arc;

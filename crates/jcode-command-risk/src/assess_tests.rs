@@ -99,7 +99,7 @@ fn deleting_outside_the_project_asks_for_justification() {
 fn non_rm_destructive_tools_are_covered() {
     // A name-based denylist would miss all of these.
     assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
-    assert!(level("dd if=/dev/zero of=/dev/sda").runs_immediately() == false);
+    assert!(!level("dd if=/dev/zero of=/dev/sda").runs_immediately());
     assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
 }
 

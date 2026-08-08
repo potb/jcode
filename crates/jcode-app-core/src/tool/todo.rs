@@ -935,6 +935,9 @@ impl Tool for TodoTool {
 
 #[cfg(test)]
 mod tests {
+    // Holding the process-wide test-env lock across awaits is deliberate: the
+    // env mutation must stay exclusive for the whole test.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
 
     #[test]
@@ -1970,7 +1973,7 @@ mod tests {
             ..before.clone()
         };
 
-        let changes = goal_changes(&[before.clone()], &[after.clone()]);
+        let changes = goal_changes(std::slice::from_ref(&before), std::slice::from_ref(&after));
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].before.as_ref(), Some(&before));

@@ -503,6 +503,10 @@ async fn test_schedule_tool_requires_time() {
 /// exact failure this setting exists to prevent: with no channel able to carry
 /// an answer back, it sits until it is expired and the cycle's work is lost.
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
 async fn test_request_permission_auto_approves_when_configured() {
     let _guard = jcode_base::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
