@@ -543,9 +543,7 @@ async fn test_request_permission_auto_approves_when_configured() {
         out.output
     );
     assert!(
-        get_safety_system()
-            .pending_requests()
-            .is_empty(),
+        get_safety_system().pending_requests().is_empty(),
         "auto-approved requests must not be left queued for a human"
     );
 

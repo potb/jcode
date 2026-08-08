@@ -160,7 +160,6 @@ impl ScheduledQueue {
         ready
     }
 
-
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
         self.items.iter().min_by_key(|i| i.scheduled_for)
     }

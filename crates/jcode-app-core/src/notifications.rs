@@ -902,11 +902,7 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
 /// the sanitized stats-only body. `detailed` opts into the short human
 /// summary: much more useful, but it names branches, PRs and paths.
 fn ntfy_body<'a>(detailed: bool, safe_body: &'a str, desktop_body: &'a str) -> &'a str {
-    if detailed {
-        desktop_body
-    } else {
-        safe_body
-    }
+    if detailed { desktop_body } else { safe_body }
 }
 
 /// Sanitized body for potentially public channels (ntfy.sh).
@@ -959,11 +955,7 @@ fn format_cycle_body_desktop(transcript: &AmbientTranscript) -> String {
     // First non-empty paragraph of the summary: the agent leads with its
     // conclusion, so this is the sentence worth surfacing.
     if let Some(summary) = transcript.summary.as_ref() {
-        if let Some(paragraph) = summary
-            .split("\n\n")
-            .map(str::trim)
-            .find(|p| !p.is_empty())
-        {
+        if let Some(paragraph) = summary.split("\n\n").map(str::trim).find(|p| !p.is_empty()) {
             parts.push(truncate_on_char_boundary(paragraph, DESKTOP_BODY_MAX_CHARS));
         }
     }
@@ -1384,7 +1376,11 @@ mod desktop_body_tests {
         let body = format_cycle_body_desktop(&t);
 
         assert!(body.contains("2 permission request(s) pending"));
-        assert!(body.starts_with('\u{26a0}'), "got {:?}", &body[..8.min(body.len())]);
+        assert!(
+            body.starts_with('\u{26a0}'),
+            "got {:?}",
+            &body[..8.min(body.len())]
+        );
     }
 
     /// Truncation must be visible, so a clipped summary is not read as whole.

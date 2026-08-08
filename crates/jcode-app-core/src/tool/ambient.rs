@@ -698,12 +698,7 @@ impl Tool for RequestPermissionTool {
                 "Auto-approved by ambient.auto_approve_permissions (action '{}').",
                 params.action
             );
-            system.record_decision(
-                &request_id,
-                true,
-                "ambient_auto_approve",
-                Some(msg.clone()),
-            )?;
+            system.record_decision(&request_id, true, "ambient_auto_approve", Some(msg.clone()))?;
             return Ok(ToolOutput::new(format!(
                 "Permission approved: {} Proceed without waiting.",
                 msg

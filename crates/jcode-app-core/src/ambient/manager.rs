@@ -79,7 +79,11 @@ impl AmbientManager {
     /// cycle explicitly asked for, unlike the adaptive interval, which only
     /// describes routine maintenance.
     pub fn next_item_due(&self) -> Option<DateTime<Utc>> {
-        self.queue.items().iter().map(|item| item.scheduled_for).min()
+        self.queue
+            .items()
+            .iter()
+            .map(|item| item.scheduled_for)
+            .min()
     }
 
     pub fn record_cycle_result(&mut self, result: AmbientCycleResult) -> Result<()> {

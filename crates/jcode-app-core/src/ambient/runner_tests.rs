@@ -207,10 +207,7 @@ fn due_ambient_queue_item_triggers_a_cycle_despite_a_distant_next_wake() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let _enabled = EnvVarGuard::set_path(
-        "JCODE_AMBIENT_ENABLED",
-        std::path::Path::new("true"),
-    );
+    let _enabled = EnvVarGuard::set_path("JCODE_AMBIENT_ENABLED", std::path::Path::new("true"));
     crate::config::invalidate_config_cache();
 
     let mut state = crate::ambient::AmbientState::load().expect("load state");
@@ -278,7 +275,10 @@ fn future_ambient_queue_item_is_a_deadline_but_not_yet_due() {
     })
     .expect("schedule item");
 
-    assert!(!mgr.has_due_ambient_item(), "not due for another 45 minutes");
+    assert!(
+        !mgr.has_due_ambient_item(),
+        "not due for another 45 minutes"
+    );
     let next = mgr.next_ambient_item_due().expect("a deadline is known");
     assert_eq!(next, due_at);
 
@@ -484,13 +484,21 @@ fn idle_sleep_is_bounded_by_future_deadlines_and_never_busy_loops() {
     // the item then sat overdue for two hours.
     for ms in [1i64, 100, 500, 871, 999] {
         assert_eq!(
-            idle_sleep_secs(now, interval, Some(now + chrono::Duration::milliseconds(ms))),
+            idle_sleep_secs(
+                now,
+                interval,
+                Some(now + chrono::Duration::milliseconds(ms))
+            ),
             1,
             "a deadline {ms}ms away must wake in ~1s, not sleep the full interval"
         );
     }
     assert_eq!(
-        idle_sleep_secs(now, interval, Some(now + chrono::Duration::milliseconds(1500))),
+        idle_sleep_secs(
+            now,
+            interval,
+            Some(now + chrono::Duration::milliseconds(1500))
+        ),
         2,
         "partial seconds round up so the wake lands at or after the deadline"
     );
@@ -527,7 +535,10 @@ async fn startup_reclaims_a_cycle_interrupted_by_a_previous_process() {
 
     let recovered = crate::ambient::AmbientState::load().expect("reload state");
     assert!(
-        !matches!(recovered.status, crate::ambient::AmbientStatus::Running { .. }),
+        !matches!(
+            recovered.status,
+            crate::ambient::AmbientStatus::Running { .. }
+        ),
         "startup must clear a stale Running status, got {:?}",
         recovered.status
     );
@@ -696,7 +707,10 @@ fn items_claimed_by_a_process_that_died_are_recovered_at_startup() {
         .iter()
         .filter(|i| i.context == "work that must survive a crash")
         .count();
-    assert_eq!(count, 1, "the item must exist exactly once, never duplicated");
+    assert_eq!(
+        count, 1,
+        "the item must exist exactly once, never duplicated"
+    );
 
     crate::config::invalidate_config_cache();
 }
@@ -889,7 +903,13 @@ fn a_corrupt_inflight_record_is_survivable_and_self_clearing() {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let inflight = dir.join("inflight.json");
 
-    for bad in ["", "{", "[{\"id\":\"trunc", "null", "{\"not\":\"an array\"}"] {
+    for bad in [
+        "",
+        "{",
+        "[{\"id\":\"trunc",
+        "null",
+        "{\"not\":\"an array\"}",
+    ] {
         std::fs::write(&inflight, bad).expect("write corrupt record");
         let mut mgr = crate::ambient::AmbientManager::new().expect("manager");
         assert_eq!(

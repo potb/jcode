@@ -85,11 +85,8 @@ fn closed_window_sleep_secs(
     next_open: Option<DateTime<Local>>,
     next_direct_due: Option<DateTime<Utc>>,
 ) -> u64 {
-    let until_open = schedule_window::sleep_secs_until_open(
-        &now_local,
-        next_open,
-        MAX_CLOSED_WINDOW_SLEEP_SECS,
-    );
+    let until_open =
+        schedule_window::sleep_secs_until_open(&now_local, next_open, MAX_CLOSED_WINDOW_SLEEP_SECS);
     idle_sleep_secs(now_utc, until_open, next_direct_due)
 }
 
@@ -98,10 +95,7 @@ fn closed_window_sleep_secs(
 /// The runner tracks direct-delivery and ambient-cycle queue deadlines
 /// separately because they are serviced differently, but when deciding how long
 /// to sleep only the nearer one matters.
-fn earliest_deadline(
-    a: Option<DateTime<Utc>>,
-    b: Option<DateTime<Utc>>,
-) -> Option<DateTime<Utc>> {
+fn earliest_deadline(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (only, None) | (None, only) => only,
@@ -145,10 +139,7 @@ fn idle_sleep_secs(
 /// Keeping the two in agreement matters beyond tidiness. `should_run` gates on
 /// the persisted value, so letting a distant request win silently reimposed
 /// that distance on the whole loop while the runner's own sleep said otherwise.
-fn reconciled_next_wake(
-    current: &AmbientStatus,
-    computed: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn reconciled_next_wake(current: &AmbientStatus, computed: DateTime<Utc>) -> Option<DateTime<Utc>> {
     match current {
         AmbientStatus::Scheduled { next_wake } => Some((*next_wake).min(computed)),
         AmbientStatus::Running { .. } | AmbientStatus::Idle => Some(computed),
@@ -1270,8 +1261,7 @@ impl AmbientRunnerHandle {
         let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
-        let (system_prompt, initial_message, claimed) =
-            self.build_cycle_context(provider).await?;
+        let (system_prompt, initial_message, claimed) = self.build_cycle_context(provider).await?;
 
         // A claimed item is only safely consumed once the cycle has actually
         // had a chance to act on it. If the cycle cannot run at all, put the

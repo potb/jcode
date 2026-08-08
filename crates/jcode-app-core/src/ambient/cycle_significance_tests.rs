@@ -16,8 +16,14 @@ fn outcome(significance: CycleSignificance) -> CycleOutcome {
 
 #[test]
 fn parses_declared_values() {
-    assert_eq!(CycleSignificance::parse(Some("routine")), CycleSignificance::Routine);
-    assert_eq!(CycleSignificance::parse(Some("notable")), CycleSignificance::Notable);
+    assert_eq!(
+        CycleSignificance::parse(Some("routine")),
+        CycleSignificance::Routine
+    );
+    assert_eq!(
+        CycleSignificance::parse(Some("notable")),
+        CycleSignificance::Notable
+    );
     assert_eq!(
         CycleSignificance::parse(Some("  ROUTINE  ")),
         CycleSignificance::Routine,
@@ -29,7 +35,10 @@ fn parses_declared_values() {
 fn accepts_plausible_synonyms() {
     // The model reaches for these; treating them as unspecified would notify
     // for cycles it explicitly called maintenance.
-    assert_eq!(CycleSignificance::parse(Some("garden")), CycleSignificance::Routine);
+    assert_eq!(
+        CycleSignificance::parse(Some("garden")),
+        CycleSignificance::Routine
+    );
     assert_eq!(
         CycleSignificance::parse(Some("maintenance")),
         CycleSignificance::Routine
@@ -42,8 +51,14 @@ fn accepts_plausible_synonyms() {
 
 #[test]
 fn unknown_or_missing_is_unspecified() {
-    assert_eq!(CycleSignificance::parse(None), CycleSignificance::Unspecified);
-    assert_eq!(CycleSignificance::parse(Some("")), CycleSignificance::Unspecified);
+    assert_eq!(
+        CycleSignificance::parse(None),
+        CycleSignificance::Unspecified
+    );
+    assert_eq!(
+        CycleSignificance::parse(Some("")),
+        CycleSignificance::Unspecified
+    );
     assert_eq!(
         CycleSignificance::parse(Some("kind of important")),
         CycleSignificance::Unspecified,
@@ -88,7 +103,10 @@ fn pending_permission_always_notifies() {
 fn failure_always_notifies() {
     let mut o = outcome(CycleSignificance::Routine);
     o.failed = true;
-    assert!(should_notify(&o), "a failed cycle is news even if labelled routine");
+    assert!(
+        should_notify(&o),
+        "a failed cycle is news even if labelled routine"
+    );
 
     let mut o = outcome(CycleSignificance::Unspecified);
     o.failed = true;

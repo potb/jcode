@@ -128,9 +128,10 @@ impl ChatGptWebState {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
 
-            session.click("#composer-submit-button")
-            .await
-            .context("Failed to submit the prompt in ChatGPT")?;
+            session
+                .click("#composer-submit-button")
+                .await
+                .context("Failed to submit the prompt in ChatGPT")?;
 
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
@@ -223,16 +224,17 @@ return { onboarding: false, model, temporary, signedOut };
     let verification = {
         let deadline = Instant::now() + MODEL_SELECTION_TIMEOUT;
         loop {
-            let current = session.evaluate(
-                r#"
+            let current = session
+                .evaluate(
+                    r#"
 const model = Array.from(document.querySelectorAll('button.__composer-pill'))
   .map(b => b.innerText.trim()).find(Boolean) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
 return { model, temporary };
 "#,
-            )
-            .await?;
+                )
+                .await?;
             if page_verification_ready(&current) || Instant::now() >= deadline {
                 break current;
             }
@@ -284,8 +286,9 @@ async fn insert_prompt(session: &WebSession, prompt: &str) -> Result<()> {
             .context("Failed while appending a chunk to the ChatGPT composer")?;
     }
 
-    let verification = session.evaluate(
-        r#"
+    let verification = session
+        .evaluate(
+            r#"
 const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
 const submit = document.querySelector('#composer-submit-button');
 const text = editor
@@ -299,8 +302,8 @@ for (let index = 0; index < text.length; index++) {
 }
 return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submit.disabled };
 "#,
-    )
-    .await?;
+        )
+        .await?;
     let actual_len = verification
         .get("length")
         .and_then(Value::as_u64)
@@ -339,16 +342,17 @@ async fn poll_for_response(
 
     loop {
         if tx.is_closed() {
-            let _ = session.evaluate(
-                r#"
+            let _ = session
+                .evaluate(
+                    r#"
 const stop = Array.from(document.querySelectorAll('button')).find(b =>
   /stop/i.test(b.getAttribute('aria-label') || '') || b.dataset.testid === 'stop-button'
 );
 if (stop) stop.click();
 return true;
 "#,
-            )
-            .await;
+                )
+                .await;
             anyhow::bail!("ChatGPT web response consumer was closed");
         }
         if Instant::now() >= deadline {

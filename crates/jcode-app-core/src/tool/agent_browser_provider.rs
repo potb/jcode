@@ -335,12 +335,7 @@ pub fn build_command_with_caps(
                 args.extend(["find".into(), "text".into(), text.clone(), "click".into()]);
             } else if let (Some(x), Some(y)) = (input.x, input.y) {
                 // Coordinate click: move then press/release.
-                args.extend([
-                    "mouse".into(),
-                    "move".into(),
-                    x.to_string(),
-                    y.to_string(),
-                ]);
+                args.extend(["mouse".into(), "move".into(), x.to_string(), y.to_string()]);
             } else {
                 anyhow::bail!("click requires selector, text, or x/y coordinates");
             }
@@ -702,8 +697,8 @@ async fn verify_tab_switch(input: &BrowserInput, result: &Value, ctx: &ToolConte
         })
         .map(|tab| {
             let by_index = tab.get("index").and_then(|v| v.as_i64()) == Some(requested);
-            let by_handle = tab.get("tabId").and_then(|v| v.as_str())
-                == Some(format!("t{requested}").as_str());
+            let by_handle =
+                tab.get("tabId").and_then(|v| v.as_str()) == Some(format!("t{requested}").as_str());
             by_index || by_handle
         })
         .unwrap_or(false);

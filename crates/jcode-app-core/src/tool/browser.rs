@@ -344,7 +344,10 @@ fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvide
     let browser = browser.unwrap_or("auto");
 
     // Explicit browser choice wins.
-    if AGENT_BROWSER_PROVIDER.supported_browsers().contains(&browser) {
+    if AGENT_BROWSER_PROVIDER
+        .supported_browsers()
+        .contains(&browser)
+    {
         return Ok(&AGENT_BROWSER_PROVIDER);
     }
     if browser == "firefox" {

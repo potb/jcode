@@ -270,12 +270,14 @@ pub async fn inspect_status() -> AgentBrowserStatus {
     };
 
     if !binary_installed {
-        diagnostics.push("agent-browser binary not found on PATH or in ~/.jcode/agent-browser".into());
+        diagnostics
+            .push("agent-browser binary not found on PATH or in ~/.jcode/agent-browser".into());
     }
 
     let chrome_installed = chrome_present();
     if binary_installed && !chrome_installed {
-        diagnostics.push("no Chrome/Chromium detected; run setup to download Chrome for Testing".into());
+        diagnostics
+            .push("no Chrome/Chromium detected; run setup to download Chrome for Testing".into());
     }
 
     // The binary responding to --version is the cheap liveness probe. A real
@@ -283,7 +285,9 @@ pub async fn inspect_status() -> AgentBrowserStatus {
     let responding = version.is_some();
 
     let parsed = version.as_deref().and_then(parse_version);
-    let outdated = parsed.map(|v| v < MINIMUM_SUPPORTED_VERSION).unwrap_or(false);
+    let outdated = parsed
+        .map(|v| v < MINIMUM_SUPPORTED_VERSION)
+        .unwrap_or(false);
     if outdated && let Some(found) = parsed {
         diagnostics.push(format!(
             "agent-browser {} is older than the supported minimum {}; `wait` on text and `upload` hang on these builds. Run browser setup to install a current copy.",
@@ -310,12 +314,13 @@ pub async fn inspect_status() -> AgentBrowserStatus {
 
 /// Download the platform binary from GitHub releases into ~/.jcode/agent-browser.
 pub async fn install_binary() -> Result<String> {
-    let asset = platform_asset_name()
-        .ok_or_else(|| anyhow::anyhow!(
+    let asset = platform_asset_name().ok_or_else(|| {
+        anyhow::anyhow!(
             "No agent-browser release asset for {}/{}",
             std::env::consts::OS,
             std::env::consts::ARCH
-        ))?;
+        )
+    })?;
 
     let client = reqwest::Client::builder()
         .user_agent("jcode-agent-browser-installer")
@@ -339,9 +344,9 @@ pub async fn install_binary() -> Result<String> {
         .get("assets")
         .and_then(|v| v.as_array())
         .and_then(|assets| {
-            assets.iter().find(|a| {
-                a.get("name").and_then(|n| n.as_str()) == Some(asset)
-            })
+            assets
+                .iter()
+                .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(asset))
         })
         .and_then(|a| a.get("browser_download_url"))
         .and_then(|v| v.as_str())

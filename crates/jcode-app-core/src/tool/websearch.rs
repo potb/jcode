@@ -986,7 +986,8 @@ mod exa_tests {
 
     #[test]
     fn parses_mcp_sse_payload() {
-        let raw = "event: message\ndata: {\"result\":{\"content\":[]},\"jsonrpc\":\"2.0\",\"id\":1}\n";
+        let raw =
+            "event: message\ndata: {\"result\":{\"content\":[]},\"jsonrpc\":\"2.0\",\"id\":1}\n";
         let payload = parse_mcp_sse_payload(raw).expect("payload");
         assert!(payload.get("result").is_some());
     }

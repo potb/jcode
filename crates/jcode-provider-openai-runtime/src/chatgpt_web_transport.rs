@@ -240,10 +240,9 @@ impl WebSession {
                     json!({ "tabId": self.tab_id, "script": script }),
                 )
                 .await?;
-                output
-                    .get("result")
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))
+                output.get("result").cloned().ok_or_else(|| {
+                    anyhow::anyhow!("Browser evaluate response did not contain a result")
+                })
             }
             WebBackend::AgentBrowser => {
                 // agent-browser evaluates an expression, so a function-body
@@ -297,11 +296,7 @@ impl WebSession {
             }
             WebBackend::AgentBrowser => {
                 self.agent_browser_call(
-                    &[
-                        "fill".to_string(),
-                        selector.to_string(),
-                        value.to_string(),
-                    ],
+                    &["fill".to_string(), selector.to_string(), value.to_string()],
                     Duration::from_secs(120),
                 )
                 .await?;
@@ -423,8 +418,7 @@ impl WebSession {
 ///
 /// Written out rather than pulling a dependency into this crate for one call.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
