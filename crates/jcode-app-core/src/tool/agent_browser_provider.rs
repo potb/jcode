@@ -95,23 +95,44 @@ impl BrowserProvider for AgentBrowserProvider {
         input: &BrowserInput,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        let plan = build_command(action, input)?;
+        let caps = crate::agent_browser::backend_caps().await;
+        let plan = build_command_with_caps(action, input, caps)?;
 
         if plan.wants_screenshot_image {
             return screenshot_with_image(plan, ctx).await;
         }
 
-        let value = run_cli(&plan.args, ctx).await?;
+        // Run every step, stopping at the first failure, and report the last.
+        let mut value = Value::Null;
+        for step in &plan.steps {
+            value = run_cli(step, ctx).await?;
+        }
+
+        if action == "select_tab" {
+            verify_tab_switch(input, &value, ctx).await?;
+        }
+
         Ok(render_output(action, plan.title, value))
     }
 }
 
-/// A single agent-browser CLI invocation.
+/// One or more agent-browser CLI invocations that make up a jcode action.
+///
+/// Most actions are a single command. A few (form fill, targeted key press)
+/// need several, and agent-browser's `batch` subcommand does not exist on older
+/// releases, so we run the steps ourselves and stop at the first failure.
 #[derive(Debug)]
 pub struct CommandPlan {
-    pub args: Vec<String>,
+    pub steps: Vec<Vec<String>>,
     pub title: String,
     pub wants_screenshot_image: bool,
+}
+
+impl CommandPlan {
+    /// The final command, whose result is what the caller reports.
+    pub fn last(&self) -> &[String] {
+        self.steps.last().map(|v| v.as_slice()).unwrap_or(&[])
+    }
 }
 
 /// Resolve a jcode selector-ish target into an agent-browser selector.
@@ -124,6 +145,16 @@ fn selector_of(input: &BrowserInput) -> Option<String> {
 }
 
 pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> {
+    build_command_with_caps(action, input, crate::agent_browser::BackendCaps::default())
+}
+
+pub fn build_command_with_caps(
+    action: &str,
+    input: &BrowserInput,
+    caps: crate::agent_browser::BackendCaps,
+) -> Result<CommandPlan> {
+    // Steps that must run before the final command (e.g. focus before press).
+    let mut steps: Vec<Vec<String>> = Vec::new();
     let mut args: Vec<String> = Vec::new();
     let mut wants_screenshot_image = false;
 
@@ -199,24 +230,27 @@ pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> 
             args.extend([verb.into(), selector, text.to_string()]);
         }
         "fill_form" => {
-            // agent-browser has no batch form fill; use `batch` to keep it one call.
+            // agent-browser has no batch form-fill primitive, and its `batch`
+            // subcommand is absent before 0.16, so drive one field per command.
             let fields = input
                 .fields
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("fields are required for fill_form"))?;
-            args.push("batch".into());
+            if fields.is_empty() {
+                anyhow::bail!("fill_form requires at least one field");
+            }
             for field in fields {
-                let cmd = match (&field.value, field.checked) {
+                let step: Vec<String> = match (&field.value, field.checked) {
                     (Some(value), _) => {
-                        json!(["fill", field.selector.clone(), value.clone()])
+                        vec!["fill".into(), field.selector.clone(), value.clone()]
                     }
-                    (None, Some(true)) => json!(["check", field.selector.clone()]),
-                    (None, Some(false)) => json!(["uncheck", field.selector.clone()]),
+                    (None, Some(true)) => vec!["check".into(), field.selector.clone()],
+                    (None, Some(false)) => vec!["uncheck".into(), field.selector.clone()],
                     (None, None) => {
                         anyhow::bail!("field {} needs value or checked", field.selector)
                     }
                 };
-                args.push(serde_json::to_string(&cmd)?);
+                steps.push(step);
             }
         }
         "select" => {
@@ -283,12 +317,9 @@ pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> 
                 .ok_or_else(|| anyhow::anyhow!("key is required for press"))?;
             if let Some(selector) = selector_of(input) {
                 // Focus the target first so the key lands on it.
-                args.push("batch".into());
-                args.push(serde_json::to_string(&json!(["focus", selector]))?);
-                args.push(serde_json::to_string(&json!(["press", key]))?);
-            } else {
-                args.extend(["press".into(), key.to_string()]);
+                steps.push(vec!["focus".into(), selector]);
             }
+            args.extend(["press".into(), key.to_string()]);
         }
         "list_tabs" => args.extend(["tab".into(), "list".into()]),
         "new_tab" => {
@@ -301,9 +332,15 @@ pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> 
             let tab_id = input
                 .tab_id
                 .ok_or_else(|| anyhow::anyhow!("tab_id is required for select_tab"))?;
-            // agent-browser >=0.30 requires stable `t<N>` handles and rejects bare
-            // integers; older builds accept the `t<N>` form too, so always send it.
-            args.extend(["tab".into(), format!("t{tab_id}")]);
+            // agent-browser >=0.30 needs stable `t<N>` handles and rejects bare
+            // integers. Older builds do the opposite and, worse, treat `t<N>` as
+            // "list tabs" and report success, silently leaving the wrong tab
+            // active. Pick per detected version rather than guessing.
+            if caps.uses_stable_tab_handles() {
+                args.extend(["tab".into(), format!("t{tab_id}")]);
+            } else {
+                args.extend(["tab".into(), tab_id.to_string()]);
+            }
         }
         "get_active_tab" => args.extend(["get".into(), "url".into()]),
         "list_frames" => {
@@ -333,8 +370,15 @@ pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> 
         other => anyhow::bail!("Unsupported browser action: {}", other),
     }
 
+    if !args.is_empty() {
+        steps.push(args);
+    }
+    if steps.is_empty() {
+        anyhow::bail!("browser action '{action}' produced no command");
+    }
+
     Ok(CommandPlan {
-        args,
+        steps,
         title: format!("browser {action}"),
         wants_screenshot_image,
     })
@@ -414,7 +458,10 @@ async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
 }
 
 async fn screenshot_with_image(plan: CommandPlan, ctx: &ToolContext) -> Result<ToolOutput> {
-    let result = run_cli(&plan.args, ctx).await?;
+    let mut result = Value::Null;
+    for step in &plan.steps {
+        result = run_cli(step, ctx).await?;
+    }
     let saved = result
         .get("path")
         .and_then(|v| v.as_str())
@@ -439,6 +486,52 @@ async fn screenshot_with_image(plan: CommandPlan, ctx: &ToolContext) -> Result<T
     }
 
     Ok(output)
+}
+
+/// Confirm a tab switch actually took effect.
+///
+/// Some agent-browser releases accept an unsupported tab handle form, return
+/// success, and leave the previously active tab selected. A silent no-op here
+/// would send the agent on to act against the wrong page, so detect it and turn
+/// it into a loud error.
+async fn verify_tab_switch(input: &BrowserInput, result: &Value, ctx: &ToolContext) -> Result<()> {
+    // A real switch echoes back the selected tab. A no-op returns a tab list.
+    if result.get("tabs").is_none() {
+        return Ok(());
+    }
+
+    let Some(requested) = input.tab_id else {
+        return Ok(());
+    };
+
+    let active_matches = result
+        .get("tabs")
+        .and_then(|v| v.as_array())
+        .and_then(|tabs| {
+            tabs.iter()
+                .find(|tab| tab.get("active") == Some(&Value::Bool(true)))
+        })
+        .map(|tab| {
+            let by_index = tab.get("index").and_then(|v| v.as_i64()) == Some(requested);
+            let by_handle = tab.get("tabId").and_then(|v| v.as_str())
+                == Some(format!("t{requested}").as_str());
+            by_index || by_handle
+        })
+        .unwrap_or(false);
+
+    if active_matches {
+        return Ok(());
+    }
+
+    let version = crate::agent_browser::backend_caps()
+        .await
+        .version
+        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let _ = ctx;
+    anyhow::bail!(
+        "select_tab did not switch tabs: the installed agent-browser ({version}) listed tabs instead of activating tab {requested}. Upgrade agent-browser (`agent-browser upgrade`), then retry."
+    );
 }
 
 fn render_output(action: &str, title: String, result: Value) -> ToolOutput {

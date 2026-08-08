@@ -112,6 +112,75 @@ async fn binary_version(bin: &PathBuf) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Parse `agent-browser 0.33.2` (or a bare `0.33.2`) into a comparable triple.
+pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    let token = text
+        .split_whitespace()
+        .map(|part| part.trim_start_matches('v'))
+        .find(|part| part.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0");
+    let minor = minor
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .unwrap_or("0")
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// agent-browser 0.30 replaced positional tab indices with stable `t<N>` handles.
+pub const STABLE_TAB_HANDLE_VERSION: (u32, u32, u32) = (0, 30, 0);
+
+/// Capabilities that vary across agent-browser releases.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackendCaps {
+    pub version: Option<(u32, u32, u32)>,
+}
+
+impl BackendCaps {
+    pub fn from_version_text(text: Option<&str>) -> Self {
+        Self {
+            version: text.and_then(parse_version),
+        }
+    }
+
+    /// Whether `tab t<N>` switches tabs.
+    ///
+    /// Older builds silently treat `t<N>` as "list tabs" and return success, so
+    /// when the version is unknown we deliberately pick the positional form:
+    /// newer binaries reject it loudly, which is far better than a silent no-op.
+    pub fn uses_stable_tab_handles(&self) -> bool {
+        match self.version {
+            Some(version) => version >= STABLE_TAB_HANDLE_VERSION,
+            None => false,
+        }
+    }
+}
+
+/// Cached capabilities for the resolved binary.
+pub async fn backend_caps() -> BackendCaps {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<BackendCaps> = OnceLock::new();
+    if let Some(caps) = CACHE.get() {
+        return *caps;
+    }
+    let caps = match resolve_binary() {
+        Some(bin) => BackendCaps::from_version_text(binary_version(&bin).await.as_deref()),
+        None => BackendCaps::default(),
+    };
+    *CACHE.get_or_init(|| caps)
+}
+
 /// Check whether some Chrome/Chromium is discoverable for agent-browser.
 fn chrome_present() -> bool {
     if std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").is_ok() {

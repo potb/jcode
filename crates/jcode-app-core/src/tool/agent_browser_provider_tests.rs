@@ -1,4 +1,10 @@
-use super::{build_command, BrowserInput};
+use super::{build_command, build_command_with_caps, BrowserInput, CommandPlan};
+use jcode_base::agent_browser::BackendCaps;
+
+/// Args of the final command in a plan (what most tests assert on).
+fn args(plan: &CommandPlan) -> Vec<String> {
+    plan.last().to_vec()
+}
 use serde_json::json;
 
 fn input(value: serde_json::Value) -> BrowserInput {
@@ -12,7 +18,7 @@ fn open_maps_to_open_command() {
         &input(json!({"action":"open","url":"https://example.com"})),
     )
     .unwrap();
-    assert_eq!(plan.args, vec!["open", "https://example.com"]);
+    assert_eq!(args(&plan), vec!["open", "https://example.com"]);
 }
 
 #[test]
@@ -22,16 +28,16 @@ fn open_with_new_tab_uses_tab_new() {
         &input(json!({"action":"open","url":"https://a.test","new_tab":true})),
     )
     .unwrap();
-    assert_eq!(plan.args, vec!["tab", "new", "https://a.test"]);
+    assert_eq!(args(&plan), vec!["tab", "new", "https://a.test"]);
 }
 
 #[test]
 fn snapshot_and_interactables_map_to_snapshot_variants() {
     let snap = build_command("snapshot", &input(json!({"action":"snapshot"}))).unwrap();
-    assert_eq!(snap.args, vec!["snapshot"]);
+    assert_eq!(args(&snap), vec!["snapshot"]);
 
     let inter = build_command("interactables", &input(json!({"action":"interactables"}))).unwrap();
-    assert_eq!(inter.args, vec!["snapshot", "-i"]);
+    assert_eq!(args(&inter), vec!["snapshot", "-i"]);
 }
 
 #[test]
@@ -41,11 +47,11 @@ fn click_supports_selector_and_text() {
         &input(json!({"action":"click","selector":"#submit"})),
     )
     .unwrap();
-    assert_eq!(by_selector.args, vec!["click", "#submit"]);
+    assert_eq!(args(&by_selector), vec!["click", "#submit"]);
 
     let by_text =
         build_command("click", &input(json!({"action":"click","text":"Sign in"}))).unwrap();
-    assert_eq!(by_text.args, vec!["find", "text", "Sign in", "click"]);
+    assert_eq!(args(&by_text), vec!["find", "text", "Sign in", "click"]);
 }
 
 #[test]
@@ -61,14 +67,14 @@ fn type_defaults_to_fill_and_honors_clear_false() {
         &input(json!({"action":"type","selector":"#q","text":"hi"})),
     )
     .unwrap();
-    assert_eq!(default.args, vec!["fill", "#q", "hi"]);
+    assert_eq!(args(&default), vec!["fill", "#q", "hi"]);
 
     let append = build_command(
         "type",
         &input(json!({"action":"type","selector":"#q","text":"hi","clear":false})),
     )
     .unwrap();
-    assert_eq!(append.args, vec!["type", "#q", "hi"]);
+    assert_eq!(args(&append), vec!["type", "#q", "hi"]);
 }
 
 #[test]
@@ -78,43 +84,17 @@ fn eval_uses_base64_to_avoid_quoting_hazards() {
         &input(json!({"action":"eval","script":"document.title"})),
     )
     .unwrap();
-    assert_eq!(plan.args[0], "eval");
-    assert_eq!(plan.args[1], "-b");
+    assert_eq!(args(&plan)[0], "eval");
+    assert_eq!(args(&plan)[1], "-b");
     // "document.title" base64-encoded
-    assert_eq!(plan.args[2], "ZG9jdW1lbnQudGl0bGU=");
+    assert_eq!(args(&plan)[2], "ZG9jdW1lbnQudGl0bGU=");
 }
 
 #[test]
-fn fill_form_batches_fields() {
-    let plan = build_command(
-        "fill_form",
-        &input(json!({
-            "action":"fill_form",
-            "fields":[
-                {"selector":"#email","value":"a@b.c"},
-                {"selector":"#tos","checked":true}
-            ]
-        })),
-    )
-    .unwrap();
-    assert_eq!(plan.args[0], "batch");
-    assert!(plan.args[1].contains("fill"));
-    assert!(plan.args[2].contains("check"));
-}
-
-#[test]
-fn press_with_selector_focuses_first() {
-    let plan = build_command(
-        "press",
-        &input(json!({"action":"press","key":"Enter","selector":"#q"})),
-    )
-    .unwrap();
-    assert_eq!(plan.args[0], "batch");
-    assert!(plan.args[1].contains("focus"));
-    assert!(plan.args[2].contains("press"));
-
+fn press_without_selector_is_a_single_command() {
     let bare = build_command("press", &input(json!({"action":"press","key":"Tab"}))).unwrap();
-    assert_eq!(bare.args, vec!["press", "Tab"]);
+    assert_eq!(bare.steps.len(), 1);
+    assert_eq!(args(&bare), vec!["press", "Tab"]);
 }
 
 #[test]
@@ -124,21 +104,21 @@ fn scroll_maps_positions_and_offsets() {
         &input(json!({"action":"scroll","position":"bottom"})),
     )
     .unwrap();
-    assert_eq!(bottom.args[0..2], ["scroll", "down"]);
+    assert_eq!(args(&bottom)[0..2], ["scroll", "down"]);
 
     let into_view = build_command(
         "scroll",
         &input(json!({"action":"scroll","selector":"#footer"})),
     )
     .unwrap();
-    assert_eq!(into_view.args, vec!["scrollintoview", "#footer"]);
+    assert_eq!(args(&into_view), vec!["scrollintoview", "#footer"]);
 }
 
 #[test]
 fn screenshot_requests_image_attachment() {
     let plan = build_command("screenshot", &input(json!({"action":"screenshot"}))).unwrap();
     assert!(plan.wants_screenshot_image);
-    assert_eq!(plan.args, vec!["screenshot"]);
+    assert_eq!(args(&plan), vec!["screenshot"]);
 }
 
 #[test]
@@ -148,29 +128,21 @@ fn wait_supports_selector_and_contains() {
         &input(json!({"action":"wait","selector":"#done"})),
     )
     .unwrap();
-    assert_eq!(by_sel.args, vec!["wait", "#done"]);
+    assert_eq!(args(&by_sel), vec!["wait", "#done"]);
 
     let by_text = build_command(
         "wait",
         &input(json!({"action":"wait","contains":"Welcome"})),
     )
     .unwrap();
-    assert_eq!(by_text.args, vec!["wait", "--text", "Welcome"]);
+    assert_eq!(args(&by_text), vec!["wait", "--text", "Welcome"]);
 }
 
 #[test]
 fn tab_actions_map_to_tab_subcommands() {
     assert_eq!(
-        build_command("list_tabs", &input(json!({"action":"list_tabs"})))
-            .unwrap()
-            .args,
+        args(&build_command("list_tabs", &input(json!({"action":"list_tabs"}))).unwrap()),
         vec!["tab", "list"]
-    );
-    assert_eq!(
-        build_command("select_tab", &input(json!({"action":"select_tab","tab_id":2})))
-            .unwrap()
-            .args,
-        vec!["tab", "t2"]
     );
 }
 
@@ -181,7 +153,7 @@ fn upload_requires_selector_and_path() {
         &input(json!({"action":"upload","selector":"input[type=file]","path":"/tmp/a.png"})),
     )
     .unwrap();
-    assert_eq!(plan.args, vec!["upload", "input[type=file]", "/tmp/a.png"]);
+    assert_eq!(args(&plan), vec!["upload", "input[type=file]", "/tmp/a.png"]);
 
     assert!(
         build_command("upload", &input(json!({"action":"upload","path":"/tmp/a"}))).is_err()
@@ -218,7 +190,7 @@ fn every_jcode_action_has_a_mapping() {
         let plan = build_command(&action, &input(case.clone()));
         assert!(plan.is_ok(), "action {action} failed: {:?}", plan.err());
         assert!(
-            !plan.unwrap().args.is_empty(),
+            !plan.unwrap().steps.is_empty(),
             "action {action} produced no args"
         );
     }
@@ -247,11 +219,94 @@ fn tab_list_renders_new_and_old_tab_id_shapes() {
 }
 
 #[test]
-fn select_tab_always_uses_t_prefixed_handle() {
-    // Bare integers are rejected by agent-browser >=0.30.
-    let plan = build_command("select_tab", &input(json!({"action":"select_tab","tab_id":3})))
-        .unwrap();
-    assert_eq!(plan.args, vec!["tab", "t3"]);
+fn select_tab_uses_the_form_the_installed_version_understands() {
+    let sel = input(json!({"action":"select_tab","tab_id":3}));
+
+    // >=0.30 requires stable `t<N>` handles and rejects bare integers.
+    let modern = BackendCaps::from_version_text(Some("agent-browser 0.33.2"));
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, modern).unwrap()),
+        vec!["tab", "t3"]
+    );
+
+    // Older builds treat `t<N>` as "list tabs" and silently fail to switch, so
+    // they must get the positional form instead.
+    let legacy = BackendCaps::from_version_text(Some("agent-browser 0.13.0"));
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, legacy).unwrap()),
+        vec!["tab", "3"]
+    );
+
+    // Unknown version: prefer the form that fails loudly on the wrong binary
+    // over the one that silently no-ops.
+    let unknown = BackendCaps::default();
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, unknown).unwrap()),
+        vec!["tab", "3"]
+    );
+}
+
+#[test]
+fn multi_step_actions_never_use_the_batch_subcommand() {
+    // `batch` does not exist before agent-browser 0.16 and its argument form
+    // differs across releases, so jcode must drive the steps itself.
+    let cases = vec![
+        json!({"action":"fill_form","fields":[{"selector":"#a","value":"1"},{"selector":"#b","checked":true}]}),
+        json!({"action":"press","key":"Enter","selector":"#q"}),
+    ];
+    for case in cases {
+        let action = case["action"].as_str().unwrap().to_string();
+        let plan = build_command(&action, &input(case.clone())).unwrap();
+        for step in &plan.steps {
+            assert_ne!(step[0], "batch", "action {action} used batch: {step:?}");
+        }
+    }
+}
+
+#[test]
+fn fill_form_emits_one_command_per_field() {
+    let plan = build_command(
+        "fill_form",
+        &input(json!({
+            "action":"fill_form",
+            "fields":[
+                {"selector":"#email","value":"a@b.c"},
+                {"selector":"#tos","checked":true},
+                {"selector":"#news","checked":false}
+            ]
+        })),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[0], vec!["fill", "#email", "a@b.c"]);
+    assert_eq!(plan.steps[1], vec!["check", "#tos"]);
+    assert_eq!(plan.steps[2], vec!["uncheck", "#news"]);
+}
+
+#[test]
+fn press_with_selector_is_focus_then_press() {
+    let plan = build_command(
+        "press",
+        &input(json!({"action":"press","key":"Enter","selector":"#q"})),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0], vec!["focus", "#q"]);
+    assert_eq!(plan.steps[1], vec!["press", "Enter"]);
+}
+
+#[test]
+fn version_parsing_handles_real_and_odd_inputs() {
+    use jcode_base::agent_browser::parse_version;
+    assert_eq!(parse_version("agent-browser 0.33.2"), Some((0, 33, 2)));
+    assert_eq!(parse_version("0.13.0"), Some((0, 13, 0)));
+    assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
+    assert_eq!(parse_version("agent-browser 0.34.0-beta.1"), Some((0, 34, 0)));
+    assert_eq!(parse_version("no version here"), None);
+
+    // The 0.30 boundary is what decides tab handle form.
+    assert!(BackendCaps::from_version_text(Some("0.30.0")).uses_stable_tab_handles());
+    assert!(!BackendCaps::from_version_text(Some("0.29.9")).uses_stable_tab_handles());
 }
 
 #[test]
@@ -261,16 +316,16 @@ fn get_content_html_and_title_map_to_get_subcommands() {
         &input(json!({"action":"get_content","format":"html","selector":"#main"})),
     )
     .unwrap();
-    assert_eq!(html.args, vec!["get", "html", "#main"]);
+    assert_eq!(args(&html), vec!["get", "html", "#main"]);
 
     let title = build_command(
         "get_content",
         &input(json!({"action":"get_content","format":"title"})),
     )
     .unwrap();
-    assert_eq!(title.args, vec!["get", "title"]);
+    assert_eq!(args(&title), vec!["get", "title"]);
 
     // Default format falls back to body text.
     let text = build_command("get_content", &input(json!({"action":"get_content"}))).unwrap();
-    assert_eq!(text.args, vec!["get", "text", "body"]);
+    assert_eq!(args(&text), vec!["get", "text", "body"]);
 }
