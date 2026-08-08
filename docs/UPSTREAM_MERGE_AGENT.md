@@ -37,9 +37,22 @@ scripts/install_upstream_merge_schedule.sh --run-now     # run once, right now
 scripts/install_upstream_merge_schedule.sh --uninstall
 ```
 
+## Remotes
+
+Assumes the standard fork layout, which `gh repo fork` produces:
+
+| Remote | Points at | Written to? |
+| --- | --- | --- |
+| `origin` | your fork | yes, fast-forward pushes only |
+| `upstream` | the project you forked | never |
+
+A clone with only `origin` still works; the script falls back to it and logs
+that it did.
+
 ## What a run does
 
-1. `git fetch origin`. If the fork already contains upstream, exit silently.
+1. Fetch `upstream` (and `origin`). If the fork already contains upstream,
+   publish any unpushed local commits and exit.
 2. Build/refresh an isolated worktree at `~/.jcode/upstream-merge/worktree` on
    branch `auto/upstream-merge`, from the fork's base commit. **Your working
    tree is never touched.**
@@ -48,12 +61,43 @@ scripts/install_upstream_merge_schedule.sh --uninstall
 4. Otherwise hand the conflicts to a single-purpose jcode agent.
 5. Notify through jcode's configured channels and leave the branch for review.
 
-Nothing is ever pushed, and the merge is never applied to your working tree
-automatically. Adopt a good result yourself:
+On a verified merge it adopts the result and publishes it:
+
+6. Fast-forward your real `master` to the merge branch.
+7. Push `master` to your fork.
+
+Both steps are guarded, because you are often mid-edit in this repo. It adopts
+only onto a clean tree, still on the expected branch, still at the commit the
+merge was built from; and it pushes only as a fast-forward, only to the fork,
+never to upstream, never forced. If any guard fails you get a "merged, needs
+adopting" notification and the branch is left for you:
 
 ```bash
 git -C ~/jcode merge --ff-only auto/upstream-merge
 ```
+
+Set `JCODE_UPSTREAM_PUSH=0` to keep everything local.
+
+## GitHub Actions are kept disabled on the fork
+
+A fork inherits all of upstream's workflows, including release and publish
+jobs. A synced `master` would trigger them and spend your CI minutes building
+artifacts nobody asked for.
+
+Before every push the script confirms Actions are disabled on the fork via the
+API, disables them if something re-enabled them, and cancels any queued or
+running workflow. This is done at the repo level rather than by deleting
+`.github/workflows/`, because deleting those files would conflict with upstream
+on every future merge, forever.
+
+Opt out with `JCODE_UPSTREAM_DISABLE_ACTIONS=0`. To re-enable by hand, PUT
+`enabled=true` to the repo's `actions/permissions` API endpoint.
+
+## Already-resolved conflicts are free
+
+If `git rerere` is enabled, a conflict you resolved once is replayed
+automatically on later runs. The script detects a fully rerere-resolved merge,
+commits and verifies it directly, and never spends an agent run on it.
 
 ## Agent policy: resolve by default, stop on duplicated features
 
@@ -111,17 +155,24 @@ All via environment variables, so the systemd unit and plist stay generic:
 | --- | --- | --- |
 | `JCODE_UPSTREAM_REPO` | `~/jcode` | Fork repo |
 | `JCODE_UPSTREAM_BASE` | `master` | Fork branch to merge into |
-| `JCODE_UPSTREAM_REF` | `origin/master` | Upstream ref to merge from |
+| `JCODE_UPSTREAM_REMOTE` | `upstream` | Remote holding the parent project |
+| `JCODE_UPSTREAM_REF` | `<remote>/<base>` | Upstream ref to merge from |
+| `JCODE_UPSTREAM_FORK_REMOTE` | `origin` | Remote holding your fork |
+| `JCODE_UPSTREAM_PUSH` | `1` | Push the adopted merge to the fork |
+| `JCODE_UPSTREAM_DISABLE_ACTIONS` | `1` | Keep GitHub Actions off on the fork |
 | `JCODE_UPSTREAM_BRANCH` | `auto/upstream-merge` | Scratch result branch |
 | `JCODE_UPSTREAM_STATE_DIR` | `~/.jcode/upstream-merge` | Worktree, logs, lock, verdict |
 | `JCODE_UPSTREAM_CHECK_CMD` | `cargo check --workspace` | Build check the agent must make pass |
 | `JCODE_BIN` | `~/.local/bin/jcode` | jcode binary |
 
-If your fork tracks a separate upstream remote, add it and point at it:
+Setting up a fork from scratch:
 
 ```bash
-git remote add upstream https://github.com/1jehuang/jcode.git
-JCODE_UPSTREAM_REF=upstream/master scripts/install_upstream_merge_schedule.sh
+gh repo fork 1jehuang/jcode --clone=false
+gh api -X PUT "repos/OWNER/jcode/actions/permissions" -F enabled=false
+git remote set-url origin "git@github.com:OWNER/jcode.git"
+git remote add upstream "https://github.com/1jehuang/jcode.git"
+scripts/install_upstream_merge_schedule.sh --interval-hours 6
 ```
 
 ## Portability notes
