@@ -3,6 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod cycle_significance;
+#[cfg(test)]
+mod cycle_significance_tests;
 mod directives;
 pub mod headroom;
 mod manager;
@@ -10,9 +13,6 @@ mod paths;
 mod persistence;
 mod prompt;
 pub mod runner;
-pub mod cycle_significance;
-#[cfg(test)]
-mod cycle_significance_tests;
 pub mod schedule_window;
 #[cfg(test)]
 mod schedule_window_tests;

@@ -1,4 +1,4 @@
-use super::{build_command, build_command_with_caps, BrowserInput, CommandPlan};
+use super::{BrowserInput, CommandPlan, build_command, build_command_with_caps};
 use jcode_base::agent_browser::BackendCaps;
 
 /// Args of the final command in a plan (what most tests assert on).
@@ -123,11 +123,8 @@ fn screenshot_requests_image_attachment() {
 
 #[test]
 fn wait_supports_selector_and_contains() {
-    let by_sel = build_command(
-        "wait",
-        &input(json!({"action":"wait","selector":"#done"})),
-    )
-    .unwrap();
+    let by_sel =
+        build_command("wait", &input(json!({"action":"wait","selector":"#done"}))).unwrap();
     assert_eq!(args(&by_sel), vec!["wait", "#done"]);
 
     let by_text = build_command(
@@ -153,11 +150,12 @@ fn upload_requires_selector_and_path() {
         &input(json!({"action":"upload","selector":"input[type=file]","path":"/tmp/a.png"})),
     )
     .unwrap();
-    assert_eq!(args(&plan), vec!["upload", "input[type=file]", "/tmp/a.png"]);
-
-    assert!(
-        build_command("upload", &input(json!({"action":"upload","path":"/tmp/a"}))).is_err()
+    assert_eq!(
+        args(&plan),
+        vec!["upload", "input[type=file]", "/tmp/a.png"]
     );
+
+    assert!(build_command("upload", &input(json!({"action":"upload","path":"/tmp/a"}))).is_err());
 }
 
 #[test]
@@ -206,7 +204,10 @@ fn tab_list_renders_new_and_old_tab_id_shapes() {
     let rendered = super::format_tabs(&new_shape);
     assert!(rendered.contains("t1"), "{rendered}");
     assert!(rendered.contains("t2"), "{rendered}");
-    assert!(rendered.starts_with('*'), "active tab must be marked: {rendered}");
+    assert!(
+        rendered.starts_with('*'),
+        "active tab must be marked: {rendered}"
+    );
 
     // Older shape: positional index only.
     let old_shape = json!({"tabs":[
@@ -301,7 +302,10 @@ fn version_parsing_handles_real_and_odd_inputs() {
     assert_eq!(parse_version("agent-browser 0.33.2"), Some((0, 33, 2)));
     assert_eq!(parse_version("0.13.0"), Some((0, 13, 0)));
     assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
-    assert_eq!(parse_version("agent-browser 0.34.0-beta.1"), Some((0, 34, 0)));
+    assert_eq!(
+        parse_version("agent-browser 0.34.0-beta.1"),
+        Some((0, 34, 0))
+    );
     assert_eq!(parse_version("no version here"), None);
 
     // The 0.30 boundary is what decides tab handle form.

@@ -1,6 +1,10 @@
 //! Regression tests for static-model / live-catalog merge behavior
 //! across built-in and user-declared OpenAI-compatible provider profiles.
 
+// The env lock is intentionally held across awaits: the env mutation it
+// serializes must stay exclusive for the whole test.
+#![allow(clippy::await_holding_lock)]
+
 use crate::tests::{ENV_LOCK, EnvVarGuard};
 
 /// Minimal one-shot `/models` endpoint: serves `body` to the first request.

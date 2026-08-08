@@ -727,8 +727,7 @@ mod tests {
         let scheduler = headroom_scheduler();
         let now = Utc::now();
 
-        let interval =
-            scheduler.headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), now);
+        let interval = scheduler.headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), now);
 
         assert_eq!(interval, Duration::from_secs(5 * 60));
     }
@@ -738,8 +737,7 @@ mod tests {
         let scheduler = headroom_scheduler();
         let now = Utc::now();
 
-        let interval =
-            scheduler.headroom_interval(&headroom(0.02, ChronoDuration::hours(5)), now);
+        let interval = scheduler.headroom_interval(&headroom(0.02, ChronoDuration::hours(5)), now);
 
         assert_eq!(interval, Duration::from_secs(15 * 60));
     }
@@ -749,8 +747,7 @@ mod tests {
         let scheduler = headroom_scheduler();
         let now = Utc::now();
 
-        let interval =
-            scheduler.headroom_interval(&headroom(0.0, ChronoDuration::hours(5)), now);
+        let interval = scheduler.headroom_interval(&headroom(0.0, ChronoDuration::hours(5)), now);
 
         assert_eq!(interval, Duration::from_secs(15 * 60));
     }
@@ -785,12 +782,13 @@ mod tests {
         let scheduler = headroom_scheduler();
         let now = Utc::now();
 
-        let interval = scheduler.headroom_interval(
-            &headroom(0.001, ChronoDuration::days(7)),
-            now,
-        );
+        let interval = scheduler.headroom_interval(&headroom(0.001, ChronoDuration::days(7)), now);
 
-        assert!(interval <= Duration::from_secs(15 * 60), "got {:?}", interval);
+        assert!(
+            interval <= Duration::from_secs(15 * 60),
+            "got {:?}",
+            interval
+        );
     }
 
     #[test]
@@ -860,8 +858,8 @@ mod tests {
             ..Default::default()
         });
 
-        let interval = scheduler
-            .headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), Utc::now());
+        let interval =
+            scheduler.headroom_interval(&headroom(1.0, ChronoDuration::hours(5)), Utc::now());
 
         assert_eq!(interval, Duration::from_secs(15 * 60));
     }

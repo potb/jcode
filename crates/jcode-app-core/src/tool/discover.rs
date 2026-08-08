@@ -1472,6 +1472,9 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
 
 #[cfg(test)]
 mod tests {
+    // Holding the process-wide test-env lock across awaits is deliberate: the
+    // env mutation must stay exclusive for the whole test.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
 
     fn header_test_provenance(correlation_id: Option<&str>) -> DiscoveryRequestProvenance {

@@ -139,6 +139,16 @@
                 nativeBuildInputs = [ nightlyToolchain ] ++ buildTools ++ extraTools;
                 buildInputs = runtimeLibraries;
 
+                # Nix's fortify hardening injects -D_FORTIFY_SOURCE, which glibc
+                # rejects at -O0. jemalloc's configure compiles its feature
+                # probes at -O0 with -Werror, so every probe failed and
+                # `--features jemalloc` died at "cannot determine return type of
+                # strerror_r". Release builds set their own optimization level.
+                hardeningDisable = [
+                  "fortify"
+                  "fortify3"
+                ];
+
                 # Keep Cargo's mutable caches outside the Nix store. Cargo's
                 # default CARGO_HOME (~/.cargo) and this checkout's target/
                 # therefore survive every nix develop invocation.
@@ -149,6 +159,12 @@
 
                 shellHook = ''
                   export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+                  # clippy-driver ships in its own store path with no standard
+                  # library, so it cannot infer a sysroot from its own location
+                  # and every `cargo clippy` fails with "can't find crate for
+                  # std". Point it at the toolchain's sysroot explicitly.
+                  export SYSROOT="$(rustc --print sysroot)"
 
                   if [[ "''${JCODE_NIX_QUIET:-0}" != "1" ]]; then
                     printf 'jcode dev shell: %s, Cargo cache %s, target cache %s\n' \

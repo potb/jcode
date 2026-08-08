@@ -487,8 +487,7 @@ fn auto_approve_prompt_warns_that_no_human_will_answer() {
 
     jcode_base::env::set_var("JCODE_AMBIENT_AUTO_APPROVE", "true");
     crate::config::invalidate_config_cache();
-    let on =
-        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+    let on = build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
 
     assert!(
         on.contains("## Permissions"),
@@ -540,7 +539,10 @@ fn proactive_work_setting_reaches_the_prompt() {
         let _guard = jcode_base::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
         jcode_base::env::set_var("JCODE_HOME", temp.path());
-        jcode_base::env::set_var("JCODE_AMBIENT_PROACTIVE", if enabled { "true" } else { "false" });
+        jcode_base::env::set_var(
+            "JCODE_AMBIENT_PROACTIVE",
+            if enabled { "true" } else { "false" },
+        );
         jcode_base::config::invalidate_config_cache();
 
         let budget = ResourceBudget {

@@ -751,7 +751,17 @@ fn wrapped_rows_fit_inside_the_composer_well() {
         let lines = input.lines();
         assert!(lines.len() > 1, "a long line did not wrap at {size:?}");
         for line in &lines {
-            let right = input.caret_rect(line.end, 1.0).x0;
+            // Measure the end of the row's *text*, not the caret past it. The
+            // trailing space a soft wrap breaks after stays on the row it broke
+            // from and is allowed to hang past the wrap width (it is never
+            // drawn), and a text ending in a space adds a final empty row whose
+            // caret sits at that hanging position. Both measure whitespace
+            // rather than text that overflows the well.
+            let end = source[..line.end].trim_end().len();
+            if end <= line.start {
+                continue;
+            }
+            let right = input.caret_rect(end, 1.0).x0;
             assert!(
                 right <= usable + 1.0,
                 "a wrapped row reached {right:.1}px but only {usable:.1}px fit"

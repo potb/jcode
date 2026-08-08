@@ -120,11 +120,7 @@ pub(crate) fn anthropic_snapshot_is_usable(
 /// `OpenAIUsageData` models absent windows as `None` rather than zero, so
 /// `has_limits` already separates "nothing reported" from "nothing used"; the
 /// error check still matters because a failed fetch stamps `fetched_at` too.
-pub(crate) fn openai_snapshot_is_usable(
-    fetched: bool,
-    has_error: bool,
-    has_limits: bool,
-) -> bool {
+pub(crate) fn openai_snapshot_is_usable(fetched: bool, has_error: bool, has_limits: bool) -> bool {
     fetched && !has_error && has_limits
 }
 
@@ -194,11 +190,17 @@ pub fn current_subscription_headroom() -> Option<SubscriptionHeadroom> {
         windows: vec![
             WindowUtilization {
                 utilization: anthropic.five_hour,
-                resets_at: anthropic.five_hour_resets_at.as_deref().and_then(parse_reset),
+                resets_at: anthropic
+                    .five_hour_resets_at
+                    .as_deref()
+                    .and_then(parse_reset),
             },
             WindowUtilization {
                 utilization: anthropic.seven_day,
-                resets_at: anthropic.seven_day_resets_at.as_deref().and_then(parse_reset),
+                resets_at: anthropic
+                    .seven_day_resets_at
+                    .as_deref()
+                    .and_then(parse_reset),
             },
         ],
     };

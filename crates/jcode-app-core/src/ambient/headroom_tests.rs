@@ -252,7 +252,11 @@ fn provider(usable: bool, utilizations: &[f32]) -> ProviderWindows {
 fn windows_from_both_providers_are_collected() {
     let collected = collect_windows(&provider(true, &[0.1, 0.2]), &provider(true, &[0.3, 0.4]));
 
-    assert_eq!(collected.len(), 4, "every window from both providers counts");
+    assert_eq!(
+        collected.len(),
+        4,
+        "every window from both providers counts"
+    );
 }
 
 /// The specific mutation: OpenAI dropped entirely. Its window is the binding

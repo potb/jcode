@@ -369,6 +369,9 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
 /// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
 /// the selection unlike arboard), then arboard, then OSC 52 as the
 /// remote-session fallback (SSH / Docker / tmux).
+// The `#[cfg(not(test))]` tail below disappears in the test build, which leaves
+// the test block's `return true` as the function's last statement.
+#[allow(clippy::needless_return)]
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
@@ -491,6 +494,8 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 /// terminal emulator to set the system clipboard without needing a local
 /// display server, making it work over SSH, inside Docker, and under tmux
 /// (with `set -g set-clipboard on`). Returns false if stdout is not a TTY.
+// Only the non-test build reaches the OS clipboard paths that call this.
+#[cfg(not(test))]
 fn copy_to_clipboard_osc52(text: &str) -> bool {
     use base64::Engine as _;
     use std::io::{IsTerminal, Write};

@@ -459,6 +459,9 @@ fn truncate_for_widget(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Holding the process-wide test-env lock across awaits is deliberate: the
+    // env mutation must stay exclusive for the whole test.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
 
     #[test]

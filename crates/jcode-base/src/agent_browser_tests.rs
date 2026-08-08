@@ -20,8 +20,7 @@ fn session_name_is_sanitized_and_prefixed() {
     let name = session_name("session_fox_1786202149372_c8f8ca6f");
     assert!(name.starts_with("jcode-"));
     assert!(
-        name.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "session name must be shell/daemon safe: {name}"
     );
 }

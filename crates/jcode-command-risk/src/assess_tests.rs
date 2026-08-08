@@ -99,7 +99,7 @@ fn deleting_outside_the_project_asks_for_justification() {
 fn non_rm_destructive_tools_are_covered() {
     // A name-based denylist would miss all of these.
     assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
-    assert!(level("dd if=/dev/zero of=/dev/sda").runs_immediately() == false);
+    assert!(!level("dd if=/dev/zero of=/dev/sda").runs_immediately());
     assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
 }
 
@@ -318,7 +318,6 @@ fn wrapper_commands_do_not_hide_the_real_program() {
 
 #[test]
 fn nested_wrappers_are_unwrapped_all_the_way_down() {
-    let ctx = ctx();
     assert_eq!(
         level("sudo env nice -n 5 rm -rf ~"),
         RiskLevel::Catastrophic
@@ -372,7 +371,7 @@ fn piped_deletes_cannot_launder_their_targets() {
 fn files_inside_system_directories_are_protected_too() {
     // Exact-root matching left /etc/passwd merely "Confirm", and apply_patch
     // consults only the catastrophic tier, so it would have deleted it.
-    let ctx = ctx();
+
     for path in [
         "rm -f /etc/passwd",
         "rm -rf /usr/bin/env",
@@ -387,7 +386,7 @@ fn files_inside_system_directories_are_protected_too() {
 fn user_directories_under_home_root_stay_workable() {
     // /home and /Users must not become recursive, or every project path under
     // them would be blocked.
-    let ctx = ctx();
+
     assert!(level("rm -rf /home/u/proj/target").runs_immediately());
     assert_eq!(level("rm -rf /home"), RiskLevel::Catastrophic);
 }
@@ -456,13 +455,15 @@ fn ordinary_redirection_is_never_gated() {
 /// The redirect exemption must not become a laundering channel.
 #[test]
 fn redirection_into_real_files_is_still_assessed() {
-    let ctx = ctx();
     // Clobbering a protected file is still catastrophic, fd prefix or not.
     for command in ["echo x > /etc/passwd", "echo x 2> /etc/passwd"] {
         assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
     }
     // Real device nodes remain blocked.
-    assert_eq!(level("dd if=/dev/zero of=/dev/sda"), RiskLevel::Catastrophic);
+    assert_eq!(
+        level("dd if=/dev/zero of=/dev/sda"),
+        RiskLevel::Catastrophic
+    );
     // And a destructive verb is unaffected by trailing redirection.
     assert_eq!(level("rm -rf ~ 2>/dev/null"), RiskLevel::Catastrophic);
 }
