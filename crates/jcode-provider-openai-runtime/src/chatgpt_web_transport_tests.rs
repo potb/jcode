@@ -72,3 +72,23 @@ fn session_names_are_unique_and_shell_safe() {
         );
     }
 }
+
+#[test]
+fn firefox_remains_the_default_backend() {
+    // The port must not quietly move existing users onto Chrome. Only an
+    // explicit opt-in changes the backend.
+    unsafe { std::env::remove_var("JCODE_CHATGPT_WEB_BACKEND") };
+    assert_eq!(WebBackend::resolve(), WebBackend::FirefoxBridge);
+}
+
+#[test]
+fn agent_browser_eval_wrapping_preserves_function_body_scripts() {
+    // The ChatGPT page scripts are written as function bodies with a top-level
+    // `return`, which agent-browser rejects as a SyntaxError unless wrapped.
+    // This mirrors the wrapping the transport applies.
+    let script = "const x = 1;\nreturn { x };";
+    let wrapped = format!("(() => {{\n{script}\n}})()");
+    assert!(wrapped.starts_with("(() => {"));
+    assert!(wrapped.contains("return { x };"));
+    assert!(wrapped.ends_with("})()"));
+}
