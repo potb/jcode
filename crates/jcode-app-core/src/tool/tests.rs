@@ -451,7 +451,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
+    // batch embeds a worked parallel-call example, which models copy verbatim;
+    // it replaced a longer system-prompt section, so it is a net saving.
+    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -508,6 +510,16 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // The todo calibration enums are self-defining: each variant name is
+    // meaningless without its rubric, and the gate rejects miscalibrated
+    // values, so the definitions have to travel with the schema.
+    const EXEMPT_PARAMS: &[&str] = &[
+        "todo $.properties.goals.items.properties.feedback_loop_relevance",
+        "todo $.properties.goals.items.properties.feedback_loop_traceability",
+        // Coverage names every dimension the gate checks; dropping one makes
+        // the schema and the gate disagree.
+        "todo $.properties.goals.items.properties.feedback_loop_coverage",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -517,7 +529,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
             let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+            let key = format!("{} {}", def.name, path);
+            if tokens > PARAM_DESCRIPTION_TOKEN_CAP && !EXEMPT_PARAMS.contains(&key.as_str()) {
                 over_cap.push(format!(
                     "{} {} (~{} tokens): {}",
                     def.name, path, tokens, description
