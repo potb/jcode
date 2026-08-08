@@ -1,0 +1,579 @@
+use super::{build_command, build_command_with_caps, BrowserInput, CommandPlan};
+use jcode_base::agent_browser::BackendCaps;
+
+/// Args of the final command in a plan (what most tests assert on).
+fn args(plan: &CommandPlan) -> Vec<String> {
+    plan.last().to_vec()
+}
+use serde_json::json;
+
+fn input(value: serde_json::Value) -> BrowserInput {
+    serde_json::from_value(value).expect("valid browser input")
+}
+
+#[test]
+fn open_maps_to_open_command() {
+    let plan = build_command(
+        "open",
+        &input(json!({"action":"open","url":"https://example.com"})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["open", "https://example.com"]);
+}
+
+#[test]
+fn open_with_new_tab_uses_tab_new() {
+    let plan = build_command(
+        "open",
+        &input(json!({"action":"open","url":"https://a.test","new_tab":true})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["tab", "new", "https://a.test"]);
+}
+
+#[test]
+fn snapshot_and_interactables_map_to_snapshot_variants() {
+    let snap = build_command("snapshot", &input(json!({"action":"snapshot"}))).unwrap();
+    assert_eq!(args(&snap), vec!["snapshot"]);
+
+    let inter = build_command("interactables", &input(json!({"action":"interactables"}))).unwrap();
+    assert_eq!(args(&inter), vec!["snapshot", "-i"]);
+}
+
+#[test]
+fn click_supports_selector_and_text() {
+    let by_selector = build_command(
+        "click",
+        &input(json!({"action":"click","selector":"#submit"})),
+    )
+    .unwrap();
+    assert_eq!(args(&by_selector), vec!["click", "#submit"]);
+
+    let by_text =
+        build_command("click", &input(json!({"action":"click","text":"Sign in"}))).unwrap();
+    assert_eq!(args(&by_text), vec!["find", "text", "Sign in", "click"]);
+}
+
+#[test]
+fn click_without_target_errors() {
+    let err = build_command("click", &input(json!({"action":"click"}))).unwrap_err();
+    assert!(err.to_string().contains("requires selector"));
+}
+
+#[test]
+fn type_defaults_to_fill_and_honors_clear_false() {
+    let default = build_command(
+        "type",
+        &input(json!({"action":"type","selector":"#q","text":"hi"})),
+    )
+    .unwrap();
+    assert_eq!(args(&default), vec!["fill", "#q", "hi"]);
+
+    let append = build_command(
+        "type",
+        &input(json!({"action":"type","selector":"#q","text":"hi","clear":false})),
+    )
+    .unwrap();
+    assert_eq!(args(&append), vec!["type", "#q", "hi"]);
+}
+
+#[test]
+fn eval_uses_base64_to_avoid_quoting_hazards() {
+    let plan = build_command(
+        "eval",
+        &input(json!({"action":"eval","script":"document.title"})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan)[0], "eval");
+    assert_eq!(args(&plan)[1], "-b");
+    // "document.title" base64-encoded
+    assert_eq!(args(&plan)[2], "ZG9jdW1lbnQudGl0bGU=");
+}
+
+#[test]
+fn press_without_selector_is_a_single_command() {
+    let bare = build_command("press", &input(json!({"action":"press","key":"Tab"}))).unwrap();
+    assert_eq!(bare.steps.len(), 1);
+    assert_eq!(args(&bare), vec!["press", "Tab"]);
+}
+
+#[test]
+fn scroll_maps_positions_and_offsets() {
+    let bottom = build_command(
+        "scroll",
+        &input(json!({"action":"scroll","position":"bottom"})),
+    )
+    .unwrap();
+    assert_eq!(args(&bottom)[0..2], ["scroll", "down"]);
+
+    let into_view = build_command(
+        "scroll",
+        &input(json!({"action":"scroll","selector":"#footer"})),
+    )
+    .unwrap();
+    assert_eq!(args(&into_view), vec!["scrollintoview", "#footer"]);
+}
+
+#[test]
+fn screenshot_requests_image_attachment() {
+    let plan = build_command("screenshot", &input(json!({"action":"screenshot"}))).unwrap();
+    assert!(plan.wants_screenshot_image);
+    assert_eq!(args(&plan), vec!["screenshot"]);
+}
+
+#[test]
+fn wait_supports_selector_and_contains() {
+    let by_sel = build_command(
+        "wait",
+        &input(json!({"action":"wait","selector":"#done"})),
+    )
+    .unwrap();
+    assert_eq!(args(&by_sel), vec!["wait", "#done"]);
+
+    let by_text = build_command(
+        "wait",
+        &input(json!({"action":"wait","contains":"Welcome"})),
+    )
+    .unwrap();
+    assert_eq!(args(&by_text), vec!["wait", "--text", "Welcome"]);
+}
+
+#[test]
+fn tab_actions_map_to_tab_subcommands() {
+    assert_eq!(
+        args(&build_command("list_tabs", &input(json!({"action":"list_tabs"}))).unwrap()),
+        vec!["tab", "list"]
+    );
+}
+
+#[test]
+fn upload_requires_selector_and_path() {
+    let plan = build_command(
+        "upload",
+        &input(json!({"action":"upload","selector":"input[type=file]","path":"/tmp/a.png"})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["upload", "input[type=file]", "/tmp/a.png"]);
+
+    assert!(
+        build_command("upload", &input(json!({"action":"upload","path":"/tmp/a"}))).is_err()
+    );
+}
+
+#[test]
+fn every_jcode_action_has_a_mapping() {
+    // The tool schema advertises these; none may fall through to "unsupported".
+    let cases = vec![
+        json!({"action":"list_tabs"}),
+        json!({"action":"new_tab"}),
+        json!({"action":"select_tab","tab_id":1}),
+        json!({"action":"get_active_tab"}),
+        json!({"action":"list_frames"}),
+        json!({"action":"open","url":"https://a.test"}),
+        json!({"action":"snapshot"}),
+        json!({"action":"get_content"}),
+        json!({"action":"interactables"}),
+        json!({"action":"click","selector":"a"}),
+        json!({"action":"type","selector":"a","text":"b"}),
+        json!({"action":"fill_form","fields":[{"selector":"a","value":"b"}]}),
+        json!({"action":"select","selector":"a","text":"b"}),
+        json!({"action":"wait","selector":"a"}),
+        json!({"action":"screenshot"}),
+        json!({"action":"eval","script":"1"}),
+        json!({"action":"scroll","position":"top"}),
+        json!({"action":"upload","selector":"a","path":"/tmp/x"}),
+        json!({"action":"press","key":"Enter"}),
+        json!({"action":"provider_command","provider_action":"doctor"}),
+    ];
+    for case in cases {
+        let action = case["action"].as_str().unwrap().to_string();
+        let plan = build_command(&action, &input(case.clone()));
+        assert!(plan.is_ok(), "action {action} failed: {:?}", plan.err());
+        assert!(
+            !plan.unwrap().steps.is_empty(),
+            "action {action} produced no args"
+        );
+    }
+}
+
+#[test]
+fn tab_list_renders_new_and_old_tab_id_shapes() {
+    // agent-browser >=0.30 shape: stable string handles.
+    let new_shape = json!({"tabs":[
+        {"active":true,"tabId":"t1","title":"A","url":"https://a.test"},
+        {"active":false,"tabId":"t2","title":"B","url":"https://b.test"}
+    ]});
+    let rendered = super::format_tabs(&new_shape);
+    assert!(rendered.contains("t1"), "{rendered}");
+    assert!(rendered.contains("t2"), "{rendered}");
+    assert!(rendered.starts_with('*'), "active tab must be marked: {rendered}");
+
+    // Older shape: positional index only.
+    let old_shape = json!({"tabs":[
+        {"active":false,"index":0,"title":"A","url":"https://a.test"},
+        {"active":true,"index":1,"title":"B","url":"https://b.test"}
+    ]});
+    let rendered = super::format_tabs(&old_shape);
+    assert!(rendered.contains("t0"), "{rendered}");
+    assert!(rendered.contains("t1"), "{rendered}");
+}
+
+#[test]
+fn select_tab_uses_the_form_the_installed_version_understands() {
+    let sel = input(json!({"action":"select_tab","tab_id":3}));
+
+    // >=0.30 requires stable `t<N>` handles and rejects bare integers.
+    let modern = BackendCaps::from_version_text(Some("agent-browser 0.33.2"));
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, modern).unwrap()),
+        vec!["tab", "t3"]
+    );
+
+    // Older builds treat `t<N>` as "list tabs" and silently fail to switch, so
+    // they must get the positional form instead.
+    let legacy = BackendCaps::from_version_text(Some("agent-browser 0.13.0"));
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, legacy).unwrap()),
+        vec!["tab", "3"]
+    );
+
+    // Unknown version: prefer the form that fails loudly on the wrong binary
+    // over the one that silently no-ops.
+    let unknown = BackendCaps::default();
+    assert_eq!(
+        args(&build_command_with_caps("select_tab", &sel, unknown).unwrap()),
+        vec!["tab", "3"]
+    );
+}
+
+#[test]
+fn multi_step_actions_never_use_the_batch_subcommand() {
+    // `batch` does not exist before agent-browser 0.16 and its argument form
+    // differs across releases, so jcode must drive the steps itself.
+    let cases = vec![
+        json!({"action":"fill_form","fields":[{"selector":"#a","value":"1"},{"selector":"#b","checked":true}]}),
+        json!({"action":"press","key":"Enter","selector":"#q"}),
+    ];
+    for case in cases {
+        let action = case["action"].as_str().unwrap().to_string();
+        let plan = build_command(&action, &input(case.clone())).unwrap();
+        for step in &plan.steps {
+            assert_ne!(step[0], "batch", "action {action} used batch: {step:?}");
+        }
+    }
+}
+
+#[test]
+fn fill_form_emits_one_command_per_field() {
+    let plan = build_command(
+        "fill_form",
+        &input(json!({
+            "action":"fill_form",
+            "fields":[
+                {"selector":"#email","value":"a@b.c"},
+                {"selector":"#tos","checked":true},
+                {"selector":"#news","checked":false}
+            ]
+        })),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[0], vec!["fill", "#email", "a@b.c"]);
+    assert_eq!(plan.steps[1], vec!["check", "#tos"]);
+    assert_eq!(plan.steps[2], vec!["uncheck", "#news"]);
+}
+
+#[test]
+fn press_with_selector_is_focus_then_press() {
+    let plan = build_command(
+        "press",
+        &input(json!({"action":"press","key":"Enter","selector":"#q"})),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0], vec!["focus", "#q"]);
+    assert_eq!(plan.steps[1], vec!["press", "Enter"]);
+}
+
+#[test]
+fn version_parsing_handles_real_and_odd_inputs() {
+    use jcode_base::agent_browser::parse_version;
+    assert_eq!(parse_version("agent-browser 0.33.2"), Some((0, 33, 2)));
+    assert_eq!(parse_version("0.13.0"), Some((0, 13, 0)));
+    assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
+    assert_eq!(parse_version("agent-browser 0.34.0-beta.1"), Some((0, 34, 0)));
+    assert_eq!(parse_version("no version here"), None);
+
+    // The 0.30 boundary is what decides tab handle form.
+    assert!(BackendCaps::from_version_text(Some("0.30.0")).uses_stable_tab_handles());
+    assert!(!BackendCaps::from_version_text(Some("0.29.9")).uses_stable_tab_handles());
+}
+
+#[test]
+fn get_content_html_and_title_map_to_get_subcommands() {
+    let html = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"html","selector":"#main"})),
+    )
+    .unwrap();
+    assert_eq!(args(&html), vec!["get", "html", "#main"]);
+
+    let title = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"title"})),
+    )
+    .unwrap();
+    assert_eq!(args(&title), vec!["get", "title"]);
+
+    // Default format falls back to body text.
+    let text = build_command("get_content", &input(json!({"action":"get_content"}))).unwrap();
+    assert_eq!(args(&text), vec!["get", "text", "body"]);
+}
+
+#[test]
+fn wait_honors_timeout_ms() {
+    // The schema advertises timeout_ms and the Firefox backend honors it, so
+    // dropping it here would be a silent behavior difference between backends.
+    let plan = build_command(
+        "wait",
+        &input(json!({"action":"wait","selector":"#done","timeout_ms":5000})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["wait", "#done", "--timeout", "5000"]);
+
+    let by_text = build_command(
+        "wait",
+        &input(json!({"action":"wait","contains":"Welcome","timeout_ms":250})),
+    )
+    .unwrap();
+    assert_eq!(
+        args(&by_text),
+        vec!["wait", "--text", "Welcome", "--timeout", "250"]
+    );
+}
+
+#[test]
+fn cli_timeout_bounds_calls_and_respects_wait_budget() {
+    use super::cli_timeout;
+    use std::time::Duration;
+
+    // Ordinary commands get the default ceiling.
+    let quick = vec!["get".to_string(), "url".to_string()];
+    assert_eq!(cli_timeout(&quick), Duration::from_secs(90));
+
+    // A wait gets its own budget plus slack, so a long explicit wait is not
+    // cut short by the process bound.
+    let long_wait = vec![
+        "wait".to_string(),
+        "#x".to_string(),
+        "--timeout".to_string(),
+        "120000".to_string(),
+    ];
+    assert!(cli_timeout(&long_wait) > Duration::from_secs(120));
+}
+
+#[test]
+fn daemon_lifecycle_noise_is_stripped_from_results() {
+    use super::strip_daemon_noise;
+
+    // agent-browser >=0.30 wraps a 73-byte answer in 261 bytes of bookkeeping.
+    let mut value = json!({
+        "lifecycle": {
+            "effectiveLaunch": {"browserLaunched": true, "engine": "chrome"},
+            "launched": false,
+            "reused": true,
+            "restoreStatus": "not_configured"
+        },
+        "url": "https://example.com/"
+    });
+    strip_daemon_noise(&mut value);
+    assert_eq!(value, json!({"url": "https://example.com/"}));
+
+    // Responses without the wrapper are untouched.
+    let mut plain = json!({"url": "https://a.test"});
+    strip_daemon_noise(&mut plain);
+    assert_eq!(plain, json!({"url": "https://a.test"}));
+}
+
+#[test]
+fn unsupported_targeting_params_fail_loudly_with_an_alternative() {
+    // The schema is shared with the Firefox backend. Quietly ignoring a scoping
+    // parameter would let a caller believe an action was scoped when it was not.
+    let cases: Vec<(serde_json::Value, &str)> = vec![
+        (
+            json!({"action":"click","selector":"a","frame_id":2}),
+            "frame_id",
+        ),
+        (
+            json!({"action":"click","selector":"a","all_frames":true}),
+            "all_frames",
+        ),
+        (
+            json!({"action":"click","selector":"a","window_id":3}),
+            "window_id",
+        ),
+        (
+            json!({"action":"eval","script":"1","page_world":false}),
+            "page_world",
+        ),
+        (
+            json!({"action":"open","url":"https://a.test","wait":false}),
+            "wait=false",
+        ),
+    ];
+
+    for (case, needle) in cases {
+        let action = case["action"].as_str().unwrap().to_string();
+        let err = build_command(&action, &input(case.clone()))
+            .err()
+            .unwrap_or_else(|| panic!("{needle} should be rejected"));
+        let message = err.to_string();
+        assert!(
+            message.contains(needle),
+            "error for {needle} should name it: {message}"
+        );
+        assert!(
+            message.contains("not supported"),
+            "error for {needle} should say it is unsupported: {message}"
+        );
+    }
+}
+
+#[test]
+fn supported_values_of_those_params_still_pass() {
+    // all_frames=false and page_world=true match agent-browser's behavior, so
+    // honoring them is a no-op rather than an error.
+    assert!(
+        build_command(
+            "click",
+            &input(json!({"action":"click","selector":"a","all_frames":false})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "eval",
+            &input(json!({"action":"eval","script":"1","page_world":true})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "open",
+            &input(json!({"action":"open","url":"https://a.test","wait":true})),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn type_with_submit_presses_enter_after_filling() {
+    let plan = build_command(
+        "type",
+        &input(json!({"action":"type","selector":"#q","text":"hi","submit":true})),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0], vec!["fill", "#q", "hi"]);
+    assert_eq!(plan.steps[1], vec!["press", "Enter"]);
+}
+
+#[test]
+fn presentation_only_hints_are_accepted_not_rejected() {
+    // focus (raise the OS window) and behavior (smooth scrolling) have no
+    // observable effect on a headless browser's page state, so unlike the
+    // scoping params they are safe to accept and ignore.
+    assert!(
+        build_command(
+            "select_tab",
+            &input(json!({"action":"select_tab","tab_id":1,"focus":true})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "scroll",
+            &input(json!({"action":"scroll","position":"top","behavior":"smooth"})),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn annotated_content_format_falls_back_to_snapshot() {
+    // The Firefox backend's "annotated" format is a ref-tagged page view, which
+    // is exactly what agent-browser's snapshot returns.
+    let plan = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"annotated"})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["snapshot"]);
+}
+
+#[test]
+fn eval_scripts_with_top_level_return_are_wrapped() {
+    use super::normalize_eval_script;
+
+    // The Firefox bridge evaluates a function body, so agent scripts commonly
+    // use a bare `return`. agent-browser evaluates an expression, where that is
+    // a hard SyntaxError, so those scripts must be wrapped.
+    let wrapped = normalize_eval_script("return document.title;");
+    assert!(wrapped.starts_with("(() => {"), "{wrapped}");
+    assert!(wrapped.contains("return document.title;"), "{wrapped}");
+    assert!(wrapped.ends_with("})()"), "{wrapped}");
+
+    let multi = normalize_eval_script("const x = 1;\nreturn { x };");
+    assert!(multi.starts_with("(() => {"), "{multi}");
+}
+
+#[test]
+fn plain_expressions_are_left_byte_identical() {
+    use super::normalize_eval_script;
+
+    // The common case must not be rewritten.
+    for script in [
+        "document.title",
+        "1 + 1",
+        "document.querySelectorAll('a').length",
+    ] {
+        assert_eq!(normalize_eval_script(script), script);
+    }
+}
+
+#[test]
+fn return_inside_nested_functions_or_literals_does_not_trigger_wrapping() {
+    use super::normalize_eval_script;
+
+    // A `return` belonging to a nested function is already legal in an
+    // expression, so wrapping would be unnecessary churn.
+    let nested = "[1,2].map(function (n) { return n * 2; })";
+    assert_eq!(normalize_eval_script(nested), nested);
+
+    let arrow = "(() => { return 5; })()";
+    assert_eq!(normalize_eval_script(arrow), arrow);
+
+    // A `return` inside a string or comment is not code.
+    let in_string = "'return this text'";
+    assert_eq!(normalize_eval_script(in_string), in_string);
+
+    let in_comment = "// return early\ndocument.title";
+    assert_eq!(normalize_eval_script(in_comment), in_comment);
+
+    let in_block_comment = "/* return */ document.title";
+    assert_eq!(normalize_eval_script(in_block_comment), in_block_comment);
+
+    // An identifier that merely starts with "return" is not the keyword.
+    let identifier = "returnValue + obj.returnCode";
+    assert_eq!(normalize_eval_script(identifier), identifier);
+}
+
+#[test]
+fn press_script_is_evaluable_by_agent_browser() {
+    // jcode's own press fallback is written in the function-body style, so it
+    // must come out wrapped rather than failing at runtime.
+    use super::normalize_eval_script;
+    let press_style = "return (() => {\n  const t = document.body;\n  return { ok: true };\n})();";
+    let normalized = normalize_eval_script(press_style);
+    assert!(normalized.starts_with("(() => {"), "{normalized}");
+}

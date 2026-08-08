@@ -1950,14 +1950,46 @@ pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_c
 
 pub async fn run_browser(action: &str) -> Result<()> {
     match action {
-        "setup" => browser::run_setup_command().await?,
+        "setup" => {
+            // Prefer the agent-browser backend when it is installed or installable:
+            // it needs no extension and no human-in-the-loop click.
+            if prefer_agent_browser() {
+                let log = crate::agent_browser::ensure_setup().await?;
+                print!("{log}");
+                let status = crate::agent_browser::inspect_status().await;
+                if status.ready {
+                    println!("\nBuilt-in browser tool is ready (agent-browser).");
+                } else {
+                    println!("\nSetup incomplete: {}", status.diagnostics.join("; "));
+                }
+            } else {
+                browser::run_setup_command().await?
+            }
+        }
         "status" => {
-            let status = browser::ensure_browser_ready_noninteractive().await?;
+            let agent = crate::agent_browser::inspect_status().await;
             println!("Browser automation");
-            println!("  backend: {}", status.backend);
-            println!("  browser: {}", status.browser);
             println!(
-                "  binary: {}",
+                "  agent-browser: {}",
+                match (&agent.version, agent.chrome_installed) {
+                    (Some(version), _) if agent.outdated =>
+                        format!("{version} (TOO OLD, run `jcode browser setup`)"),
+                    (Some(version), true) => format!("{version} (chrome available)"),
+                    (Some(version), false) => format!("{version} (no chrome detected)"),
+                    (None, _) => "not installed".to_string(),
+                }
+            );
+            if agent.ready {
+                println!("  active backend: agent_browser (chrome)");
+            }
+            println!();
+
+            let status = browser::ensure_browser_ready_noninteractive().await?;
+            println!("  firefox bridge:");
+            println!("    backend: {}", status.backend);
+            println!("    browser: {}", status.browser);
+            println!(
+                "    binary: {}",
                 if status.binary_installed {
                     "installed"
                 } else {
@@ -1965,7 +1997,7 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 }
             );
             println!(
-                "  setup: {}",
+                "    setup: {}",
                 if status.setup_complete {
                     "complete"
                 } else {
@@ -1973,7 +2005,7 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 }
             );
             println!(
-                "  bridge: {}",
+                "    bridge: {}",
                 if status.responding {
                     "responding"
                 } else {
@@ -1981,7 +2013,7 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 }
             );
             println!(
-                "  compatibility: {}",
+                "    compatibility: {}",
                 if status.compatible {
                     "ok"
                 } else {
@@ -1989,11 +2021,15 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 }
             );
             if !status.missing_actions.is_empty() {
-                println!("  missing actions: {}", status.missing_actions.join(", "));
+                println!("    missing actions: {}", status.missing_actions.join(", "));
             }
 
             if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
+            } else if agent.ready {
+                println!(
+                    "\nBuilt-in browser tool is ready via agent-browser. The Firefox bridge above is optional and only needed for browsers that must reuse your live Firefox profile."
+                );
             } else if status.responding && !status.compatible {
                 println!(
                     "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
@@ -2009,6 +2045,15 @@ pub async fn run_browser(action: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `jcode browser setup` should target the agent-browser backend.
+fn prefer_agent_browser() -> bool {
+    match std::env::var("JCODE_BROWSER_BACKEND").ok().as_deref() {
+        Some("firefox") => false,
+        Some("agent-browser") | Some("agent_browser") | Some("chrome") => true,
+        _ => !browser::is_setup_complete(),
+    }
 }
 
 #[derive(Debug, Serialize)]
