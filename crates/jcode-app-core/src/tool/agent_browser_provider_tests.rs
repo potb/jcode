@@ -477,3 +477,36 @@ fn type_with_submit_presses_enter_after_filling() {
     assert_eq!(plan.steps[0], vec!["fill", "#q", "hi"]);
     assert_eq!(plan.steps[1], vec!["press", "Enter"]);
 }
+
+#[test]
+fn presentation_only_hints_are_accepted_not_rejected() {
+    // focus (raise the OS window) and behavior (smooth scrolling) have no
+    // observable effect on a headless browser's page state, so unlike the
+    // scoping params they are safe to accept and ignore.
+    assert!(
+        build_command(
+            "select_tab",
+            &input(json!({"action":"select_tab","tab_id":1,"focus":true})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "scroll",
+            &input(json!({"action":"scroll","position":"top","behavior":"smooth"})),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn annotated_content_format_falls_back_to_snapshot() {
+    // The Firefox backend's "annotated" format is a ref-tagged page view, which
+    // is exactly what agent-browser's snapshot returns.
+    let plan = build_command(
+        "get_content",
+        &input(json!({"action":"get_content","format":"annotated"})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["snapshot"]);
+}

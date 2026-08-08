@@ -101,6 +101,38 @@ below `MINIMUM_SUPPORTED_VERSION` (0.30.0) is reported not ready, actions fail
 immediately with an upgrade hint, and `setup` installs a current copy into
 `~/.jcode/agent-browser`.
 
+## Parameter handling
+
+The `browser` tool schema is shared with the Firefox backend, so some parameters
+have no agent-browser equivalent. Silently ignoring them is the worst option: the
+caller believes an action was scoped when it was not. Each one is therefore
+implemented, documented as a no-op, or rejected with a concrete alternative.
+
+| Parameter | Handling |
+|---|---|
+| `timeout_ms` | Implemented, maps to `wait --timeout` |
+| `submit` | Implemented, presses Enter after filling |
+| `clear` | Implemented, selects `fill` vs `type` |
+| `focus`, `behavior` | Accepted and ignored. Presentation-only hints with no observable effect on a headless browser's page state |
+| `frame_id` | Rejected. agent-browser addresses frames by selector; the error points at `provider_command` with `provider_action='frame'` |
+| `all_frames=true` | Rejected, with a per-frame alternative |
+| `window_id` | Rejected. Each jcode session already gets its own isolated browser |
+| `page_world=false` | Rejected. agent-browser's eval always runs in the page world |
+| `wait=false` on `open` | Rejected. Navigation always waits for load |
+
+Values that happen to match agent-browser's own default (`all_frames=false`,
+`page_world=true`, `wait=true`) pass through, since honoring them is a no-op.
+
+## Runtime behavior
+
+- **Every invocation is bounded.** A wedged daemon would otherwise block the whole
+  agent turn with no recovery. Waits get their own budget plus slack so an
+  explicit long wait is not cut short.
+- **Daemon bookkeeping is stripped.** agent-browser >=0.30 attaches a `lifecycle`
+  object to nearly every response. On `get url` that is 261 bytes of state around
+  73 bytes of answer, repeated on every call, so it is removed before the result
+  reaches the model.
+
 ## What a full Firefox removal still needs
 
 `crates/jcode-provider-openai-runtime/src/chatgpt_web.rs` (915 lines) is a second,

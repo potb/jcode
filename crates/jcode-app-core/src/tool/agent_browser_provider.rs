@@ -188,6 +188,12 @@ fn reject_unsupported_params(action: &str, input: &BrowserInput) -> Result<()> {
             "wait=false is not supported by the agent-browser backend; navigation always waits for load. Omit wait to use the default."
         );
     }
+
+    // `focus` (raise the OS window on tab switch) and `behavior` (smooth vs
+    // instant scrolling) are presentation hints. agent-browser is headless by
+    // default, so there is no window to raise and no animation to observe, and
+    // the resulting page state is identical either way. Ignoring them changes
+    // nothing the caller can detect, so they are accepted rather than rejected.
     Ok(())
 }
 
