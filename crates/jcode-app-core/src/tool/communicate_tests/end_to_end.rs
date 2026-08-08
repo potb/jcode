@@ -7,6 +7,7 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -135,6 +136,7 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -238,6 +240,7 @@ async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(50),
@@ -293,6 +296,7 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -375,6 +379,7 @@ async fn communicate_spawn_reports_completion_back_to_spawner() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
@@ -453,6 +458,7 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
@@ -555,6 +561,7 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),

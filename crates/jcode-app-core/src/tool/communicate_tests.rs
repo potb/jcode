@@ -1315,6 +1315,32 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Neutralize the developer's own `agents.swarm_model` pin for spawn tests.
+///
+/// These tests spawn real sessions through the server, which resolves the spawn
+/// model from `~/.jcode/config.toml`. A machine that pins a model the test
+/// provider cannot serve made spawning fail with "provider does not support
+/// model switching", so spawns are pinned to inherit for the test's lifetime.
+struct SwarmModelGuard {
+    env: Option<EnvGuard>,
+}
+
+impl SwarmModelGuard {
+    fn inherit() -> Self {
+        let env = EnvGuard::set("JCODE_SWARM_MODEL", "");
+        crate::config::invalidate_config_cache();
+        Self { env: Some(env) }
+    }
+}
+
+impl Drop for SwarmModelGuard {
+    fn drop(&mut self) {
+        // Restore the process env first, then reload so the cache reflects it.
+        drop(self.env.take());
+        crate::config::invalidate_config_cache();
+    }
+}
+
 struct DelayedTestProvider {
     delay: Duration,
 }
