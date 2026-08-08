@@ -1,4 +1,4 @@
-use super::agent_browser::*;
+use super::*;
 
 #[test]
 fn platform_asset_name_matches_release_assets() {
