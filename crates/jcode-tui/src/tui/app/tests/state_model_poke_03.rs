@@ -1008,8 +1008,11 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
                 Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
                     panic!("empty local catalog must not publish final login failure: {login:?}")
                 }
+                // The bus is process-global and this suite runs in parallel, so
+                // match this case's own wording ("no selectable route yet")
+                // rather than the heading a sibling test also publishes.
                 Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
+                    if activity.message.contains("did not find a selectable") =>
                 {
                     break activity;
                 }
@@ -1070,8 +1073,11 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
                         "local refresh failure must not publish a final login failure while server auth-change recovery can still finish: {login:?}"
                     )
                 }
+                // The bus is process-global and this suite runs in parallel, so
+                // match the failure variant's own wording rather than the
+                // heading a sibling test also publishes.
                 Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
+                    if activity.message.contains("fixture refresh failed") =>
                 {
                     break activity;
                 }

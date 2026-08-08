@@ -49,12 +49,16 @@ fn observe_smoothness_frame_text(
 
 #[test]
 fn smoothness_benchmark_simulated_streaming_turn_stays_within_budget() {
-    let _render_lock = scroll_render_test_lock();
     // The budgets below describe a turn that streams *visible* reasoning and then
     // releases the retained trace at answer-commit. Reasoning display defaults to
     // `Off` for new users (166e4444f), so pin `current` mode or the benchmark
     // measures a different turn shape than the one its budgets were written for.
+    //
+    // The temp-home helper takes the process-wide test-env lock, so it must be
+    // entered *before* the render lock. Taking them in the other order deadlocks
+    // against any test that holds the env lock and then renders.
     with_reasoning_current_home(|| {
+    let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.session.short_name = Some("test".to_string());
     let rt = tokio::runtime::Runtime::new().unwrap();
