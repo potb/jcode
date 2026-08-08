@@ -17,7 +17,23 @@ STATE_DIR="${JCODE_UPSTREAM_STATE_DIR:-$HOME/.jcode/upstream-merge}"
 WORKTREE="${JCODE_UPSTREAM_WORKTREE:-$STATE_DIR/worktree}"
 BRANCH="${JCODE_UPSTREAM_BRANCH:-auto/upstream-merge}"
 BASE="${JCODE_UPSTREAM_BASE:-master}"
-UPSTREAM_REF="${JCODE_UPSTREAM_REF:-origin/master}"
+# Defaults assume the standard fork topology: `origin` is your fork, `upstream`
+# is the project you forked. Falls back to origin so a single-remote clone (no
+# fork yet) still works.
+UPSTREAM_REMOTE="${JCODE_UPSTREAM_REMOTE:-upstream}"
+UPSTREAM_REF="${JCODE_UPSTREAM_REF:-}"
+FORK_REMOTE="${JCODE_UPSTREAM_FORK_REMOTE:-origin}"
+# Push the merged result to the fork so GitHub reflects the maintained state.
+# Only ever fast-forward, and only the fork: upstream is never written to.
+PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
+# Keep GitHub Actions disabled on the fork.
+#
+# The fork inherits upstream's 8 workflows, several of which are release and
+# publish jobs. Pushing a synced master would run them against the fork on the
+# fork owner's CI minutes, for builds nobody asked for. Repo-level disabling is
+# used rather than deleting the workflow files, because deleting them would
+# conflict with upstream on every single future merge, forever.
+ENFORCE_ACTIONS_OFF="${JCODE_UPSTREAM_DISABLE_ACTIONS:-1}"
 LOG_DIR="${JCODE_UPSTREAM_LOG_DIR:-$STATE_DIR/logs}"
 CHECK_CMD="${JCODE_UPSTREAM_CHECK_CMD:-cargo check --workspace}"
 
@@ -68,17 +84,113 @@ cleanup() { rm -rf "$LOCK_DIR"; }
 trap cleanup EXIT INT TERM
 
 log "=== upstream merge agent ==="
-log "repo=$REPO base=$BASE upstream=$UPSTREAM_REF worktree=$WORKTREE"
+
+# Ensure GitHub Actions stays off on the fork, and cancel anything already
+# queued. Runs BEFORE every push: verifying after the fact would mean the CI
+# minutes are already spent.
+ensure_fork_actions_disabled() {
+  [ "$ENFORCE_ACTIONS_OFF" = "1" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+
+  local url slug
+  url=$(git remote get-url "$FORK_REMOTE" 2>/dev/null) || return 0
+  # git@github.com:owner/repo.git and https://github.com/owner/repo.git
+  slug=$(printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')
+  case "$slug" in
+    */*) ;;
+    *) return 0 ;;
+  esac
+
+  local state
+  state=$(gh api "repos/$slug/actions/permissions" --jq '.enabled' 2>/dev/null)
+  if [ "$state" = "true" ]; then
+    if gh api -X PUT "repos/$slug/actions/permissions" -F enabled=false >/dev/null 2>&1; then
+      log "disabled GitHub Actions on $slug"
+    else
+      log "WARNING: could not disable GitHub Actions on $slug"
+    fi
+  fi
+
+  # Cancel anything already queued or running, so a previously-enabled window
+  # does not keep burning minutes after we turn Actions off.
+  local ids id
+  ids=$(gh api "repos/$slug/actions/runs?per_page=100" \
+    --jq '.workflow_runs[] | select(.status=="queued" or .status=="in_progress" or .status=="requested" or .status=="waiting") | .id' 2>/dev/null)
+  for id in $ids; do
+    if gh api -X POST "repos/$slug/actions/runs/$id/cancel" >/dev/null 2>&1; then
+      log "cancelled workflow run $id on $slug"
+    fi
+  done
+}
+
+# Publish the fork's base branch when it is ahead of the fork remote.
+#
+# Fast-forward only, and only ever to the fork. A force-push here could destroy
+# work that exists nowhere else, and upstream is never a valid push target: this
+# job maintains a fork, it does not contribute to the parent project.
+push_fork_if_ahead() {
+  [ "$PUSH_FORK" = "1" ] || { log "push disabled (JCODE_UPSTREAM_PUSH=$PUSH_FORK)"; return 0; }
+  git remote get-url "$FORK_REMOTE" >/dev/null 2>&1 || return 0
+  [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ] || {
+    log "fork remote equals upstream remote; not pushing"
+    return 0
+  }
+
+  local remote_sha local_sha
+  local_sha=$(git rev-parse "$BASE" 2>/dev/null) || return 0
+  remote_sha=$(git rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+
+  if [ -n "$remote_sha" ] && [ "$remote_sha" = "$local_sha" ]; then
+    log "fork $FORK_REMOTE/$BASE already matches local $BASE"
+    return 0
+  fi
+  if [ -n "$remote_sha" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    log "WARNING: $FORK_REMOTE/$BASE has commits not in local $BASE; refusing to push"
+    return 1
+  fi
+
+  ensure_fork_actions_disabled
+
+  if git push "$FORK_REMOTE" "$BASE:$BASE"; then
+    log "pushed $BASE to $FORK_REMOTE ($local_sha)"
+  else
+    log "WARNING: push to $FORK_REMOTE failed"
+    return 1
+  fi
+}
 
 cd "$REPO" || { log "repo missing: $REPO"; exit 1; }
 
-git fetch --prune origin || { log "fetch failed"; exit 1; }
+# Resolve which remote actually holds upstream. A fork clone has origin=fork and
+# upstream=parent; a plain clone has only origin. Guessing wrong here would
+# "merge" the fork into itself and report success having done nothing.
+if [ -z "$UPSTREAM_REF" ]; then
+  if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
+    UPSTREAM_REF="$UPSTREAM_REMOTE/$BASE"
+  else
+    UPSTREAM_REMOTE="$FORK_REMOTE"
+    UPSTREAM_REF="$FORK_REMOTE/$BASE"
+    log "no '$UPSTREAM_REMOTE' remote; falling back to $UPSTREAM_REF"
+  fi
+fi
+
+log "repo=$REPO base=$BASE upstream=$UPSTREAM_REF fork=$FORK_REMOTE worktree=$WORKTREE"
+
+git fetch --prune "$UPSTREAM_REMOTE" || { log "fetch $UPSTREAM_REMOTE failed"; exit 1; }
+if [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ]; then
+  git fetch --prune "$FORK_REMOTE" || log "WARNING: fetch $FORK_REMOTE failed"
+fi
 
 BASE_SHA=$(git rev-parse "$BASE") || exit 1
 UP_SHA=$(git rev-parse "$UPSTREAM_REF") || exit 1
 
 if git merge-base --is-ancestor "$UP_SHA" "$BASE_SHA"; then
-  log "already up to date with $UPSTREAM_REF ($UP_SHA); nothing to do"
+  log "already up to date with $UPSTREAM_REF ($UP_SHA)"
+  # The local branch can still be ahead of the fork remote (local commits, or a
+  # merge adopted by a previous run). Publishing that is the whole point of
+  # "keep my fork updated", so it must not be skipped just because upstream
+  # brought nothing new.
+  push_fork_if_ahead
   exit 0
 fi
 
@@ -127,15 +239,69 @@ if git merge --no-ff --no-edit "$UP_SHA"; then
 else
   CONFLICTS=$(git diff --name-only --diff-filter=U)
   if [ -z "$CONFLICTS" ]; then
-    # git refused to even start the merge (bad refs, dirty tree, hooks). An
-    # agent cannot resolve conflicts that do not exist, so stop loudly instead
-    # of handing it an untouched worktree and calling that a merge attempt.
-    log "ERROR: git merge failed without producing conflicts; not invoking the agent"
-    log "run manually to see why: git -C $WORKTREE merge --no-ff $UP_SHA"
-    exit 1
+    # rerere may have replayed a previous resolution for every conflict, leaving
+    # the merge staged and complete but still exiting nonzero. That is a fully
+    # resolved merge, not a failure, and treating it as one would refuse to
+    # merge anything the user had already resolved once.
+    if [ -n "$(git diff --cached --name-only)" ]; then
+      log "all conflicts resolved from rerere cache; committing"
+      if git commit --no-edit >/dev/null 2>&1 && eval "$CHECK_CMD"; then
+        log "rerere-resolved merge verified on branch $BRANCH"
+        STATUS="merged"
+        DETAIL="All conflicts were replayed from git rerere (you resolved them before). '$CHECK_CMD' passes."
+        RERERE_MERGE=1
+      else
+        REASON="rerere replayed resolutions but the commit or check failed"
+        log "$REASON; handing to agent"
+      fi
+    else
+      # git refused to even start the merge (bad refs, dirty tree, hooks). An
+      # agent cannot resolve conflicts that do not exist, so stop loudly instead
+      # of handing it an untouched worktree and calling that a merge attempt.
+      log "ERROR: git merge failed without producing conflicts; not invoking the agent"
+      log "run manually to see why: git -C $WORKTREE merge --no-ff $UP_SHA"
+      exit 1
+    fi
+  else
+    REASON="merge produced conflicts"
   fi
-  REASON="merge produced conflicts"
 fi
+# --- notify through jcode's own channels -------------------------------------
+# `jcode notify` fans out to ntfy/email/desktop/chat exactly as ambient does, so
+# this script never needs to know how the user is reachable.
+notify() {
+  local title="$1" body="$2" priority="$3"
+  if ! "$JCODE_BIN" notify --no-update "$title" "$body" --priority "$priority" 2>/dev/null; then
+    # Older binaries lack `notify`. Falling back keeps the escalation path
+    # working, since an unreported "needs_user" merge is the whole failure mode
+    # this script exists to prevent.
+    "$JCODE_BIN" notify "$title" "$body" --priority "$priority" 2>/dev/null \
+      || log "WARNING: could not send notification: $title"
+  fi
+}
+
+read_verdict() {
+  [ -f "$VERDICT_FILE" ] || return 1
+  python3 - "$VERDICT_FILE" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+print(d.get("status", "failed"))
+print(d.get("summary", "").strip())
+for x in d.get("decisions", []) or []:
+    print("- " + str(x))
+for q in d.get("questions", []) or []:
+    print("? " + str(q))
+PY
+}
+
+RERERE_MERGE="${RERERE_MERGE:-0}"
+
+# Everything from here to the verdict is the agent path. rerere already produced
+# a verified merge, so skip straight to reporting it.
+if [ "$RERERE_MERGE" = "0" ]; then
 log "$REASON; handing to agent"
 
 CONFLICTS=$(git diff --name-only --diff-filter=U | head -50)
@@ -220,40 +386,10 @@ Do NOT push. Do NOT touch $REPO's main working tree. Do NOT modify ~/.jcode/conf
 AGENT_STATUS=$?
 log "agent exited $AGENT_STATUS"
 
-# --- notify through jcode's own channels -------------------------------------
-# `jcode notify` fans out to ntfy/email/desktop/chat exactly as ambient does, so
-# this script never needs to know how the user is reachable.
-notify() {
-  local title="$1" body="$2" priority="$3"
-  if ! "$JCODE_BIN" notify --no-update "$title" "$body" --priority "$priority" 2>/dev/null; then
-    # Older binaries lack `notify`. Falling back keeps the escalation path
-    # working, since an unreported "needs_user" merge is the whole failure mode
-    # this script exists to prevent.
-    "$JCODE_BIN" notify "$title" "$body" --priority "$priority" 2>/dev/null \
-      || log "WARNING: could not send notification: $title"
-  fi
-}
-
-read_verdict() {
-  [ -f "$VERDICT_FILE" ] || return 1
-  python3 - "$VERDICT_FILE" <<'PY' 2>/dev/null
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
-print(d.get("status", "failed"))
-print(d.get("summary", "").strip())
-for x in d.get("decisions", []) or []:
-    print("- " + str(x))
-for q in d.get("questions", []) or []:
-    print("? " + str(q))
-PY
-}
-
 VERDICT=$(read_verdict)
 STATUS=$(echo "$VERDICT" | head -1)
 DETAIL=$(echo "$VERDICT" | tail -n +2)
+fi  # end agent path
 
 REVIEW="Branch: $BRANCH
 Worktree: $WORKTREE
@@ -263,9 +399,39 @@ Adopt:  git -C $REPO merge --ff-only $BRANCH"
 case "$STATUS" in
   merged)
     log "verdict: merged"
-    notify "Upstream merged into fork" "$DETAIL
+    # Adopt into the real repo, then publish to the fork. Without this the merge
+    # would sit in a worktree forever and the fork would never actually be
+    # "kept updated", which is the whole point.
+    #
+    # Guarded hard: a fast-forward only, and only onto a clean tree at the
+    # expected commit. The user may well be mid-edit on this branch, and
+    # yanking master out from under them is exactly the regret this must avoid.
+    ADOPTED=""
+    cd "$REPO" || exit 1
+    if [ -n "$(git status --porcelain)" ]; then
+      log "repo has uncommitted changes; not adopting automatically"
+    elif [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
+      log "repo moved since the merge started; not adopting automatically"
+    elif [ "$(git symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
+      log "repo is not on $BASE; not adopting automatically"
+    elif git merge --ff-only "$BRANCH" >/dev/null 2>&1; then
+      ADOPTED="yes"
+      log "fast-forwarded $BASE to $BRANCH"
+      push_fork_if_ahead
+    else
+      log "fast-forward of $BASE to $BRANCH failed; leaving it for review"
+    fi
 
+    if [ -n "$ADOPTED" ]; then
+      notify "Fork updated with upstream" "$DETAIL
+
+Adopted onto $BASE and pushed to $FORK_REMOTE." "default"
+    else
+      notify "Upstream merged, needs adopting" "$DETAIL
+
+The merge is committed on $BRANCH but was not applied automatically (see log).
 $REVIEW" "default"
+    fi
     EXIT=0
     ;;
   needs_user)
