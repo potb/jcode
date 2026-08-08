@@ -603,6 +603,24 @@ work_branch_prefix = "ambient/"
 # are still recorded in the permission history as "ambient_auto_approve".
 # auto_approve_permissions = false
 
+# Recurring jobs jcode itself runs on a schedule ("jcode cron"), replacing
+# external timers (systemd, cron(8), launchd). Repeat [[cron]] for more jobs.
+# Runs from the same background loop that services ambient (see [ambient]
+# above); it stays alive whether or not ambient itself is enabled, so cron
+# fires on its own schedule regardless of ambient.enabled.
+#
+# [[cron]]
+# id = "upstream-merge"          # required, stable key for on-disk history
+# every = "6h"                   # or: at = "daily 03:00" / "weekdays 09:00" / "mon,thu 18:30"
+# command = "scripts/upstream_merge_agent.sh"   # exec mode: run a shell command
+# # prompt = "..."               # agent mode instead: queue a prompt (mutually exclusive with command)
+# working_dir = "~/jcode"
+# # target = "ambient"           # prompt mode only: ambient | spawn | session:<id>
+# enabled = true
+# catch_up = true                # fire once shortly after startup if a fire was missed
+# respect_windows = false        # true shares [ambient] active_windows' quiet hours
+# timeout_secs = 3600             # exec mode kill deadline
+
 [gateway]
 # Enable WebSocket gateway for iOS/web clients
 enabled = false
