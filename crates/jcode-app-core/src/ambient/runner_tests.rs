@@ -121,6 +121,46 @@ async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
     let _ = task.await;
 }
 
+/// The user's actual ask: a `[[cron]]` job must fire from the runner loop
+/// even with ambient mode off entirely, since the loop is the only thing
+/// keeping `crate::cron::tick` on a live clock (see `server.rs`'s comment
+/// on spawning this loop unconditionally).
+#[tokio::test]
+async fn runner_loop_fires_a_cron_job_with_ambient_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let marker = temp.path().join("cron-ran.txt");
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        format!(
+            "[[cron]]\nid = \"loop-test-job\"\nevery = \"1m\"\ncommand = \"touch {}\"\n",
+            marker.display()
+        ),
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let task = tokio::spawn(runner.clone().run_loop(provider));
+
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        marker.exists(),
+        "cron job should have fired from the runner loop despite ambient being disabled"
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
 #[tokio::test]
 async fn spawn_target_creates_one_child_session_and_runs_task() {
     let _guard = crate::storage::lock_test_env();
