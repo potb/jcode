@@ -150,12 +150,27 @@ pub fn running_in_test_harness() -> bool {
         }
         std::env::current_exe()
             .ok()
-            .map(|exe| {
-                let path = exe.to_string_lossy().replace('\\', "/");
-                path.contains("/target/") && path.contains("/deps/")
-            })
+            .map(|exe| exe_path_is_test_harness(&exe.to_string_lossy()))
             .unwrap_or(false)
     })
+}
+
+/// Whether an executable path is a cargo-built test binary.
+///
+/// Cargo has used two layouts for these: the long-standing
+/// `target/<profile>/deps/<crate>-<hash>`, and the newer split build directory
+/// that emits `target/<profile>/build/<crate>/<hash>/out/<crate>-<hash>`. Only
+/// matching the first made the harness look like a normal binary under the
+/// second, which re-enabled real browser opens during tests.
+///
+/// A real jcode binary in a checkout lives at `target/<profile>/jcode`, which
+/// matches neither, so it keeps opening browsers as users expect.
+fn exe_path_is_test_harness(exe: &str) -> bool {
+    let path = exe.replace('\\', "/");
+    if !path.contains("/target/") {
+        return false;
+    }
+    path.contains("/deps/") || (path.contains("/build/") && path.contains("/out/"))
 }
 
 fn env_truthy(key: &str) -> bool {

@@ -92,6 +92,9 @@
             perl
             pkg-config
             procps
+            # sqlite's CLI builds the state.vscdb fixtures the Cursor auth
+            # tests read; without it those tests fail rather than skip.
+            sqlite
             util-linux
           ];
 

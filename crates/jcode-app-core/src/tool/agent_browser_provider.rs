@@ -139,6 +139,7 @@ pub struct CommandPlan {
 
 impl CommandPlan {
     /// The final command, whose result is what the caller reports.
+    #[cfg(test)]
     pub fn last(&self) -> &[String] {
         self.steps.last().map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -274,6 +275,7 @@ fn reject_unsupported_params(action: &str, input: &BrowserInput) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> {
     build_command_with_caps(action, input, crate::agent_browser::BackendCaps::default())
 }

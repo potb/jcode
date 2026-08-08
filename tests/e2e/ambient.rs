@@ -529,10 +529,23 @@ fn test_ambient_lock() {
     assert!(lock1.is_some());
     let lock1 = lock1.unwrap();
 
-    // Second acquisition should fail (lock held)
-    let lock2 = AmbientLock::try_acquire();
-    assert!(lock2.is_ok());
-    assert!(lock2.unwrap().is_none());
+    // A lock naming our own PID does not block us: `jcode server reload`
+    // re-execs in place and keeps the PID, so treating it as held would
+    // deadlock the runner against its own pre-exec ghost.
+    let same_process = AmbientLock::try_acquire();
+    assert!(same_process.is_ok());
+    assert!(same_process.unwrap().is_some());
+
+    // A lock naming a different live process does block.
+    let lock_file = jcode::storage::jcode_dir()
+        .expect("jcode dir")
+        .join("ambient")
+        .join("ambient.lock");
+    std::fs::write(&lock_file, "1").expect("write foreign pid");
+    let blocked = AmbientLock::try_acquire();
+    assert!(blocked.is_ok());
+    assert!(blocked.unwrap().is_none());
+    std::fs::write(&lock_file, std::process::id().to_string()).expect("restore our pid");
 
     // Release
     let _ = lock1.release();

@@ -341,7 +341,10 @@ fn command_exists_absolute_path() {
     if cfg!(windows) {
         assert!(command_exists(r"C:\Windows\System32\cmd.exe"));
     } else {
-        assert!(command_exists("/bin/ls") || command_exists("/usr/bin/ls"));
+        // Distro layouts differ (NixOS has no /bin/ls), so use a path that is
+        // guaranteed to exist and be executable: this test binary itself.
+        let exe = std::env::current_exe().expect("test binary path");
+        assert!(command_exists(&exe.to_string_lossy()));
     }
 }
 
@@ -892,6 +895,30 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
 /// OAuth page on the developer's desktop. `running_in_test_harness` detects
 /// the `target/**/deps/` test-binary path, and `browser_suppressed` must honor
 /// it even without --no-browser or NO_BROWSER/JCODE_NO_BROWSER.
+#[test]
+fn test_harness_detection_covers_both_cargo_output_layouts() {
+    // Classic layout.
+    assert!(super::exe_path_is_test_harness(
+        "/home/dev/jcode/target/selfdev/deps/jcode_base-abc123"
+    ));
+    // Split build-directory layout.
+    assert!(super::exe_path_is_test_harness(
+        "/home/dev/jcode/target/selfdev/build/jcode-base/abc123/out/jcode_base-abc123"
+    ));
+    // Windows separators.
+    assert!(super::exe_path_is_test_harness(
+        r"C:\src\jcode\target\debug\deps\jcode_base-abc123.exe"
+    ));
+    // A real binary built into the checkout is not a test harness.
+    assert!(!super::exe_path_is_test_harness(
+        "/home/dev/jcode/target/selfdev/jcode"
+    ));
+    // Nor is an installed binary.
+    assert!(!super::exe_path_is_test_harness(
+        "/home/dev/.jcode/builds/current/jcode"
+    ));
+}
+
 #[test]
 fn browser_suppressed_inside_test_harness_without_env_overrides() {
     assert!(

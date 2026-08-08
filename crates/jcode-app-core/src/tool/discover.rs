@@ -439,7 +439,7 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_QUERY_MIN_CHARS,
                     "maxLength": DISCOVERY_QUERY_MAX_CHARS,
-                    "description": "Capability summary. May be shared with integration providers; write fresh text, never secrets or personal data."
+                    "description": "Capability summary. May be shared with providers; no secrets or personal data."
                 },
                 "reason": {
                     "type": "string",
@@ -1828,8 +1828,8 @@ mod tests {
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
         assert!(schema.contains("Defaults to select when `tool` is set, else search."));
-        assert!(schema.contains("May be shared with integration providers"));
-        assert!(schema.contains("never secrets or personal data"));
+        assert!(schema.contains("May be shared with providers"));
+        assert!(schema.contains("no secrets or personal data"));
         assert!(schema.contains("Why the chosen integration fits"));
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));

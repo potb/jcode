@@ -290,6 +290,30 @@ fn load_key_from_file(path: &PathBuf) -> Result<String> {
     anyhow::bail!("No CURSOR_API_KEY found")
 }
 
+/// Whether the `sqlite3` CLI this code path shells out to is available.
+///
+/// The Cursor reader itself runs `sqlite3`, so without the binary there is no
+/// behavior left to exercise. The dev shell provides it; on a bare host these
+/// tests report that they were skipped rather than failing for a missing tool.
+fn sqlite3_available() -> bool {
+    std::process::Command::new("sqlite3")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Skip the body of a sqlite3-backed test when the CLI is missing.
+macro_rules! require_sqlite3 {
+    () => {
+        if !sqlite3_available() {
+            eprintln!("skipping: sqlite3 is not installed");
+            return;
+        }
+    };
+}
+
 /// Helper: create a mock state.vscdb with the given key/value pairs.
 fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf {
     let db_path = dir.join("state.vscdb");
@@ -317,6 +341,7 @@ fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf
 
 #[test]
 fn vscdb_read_access_token() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "tok_abc123xyz")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken").unwrap();
@@ -325,6 +350,7 @@ fn vscdb_read_access_token() {
 
 #[test]
 fn vscdb_read_machine_id() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(
         dir.path(),
@@ -339,6 +365,7 @@ fn vscdb_read_machine_id() {
 
 #[test]
 fn vscdb_missing_key_returns_error() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
@@ -353,6 +380,7 @@ fn vscdb_missing_key_returns_error() {
 
 #[test]
 fn vscdb_empty_value_returns_error() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
@@ -368,6 +396,7 @@ fn vscdb_missing_file_returns_error() {
 
 #[test]
 fn vscdb_multiple_keys() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(
         dir.path(),
@@ -398,6 +427,7 @@ fn vscdb_multiple_keys() {
 
 #[test]
 fn vscdb_wrong_table_name() {
+    require_sqlite3!();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("state.vscdb");
     let status = std::process::Command::new("sqlite3")

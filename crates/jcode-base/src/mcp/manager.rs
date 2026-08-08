@@ -656,7 +656,9 @@ mod provenance_integration_tests {
     /// initialize, tools/list, and tools/call with canned JSON-RPC replies.
     fn write_fake_mcp_server(dir: &std::path::Path) -> std::path::PathBuf {
         let path = dir.join("fake-mcp-server.sh");
-        let script = r##"#!/bin/bash
+        // `/bin/bash` does not exist on every distro (NixOS, for one), and the
+        // script only uses POSIX constructs, so run it under `/bin/sh`.
+        let script = r##"#!/bin/sh
 while IFS= read -r line; do
   id=$(echo "$line" | grep -o '"id":[0-9]*' | grep -o '[0-9]*' | head -1)
   case "$line" in
