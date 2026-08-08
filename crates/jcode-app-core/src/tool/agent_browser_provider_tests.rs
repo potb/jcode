@@ -510,3 +510,70 @@ fn annotated_content_format_falls_back_to_snapshot() {
     .unwrap();
     assert_eq!(args(&plan), vec!["snapshot"]);
 }
+
+#[test]
+fn eval_scripts_with_top_level_return_are_wrapped() {
+    use super::normalize_eval_script;
+
+    // The Firefox bridge evaluates a function body, so agent scripts commonly
+    // use a bare `return`. agent-browser evaluates an expression, where that is
+    // a hard SyntaxError, so those scripts must be wrapped.
+    let wrapped = normalize_eval_script("return document.title;");
+    assert!(wrapped.starts_with("(() => {"), "{wrapped}");
+    assert!(wrapped.contains("return document.title;"), "{wrapped}");
+    assert!(wrapped.ends_with("})()"), "{wrapped}");
+
+    let multi = normalize_eval_script("const x = 1;\nreturn { x };");
+    assert!(multi.starts_with("(() => {"), "{multi}");
+}
+
+#[test]
+fn plain_expressions_are_left_byte_identical() {
+    use super::normalize_eval_script;
+
+    // The common case must not be rewritten.
+    for script in [
+        "document.title",
+        "1 + 1",
+        "document.querySelectorAll('a').length",
+    ] {
+        assert_eq!(normalize_eval_script(script), script);
+    }
+}
+
+#[test]
+fn return_inside_nested_functions_or_literals_does_not_trigger_wrapping() {
+    use super::normalize_eval_script;
+
+    // A `return` belonging to a nested function is already legal in an
+    // expression, so wrapping would be unnecessary churn.
+    let nested = "[1,2].map(function (n) { return n * 2; })";
+    assert_eq!(normalize_eval_script(nested), nested);
+
+    let arrow = "(() => { return 5; })()";
+    assert_eq!(normalize_eval_script(arrow), arrow);
+
+    // A `return` inside a string or comment is not code.
+    let in_string = "'return this text'";
+    assert_eq!(normalize_eval_script(in_string), in_string);
+
+    let in_comment = "// return early\ndocument.title";
+    assert_eq!(normalize_eval_script(in_comment), in_comment);
+
+    let in_block_comment = "/* return */ document.title";
+    assert_eq!(normalize_eval_script(in_block_comment), in_block_comment);
+
+    // An identifier that merely starts with "return" is not the keyword.
+    let identifier = "returnValue + obj.returnCode";
+    assert_eq!(normalize_eval_script(identifier), identifier);
+}
+
+#[test]
+fn press_script_is_evaluable_by_agent_browser() {
+    // jcode's own press fallback is written in the function-body style, so it
+    // must come out wrapped rather than failing at runtime.
+    use super::normalize_eval_script;
+    let press_style = "return (() => {\n  const t = document.body;\n  return { ok: true };\n})();";
+    let normalized = normalize_eval_script(press_style);
+    assert!(normalized.starts_with("(() => {"), "{normalized}");
+}

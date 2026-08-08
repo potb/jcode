@@ -153,6 +153,83 @@ fn selector_of(input: &BrowserInput) -> Option<String> {
     input.selector.clone()
 }
 
+/// Make a script safe to evaluate as an expression.
+///
+/// The Firefox bridge evaluates scripts as a function body, so agent scripts
+/// commonly use a top-level `return`. agent-browser evaluates an expression,
+/// where that is a hard `SyntaxError: Illegal return statement`. Wrapping such a
+/// script in an immediately-invoked arrow function preserves the authored
+/// semantics on both backends.
+///
+/// Scripts that are already plain expressions are left untouched, so the common
+/// case stays byte-identical to what the caller wrote.
+pub fn normalize_eval_script(script: &str) -> String {
+    if has_top_level_return(script) {
+        format!("(() => {{\n{script}\n}})()")
+    } else {
+        script.to_string()
+    }
+}
+
+/// Detect a `return` that belongs to the script itself rather than to a nested
+/// function, string, or comment.
+fn has_top_level_return(script: &str) -> bool {
+    let bytes = script.as_bytes();
+    let mut depth: i32 = 0;
+    let mut index = 0;
+    // Track the nesting of function bodies and object/block braces. A `return`
+    // seen at depth 0 cannot belong to a nested function.
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index += 2;
+                continue;
+            }
+            b'"' | b'\'' | b'`' => {
+                let quote = byte;
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    // Skip escaped characters so a quote inside a string does
+                    // not end it early.
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+            }
+            b'r' if depth == 0 && script[index..].starts_with("return") => {
+                let before_ok = index == 0
+                    || !bytes[index - 1].is_ascii_alphanumeric()
+                        && bytes[index - 1] != b'_'
+                        && bytes[index - 1] != b'.'
+                        && bytes[index - 1] != b'$';
+                let after = script[index + "return".len()..].chars().next();
+                let after_ok = matches!(after, None | Some(' ' | '\t' | '\n' | '\r' | ';' | '('));
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Reject parameters this backend cannot honor.
 ///
 /// The browser tool schema is shared with the Firefox backend, which supports a
@@ -350,7 +427,11 @@ pub fn build_command_with_caps(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("script is required for eval"))?;
             // base64 avoids all shell/arg-quoting hazards for arbitrary JS.
-            args.extend(["eval".into(), "-b".into(), STANDARD.encode(script)]);
+            args.extend([
+                "eval".into(),
+                "-b".into(),
+                STANDARD.encode(normalize_eval_script(script)),
+            ]);
         }
         "scroll" => {
             if let Some(selector) = selector_of(input) {
