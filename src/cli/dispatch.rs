@@ -389,6 +389,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Pair { list, revoke }) => {
             commands::run_pair_command(list, revoke)?;
         }
+        Some(Command::Notify {
+            title,
+            body,
+            priority,
+            safe_body,
+        }) => {
+            commands::run_notify_command(title, body, priority, safe_body).await?;
+        }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
         }
