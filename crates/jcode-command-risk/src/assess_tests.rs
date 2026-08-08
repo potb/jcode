@@ -455,7 +455,6 @@ fn ordinary_redirection_is_never_gated() {
 /// The redirect exemption must not become a laundering channel.
 #[test]
 fn redirection_into_real_files_is_still_assessed() {
-
     // Clobbering a protected file is still catastrophic, fd prefix or not.
     for command in ["echo x > /etc/passwd", "echo x 2> /etc/passwd"] {
         assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
