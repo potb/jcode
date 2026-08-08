@@ -329,3 +329,68 @@ fn get_content_html_and_title_map_to_get_subcommands() {
     let text = build_command("get_content", &input(json!({"action":"get_content"}))).unwrap();
     assert_eq!(args(&text), vec!["get", "text", "body"]);
 }
+
+#[test]
+fn wait_honors_timeout_ms() {
+    // The schema advertises timeout_ms and the Firefox backend honors it, so
+    // dropping it here would be a silent behavior difference between backends.
+    let plan = build_command(
+        "wait",
+        &input(json!({"action":"wait","selector":"#done","timeout_ms":5000})),
+    )
+    .unwrap();
+    assert_eq!(args(&plan), vec!["wait", "#done", "--timeout", "5000"]);
+
+    let by_text = build_command(
+        "wait",
+        &input(json!({"action":"wait","contains":"Welcome","timeout_ms":250})),
+    )
+    .unwrap();
+    assert_eq!(
+        args(&by_text),
+        vec!["wait", "--text", "Welcome", "--timeout", "250"]
+    );
+}
+
+#[test]
+fn cli_timeout_bounds_calls_and_respects_wait_budget() {
+    use super::cli_timeout;
+    use std::time::Duration;
+
+    // Ordinary commands get the default ceiling.
+    let quick = vec!["get".to_string(), "url".to_string()];
+    assert_eq!(cli_timeout(&quick), Duration::from_secs(90));
+
+    // A wait gets its own budget plus slack, so a long explicit wait is not
+    // cut short by the process bound.
+    let long_wait = vec![
+        "wait".to_string(),
+        "#x".to_string(),
+        "--timeout".to_string(),
+        "120000".to_string(),
+    ];
+    assert!(cli_timeout(&long_wait) > Duration::from_secs(120));
+}
+
+#[test]
+fn daemon_lifecycle_noise_is_stripped_from_results() {
+    use super::strip_daemon_noise;
+
+    // agent-browser >=0.30 wraps a 73-byte answer in 261 bytes of bookkeeping.
+    let mut value = json!({
+        "lifecycle": {
+            "effectiveLaunch": {"browserLaunched": true, "engine": "chrome"},
+            "launched": false,
+            "reused": true,
+            "restoreStatus": "not_configured"
+        },
+        "url": "https://example.com/"
+    });
+    strip_daemon_noise(&mut value);
+    assert_eq!(value, json!({"url": "https://example.com/"}));
+
+    // Responses without the wrapper are untouched.
+    let mut plain = json!({"url": "https://a.test"});
+    strip_daemon_noise(&mut plain);
+    assert_eq!(plain, json!({"url": "https://a.test"}));
+}

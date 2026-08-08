@@ -281,6 +281,11 @@ pub fn build_command_with_caps(
             } else {
                 anyhow::bail!("wait requires selector, text, or contains");
             }
+            // The schema advertises timeout_ms and the Firefox backend honors
+            // it, so honor it here too instead of silently ignoring it.
+            if let Some(timeout_ms) = input.timeout_ms {
+                args.extend(["--timeout".into(), timeout_ms.to_string()]);
+            }
         }
         "screenshot" => {
             args.push("screenshot".into());
@@ -393,6 +398,23 @@ pub fn build_command_with_caps(
     })
 }
 
+/// Wall-clock bound for one agent-browser invocation.
+///
+/// Waits carry an explicit page timeout, so allow their own budget plus slack;
+/// everything else should be fast because the daemon stays warm.
+fn cli_timeout(args: &[String]) -> std::time::Duration {
+    const DEFAULT: std::time::Duration = std::time::Duration::from_secs(90);
+
+    if args.first().map(|a| a.as_str()) == Some("wait")
+        && let Some(index) = args.iter().position(|a| a == "--timeout")
+        && let Some(ms) = args.get(index + 1).and_then(|v| v.parse::<u64>().ok())
+    {
+        return std::time::Duration::from_millis(ms) + std::time::Duration::from_secs(15);
+    }
+
+    DEFAULT
+}
+
 async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
     let bin = crate::agent_browser::resolve_binary()
         .ok_or_else(|| anyhow::anyhow!("agent-browser binary not found. Run action='setup'."))?;
@@ -420,10 +442,18 @@ async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    let output = command
-        .output()
-        .await
-        .with_context(|| format!("Failed to run agent-browser {:?}", args))?;
+    // Bound every invocation. A wedged daemon otherwise blocks the whole agent
+    // turn with no way out; a clear timeout error is always more useful.
+    let output = match tokio::time::timeout(cli_timeout(args), command.output()).await {
+        Ok(result) => result.with_context(|| format!("Failed to run agent-browser {:?}", args))?,
+        Err(_) => {
+            anyhow::bail!(
+                "agent-browser command {:?} timed out after {}s. The browser daemon may be wedged; run `agent-browser doctor` or retry with a smaller timeout_ms.",
+                args,
+                cli_timeout(args).as_secs()
+            );
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -455,7 +485,7 @@ async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
         anyhow::bail!("{details}");
     }
 
-    Ok(match parsed {
+    let mut value = match parsed {
         Some(Value::Object(map)) => map
             .get("data")
             .cloned()
@@ -463,7 +493,21 @@ async fn run_cli(args: &[String], ctx: &ToolContext) -> Result<Value> {
         Some(other) => other,
         None if stdout.is_empty() => json!({ "ok": true }),
         None => json!({ "raw": stdout }),
-    })
+    };
+    strip_daemon_noise(&mut value);
+    Ok(value)
+}
+
+/// Remove daemon bookkeeping that the model never needs.
+///
+/// agent-browser >=0.30 attaches a `lifecycle` object to nearly every response
+/// describing whether the browser was launched, reused, or restored. On a
+/// `get url` that is 261 bytes of noise wrapping 73 bytes of answer, and it is
+/// repeated on every single call, so strip it before it reaches the model.
+fn strip_daemon_noise(value: &mut Value) {
+    if let Some(map) = value.as_object_mut() {
+        map.remove("lifecycle");
+    }
 }
 
 async fn screenshot_with_image(plan: CommandPlan, ctx: &ToolContext) -> Result<ToolOutput> {
