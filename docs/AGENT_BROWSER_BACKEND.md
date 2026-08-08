@@ -75,25 +75,31 @@ Roughly 150ms per command, since the daemon stays warm between calls.
 
 ### Regression check
 
-Two things make a naive `cargo test` misleading here:
+Three things make a naive `cargo test` misleading here, in increasing order of
+how badly they mislead:
 
 - `cargo test --workspace` cannot build in this environment at all, because the
   desktop crate needs system `fontconfig`. It fails before running a single
   test, so it proves nothing.
-- cargo stops at the first failing crate by default, which undercounts failures
-  and can make unrelated breakage look absent.
+- cargo stops at the first failing crate by default, which undercounts failures.
+- **Even with `--no-fail-fast`, repeated runs of the same command executed
+  different sets of test binaries.** Observed here: 17, 18, and 19 result lines
+  across three runs of one command, with the `jcode-app-core` lib binary missing
+  entirely from two of them. Comparing aggregate failure counts between two such
+  runs compares different scopes and is meaningless.
 
-Use the affected crates explicitly, with `--no-fail-fast`, and compare against a
-clean worktree of the base commit:
+Because of the third point, compare **per test**, not per suite. Run each
+candidate individually in both trees, which cannot drift in scope:
 
 ```bash
-cargo test -p jcode -p jcode-app-core -p jcode-base \
-  -p jcode-provider-openai-runtime --profile selfdev --no-fail-fast
+cargo test -p <pkg> --profile selfdev --lib -- --exact <test::path>
 ```
 
-Measured this way, the base commit and this branch fail the identical set of 12
-tests (cursor auth, ambient lock, mcp provenance, auto-poke, provider init), none
-of which this work touches. Passing tests go from 1695 to 1709.
+Measured that way against a clean worktree of base commit `d0b54f645`, every
+known-failing test behaves identically on the base and on this branch (cursor
+auth, mcp provenance, auto-poke, provider init, and the two tool-description
+token caps all fail on both; `ambient::ambient_tests::test_ambient_lock_release`
+passes on both). This work introduces no failure and fixes none of them.
 
 ## Version compatibility
 
