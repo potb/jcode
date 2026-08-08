@@ -4,6 +4,7 @@ mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
+mod agent_browser_provider;
 mod browser;
 mod communicate;
 #[cfg(target_os = "macos")]

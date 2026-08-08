@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct BrowserTool;
 
 static FIREFOX_PROVIDER: FirefoxBridgeProvider = FirefoxBridgeProvider;
+static AGENT_BROWSER_PROVIDER: super::agent_browser_provider::AgentBrowserProvider =
+    super::agent_browser_provider::AgentBrowserProvider;
 
 impl BrowserTool {
     pub fn new() -> Self {
@@ -22,85 +24,85 @@ fn browser_tool_description_text() -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
-struct BrowserInput {
-    action: String,
+pub(super) struct BrowserInput {
+    pub(super) action: String,
     #[serde(default)]
-    browser: Option<String>,
+    pub(super) browser: Option<String>,
     #[serde(default)]
-    provider_action: Option<String>,
+    pub(super) provider_action: Option<String>,
     #[serde(default)]
-    params: Option<Value>,
+    pub(super) params: Option<Value>,
     #[serde(default)]
-    url: Option<String>,
+    pub(super) url: Option<String>,
     #[serde(default)]
-    tab_id: Option<i64>,
+    pub(super) tab_id: Option<i64>,
     #[serde(default)]
-    window_id: Option<i64>,
+    pub(super) window_id: Option<i64>,
     #[serde(default)]
-    frame_id: Option<i64>,
+    pub(super) frame_id: Option<i64>,
     #[serde(default)]
-    all_frames: Option<bool>,
+    pub(super) all_frames: Option<bool>,
     #[serde(default)]
-    selector: Option<String>,
+    pub(super) selector: Option<String>,
     #[serde(default)]
-    text: Option<String>,
+    pub(super) text: Option<String>,
     #[serde(default)]
-    contains: Option<String>,
+    pub(super) contains: Option<String>,
     #[serde(default)]
-    script: Option<String>,
+    pub(super) script: Option<String>,
     #[serde(default)]
-    key: Option<String>,
+    pub(super) key: Option<String>,
     #[serde(default)]
-    x: Option<f64>,
+    pub(super) x: Option<f64>,
     #[serde(default)]
-    y: Option<f64>,
+    pub(super) y: Option<f64>,
     #[serde(default)]
-    format: Option<String>,
+    pub(super) format: Option<String>,
     #[serde(default)]
-    wait: Option<bool>,
+    pub(super) wait: Option<bool>,
     #[serde(default)]
-    new_tab: Option<bool>,
+    pub(super) new_tab: Option<bool>,
     #[serde(default)]
-    focus: Option<bool>,
+    pub(super) focus: Option<bool>,
     #[serde(default)]
-    clear: Option<bool>,
+    pub(super) clear: Option<bool>,
     #[serde(default)]
-    submit: Option<bool>,
+    pub(super) submit: Option<bool>,
     #[serde(default)]
-    page_world: Option<bool>,
+    pub(super) page_world: Option<bool>,
     #[serde(default)]
-    position: Option<String>,
+    pub(super) position: Option<String>,
     #[serde(default)]
-    behavior: Option<String>,
+    pub(super) behavior: Option<String>,
     #[serde(default)]
-    timeout_ms: Option<u64>,
+    pub(super) timeout_ms: Option<u64>,
     #[serde(default)]
-    path: Option<String>,
+    pub(super) path: Option<String>,
     #[serde(default)]
-    fields: Option<Vec<BrowserField>>,
+    pub(super) fields: Option<Vec<BrowserField>>,
     #[serde(default)]
-    scroll_to: Option<ScrollTo>,
+    pub(super) scroll_to: Option<ScrollTo>,
 }
 
 #[derive(Debug, Deserialize)]
-struct BrowserField {
-    selector: String,
+pub(super) struct BrowserField {
+    pub(super) selector: String,
     #[serde(default)]
-    value: Option<String>,
+    pub(super) value: Option<String>,
     #[serde(default)]
-    checked: Option<bool>,
+    pub(super) checked: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ScrollTo {
+pub(super) struct ScrollTo {
     #[serde(default)]
-    x: Option<f64>,
+    pub(super) x: Option<f64>,
     #[serde(default)]
-    y: Option<f64>,
+    pub(super) y: Option<f64>,
 }
 
 #[async_trait]
-trait BrowserProvider: Send + Sync {
+pub(super) trait BrowserProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn supported_browsers(&self) -> &'static [&'static str];
 
@@ -340,14 +342,43 @@ fn attach_browser_metadata(
 
 fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvider> {
     let browser = browser.unwrap_or("auto");
-    if FIREFOX_PROVIDER.supported_browsers().contains(&browser) {
+
+    // Explicit browser choice wins.
+    if AGENT_BROWSER_PROVIDER.supported_browsers().contains(&browser) {
+        return Ok(&AGENT_BROWSER_PROVIDER);
+    }
+    if browser == "firefox" {
         return Ok(&FIREFOX_PROVIDER);
     }
 
+    if browser == "auto" {
+        return Ok(default_provider());
+    }
+
     anyhow::bail!(
-        "Browser backend '{}' is not wired into the built-in browser tool yet. Use auto/firefox for now.",
+        "Browser backend '{}' is not wired into the built-in browser tool yet. Use auto, chrome, or firefox.",
         browser
     )
+}
+
+/// Pick the backend for `browser: "auto"`.
+///
+/// `JCODE_BROWSER_BACKEND=firefox|agent-browser` forces one. Otherwise prefer
+/// agent-browser when its binary is present, since it needs no extension and no
+/// human-in-the-loop install step.
+fn default_provider() -> &'static dyn BrowserProvider {
+    match std::env::var("JCODE_BROWSER_BACKEND").ok().as_deref() {
+        Some("firefox") => return &FIREFOX_PROVIDER,
+        Some("agent-browser") | Some("agent_browser") | Some("chrome") => {
+            return &AGENT_BROWSER_PROVIDER;
+        }
+        _ => {}
+    }
+
+    if crate::agent_browser::resolve_binary().is_some() {
+        return &AGENT_BROWSER_PROVIDER;
+    }
+    &FIREFOX_PROVIDER
 }
 
 async fn firefox_status(
