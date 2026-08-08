@@ -97,7 +97,7 @@ impl Tool for CompactTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect context pressure, or request compaction of your own older conversation history into a summary. Use action='status' to check usage and action='now' to request compaction. Compaction runs in the background and applies on a later turn; recent turns are always preserved. Request it when context usage is high and older history is no longer needed, not routinely."
+        "Inspect context pressure, or compact your own older history into a summary."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -107,7 +107,7 @@ impl Tool for CompactTool {
                 "action": {
                     "type": "string",
                     "enum": ["status", "now", "cancel"],
-                    "description": "status (default) reports context usage; now requests a background compaction; cancel withdraws a request not yet applied."
+                    "description": "status (default) reports usage; now compacts older history, keeping recent turns; cancel withdraws it."
                 }
             }
         })
