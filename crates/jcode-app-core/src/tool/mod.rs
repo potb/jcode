@@ -10,6 +10,7 @@ mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
+pub mod compact;
 mod conversation_search;
 mod debug_socket;
 mod discover;
@@ -311,6 +312,11 @@ impl Registry {
             &mut tools_map,
             "batch",
             batch::BatchTool::new(registry.clone()),
+        );
+        Self::insert_tool(
+            &mut tools_map,
+            "compact",
+            compact::CompactTool::new(compaction.clone()),
         );
         Self::insert_tool(
             &mut tools_map,

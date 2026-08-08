@@ -15,6 +15,10 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+/// Provider that uses jcode-side compaction, so `messages_for_provider` runs the
+/// `compact` tool request hook.
+struct JcodeCompactionProvider;
+
 struct NativeCompactionStreamProvider;
 
 fn content_text(content: &[ContentBlock]) -> &str {
@@ -148,6 +152,106 @@ impl Provider for NativeCompactionStreamProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
+}
+
+#[async_trait]
+impl Provider for JcodeCompactionProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        true
+    }
+
+    fn context_window(&self) -> usize {
+        1_000
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+
+    async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
+        Ok("summary produced for compact tool request".to_string())
+    }
+}
+
+/// End-to-end: a `compact` tool call with action=now must cause the agent to
+/// actually compact its history on the next provider call.
+#[tokio::test]
+async fn compact_tool_request_drives_real_compaction_in_agent() {
+    let provider: Arc<dyn Provider> = Arc::new(JcodeCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    for i in 0..30 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                // Sized so context usage lands above the manual-compaction
+                // floor but well below the emergency hard-compact threshold,
+                // isolating the path this test is about.
+                text: format!("turn {i} {}", "x".repeat(30)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    let before = agent.provider_messages().len();
+
+    // Without a request, nothing manual should be triggered by our hook.
+    crate::tool::compact::clear_request(&agent.session.id);
+
+    // Simulate the tool having been called with action=now during this turn.
+    crate::tool::compact::request_compaction(&agent.session.id);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut event = None;
+    let mut compacted = Vec::new();
+    while Instant::now() < deadline {
+        let (messages, maybe_event) = agent.messages_for_provider();
+        if maybe_event.is_some() {
+            event = maybe_event;
+            compacted = messages;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let event = event.expect("compact tool request should produce a compaction event");
+    assert_eq!(event.trigger, "manual");
+    assert!(
+        compacted.len() < before,
+        "compaction should shrink history: {} -> {}",
+        before,
+        compacted.len()
+    );
+    match &compacted[0].content[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("summary produced for compact tool request"), "{text}");
+        }
+        other => panic!("expected summary text block, got {other:?}"),
+    }
+
+    // The request must be one-shot: a second pass must not start another
+    // compaction on its own.
+    assert!(!crate::tool::compact::take_request(&agent.session.id));
 }
 
 #[test]

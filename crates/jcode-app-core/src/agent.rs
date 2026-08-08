@@ -647,9 +647,26 @@ impl Agent {
                 Ok(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
+                    let session_id_for_compact = self.session.id.clone();
                     let messages = {
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
+                            // A `compact` tool call earlier in this turn records a
+                            // request rather than compacting itself; honor it here,
+                            // where the authoritative message list and provider
+                            // handle are both available.
+                            if crate::tool::compact::take_request(&session_id_for_compact) {
+                                match manager
+                                    .force_compact_with(all_messages, self.provider.fork())
+                                {
+                                    Ok(()) => logging::info(
+                                        "Manual compaction started (compact tool request)",
+                                    ),
+                                    Err(reason) => logging::info(&format!(
+                                        "Manual compaction request declined: {reason}"
+                                    )),
+                                }
+                            }
                             let action =
                                 manager.ensure_context_fits(all_messages, self.provider.clone());
                             match action {
