@@ -73,6 +73,28 @@ Run through a real jcode agent session, not just unit tests:
 
 Roughly 150ms per command, since the daemon stays warm between calls.
 
+### Regression check
+
+Two things make a naive `cargo test` misleading here:
+
+- `cargo test --workspace` cannot build in this environment at all, because the
+  desktop crate needs system `fontconfig`. It fails before running a single
+  test, so it proves nothing.
+- cargo stops at the first failing crate by default, which undercounts failures
+  and can make unrelated breakage look absent.
+
+Use the affected crates explicitly, with `--no-fail-fast`, and compare against a
+clean worktree of the base commit:
+
+```bash
+cargo test -p jcode -p jcode-app-core -p jcode-base \
+  -p jcode-provider-openai-runtime --profile selfdev --no-fail-fast
+```
+
+Measured this way, the base commit and this branch fail the identical set of 12
+tests (cursor auth, ambient lock, mcp provenance, auto-poke, provider init), none
+of which this work touches. Passing tests go from 1695 to 1709.
+
 ## Version compatibility
 
 agent-browser moves fast and has made breaking changes. Testing 0.13.0 against
