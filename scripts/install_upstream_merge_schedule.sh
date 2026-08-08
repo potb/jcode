@@ -55,7 +55,9 @@ Description=jcode upstream merge agent (keeps this fork mergeable with upstream)
 Type=oneshot
 Environment=JCODE_UPSTREAM_REPO=$REPO
 Environment=JCODE_BIN=$JCODE_BIN
-Environment=PATH=$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# gh must be on PATH: it is how Actions are kept disabled on the fork before
+# any push. Timer units get a near-empty PATH otherwise.
+Environment=PATH=$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$USER/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$AGENT
 Nice=10
 EOF
