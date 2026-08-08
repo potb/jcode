@@ -1,6 +1,7 @@
 {
-  "total": 77,
+  "total": 78,
   "tracked_files": {
+    "crates/jcode-app-core/src/cron/exec.rs": 1,
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/communicate.rs": 1,
     "crates/jcode-app-core/src/tool/computer/win.rs": 3,

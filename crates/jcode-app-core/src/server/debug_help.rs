@@ -97,6 +97,11 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:stop                - Stop ambient mode
   ambient:help                - Ambient command reference
 
+CRON COMMANDS (cron: prefix):
+  cron:list                    - Configured [[cron]] jobs: schedule, enabled, last run/status, next run
+  cron:run:<id>                - Run one job immediately, bypassing its schedule
+  cron:help                    - Cron command reference
+
 EVENTS COMMANDS (events: prefix):
   events:recent            - Get recent events (default 50)
   events:recent:<N>        - Get recent N events

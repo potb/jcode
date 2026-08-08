@@ -436,6 +436,16 @@ impl AmbientRunnerHandle {
         let windows = configured_windows();
         let window_state = schedule_window::evaluate(&windows, &Local::now());
 
+        // Fold in the nearest upcoming `[[cron]]` fire too: cron rides this
+        // same runner loop (see `run_loop`'s call to `crate::cron::tick`), so
+        // "when does anything next happen" belongs in the one status call
+        // rather than requiring a separate `cron:list` round trip.
+        let next_cron_due = crate::cron::next_due();
+        let next_cron_due_in = next_cron_due.map(|next| {
+            let mins = (next - Utc::now()).num_minutes().max(0) as u32;
+            crate::ambient::format_minutes_human(mins)
+        });
+
         serde_json::json!({
             "enabled": config().ambient.enabled,
             "status": status_str,
@@ -461,6 +471,8 @@ impl AmbientRunnerHandle {
             "next_scheduled_task_due": next_reminder_due,
             "overdue_scheduled_task_count": overdue_reminder_count,
             "active_user_sessions": active_sessions,
+            "next_cron_due": next_cron_due.map(|t| t.to_rfc3339()),
+            "next_cron_due_in": next_cron_due_in,
         })
         .to_string()
     }

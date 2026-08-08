@@ -354,6 +354,17 @@ pub fn list_snapshot() -> Vec<CronJobSnapshot> {
         .collect()
 }
 
+/// The single nearest upcoming fire time across every configured job,
+/// whichever deadline category is sooner. Used by `ambient:status` and
+/// `cron:list` so "when does anything next fire" has one shared answer
+/// rather than each call site computing it slightly differently.
+pub fn next_due() -> Option<DateTime<Utc>> {
+    list_snapshot()
+        .into_iter()
+        .filter_map(|job| job.next_run)
+        .min()
+}
+
 /// Force one job to run right now, bypassing its schedule (but not its
 /// enabled flag, validity, or the exec concurrency guard). Used by
 /// `cron:run:<id>`.
