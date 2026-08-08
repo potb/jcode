@@ -139,6 +139,16 @@
                 nativeBuildInputs = [ nightlyToolchain ] ++ buildTools ++ extraTools;
                 buildInputs = runtimeLibraries;
 
+                # Nix's fortify hardening injects -D_FORTIFY_SOURCE, which glibc
+                # rejects at -O0. jemalloc's configure compiles its feature
+                # probes at -O0 with -Werror, so every probe failed and
+                # `--features jemalloc` died at "cannot determine return type of
+                # strerror_r". Release builds set their own optimization level.
+                hardeningDisable = [
+                  "fortify"
+                  "fortify3"
+                ];
+
                 # Keep Cargo's mutable caches outside the Nix store. Cargo's
                 # default CARGO_HOME (~/.cargo) and this checkout's target/
                 # therefore survive every nix develop invocation.
