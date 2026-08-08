@@ -518,6 +518,11 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 
 #[test]
 fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entries() {
+    // Building routes reads the on-disk model catalogs, which seed the global
+    // context-limit cache from the developer's real JCODE_HOME and change what
+    // other tests resolve for shared model ids. Run in a temp home like the
+    // sibling route tests do.
+    with_clean_provider_test_env(|| {
     let provider = MultiProvider {
         claude: RwLock::new(None),
         anthropic: RwLock::new(None),
@@ -549,6 +554,7 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
         "legacy duplicate antigravity routes should not be emitted: {:?}",
         routes
     );
+    });
 }
 
 #[test]
