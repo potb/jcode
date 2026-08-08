@@ -394,3 +394,86 @@ fn daemon_lifecycle_noise_is_stripped_from_results() {
     strip_daemon_noise(&mut plain);
     assert_eq!(plain, json!({"url": "https://a.test"}));
 }
+
+#[test]
+fn unsupported_targeting_params_fail_loudly_with_an_alternative() {
+    // The schema is shared with the Firefox backend. Quietly ignoring a scoping
+    // parameter would let a caller believe an action was scoped when it was not.
+    let cases: Vec<(serde_json::Value, &str)> = vec![
+        (
+            json!({"action":"click","selector":"a","frame_id":2}),
+            "frame_id",
+        ),
+        (
+            json!({"action":"click","selector":"a","all_frames":true}),
+            "all_frames",
+        ),
+        (
+            json!({"action":"click","selector":"a","window_id":3}),
+            "window_id",
+        ),
+        (
+            json!({"action":"eval","script":"1","page_world":false}),
+            "page_world",
+        ),
+        (
+            json!({"action":"open","url":"https://a.test","wait":false}),
+            "wait=false",
+        ),
+    ];
+
+    for (case, needle) in cases {
+        let action = case["action"].as_str().unwrap().to_string();
+        let err = build_command(&action, &input(case.clone()))
+            .err()
+            .unwrap_or_else(|| panic!("{needle} should be rejected"));
+        let message = err.to_string();
+        assert!(
+            message.contains(needle),
+            "error for {needle} should name it: {message}"
+        );
+        assert!(
+            message.contains("not supported"),
+            "error for {needle} should say it is unsupported: {message}"
+        );
+    }
+}
+
+#[test]
+fn supported_values_of_those_params_still_pass() {
+    // all_frames=false and page_world=true match agent-browser's behavior, so
+    // honoring them is a no-op rather than an error.
+    assert!(
+        build_command(
+            "click",
+            &input(json!({"action":"click","selector":"a","all_frames":false})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "eval",
+            &input(json!({"action":"eval","script":"1","page_world":true})),
+        )
+        .is_ok()
+    );
+    assert!(
+        build_command(
+            "open",
+            &input(json!({"action":"open","url":"https://a.test","wait":true})),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn type_with_submit_presses_enter_after_filling() {
+    let plan = build_command(
+        "type",
+        &input(json!({"action":"type","selector":"#q","text":"hi","submit":true})),
+    )
+    .unwrap();
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[0], vec!["fill", "#q", "hi"]);
+    assert_eq!(plan.steps[1], vec!["press", "Enter"]);
+}

@@ -153,6 +153,44 @@ fn selector_of(input: &BrowserInput) -> Option<String> {
     input.selector.clone()
 }
 
+/// Reject parameters this backend cannot honor.
+///
+/// The browser tool schema is shared with the Firefox backend, which supports a
+/// few targeting options agent-browser has no equivalent for. Accepting them and
+/// quietly ignoring them is the worst outcome: the caller believes the action was
+/// scoped when it was not. Fail with a concrete alternative instead.
+///
+/// Options whose only supported value matches agent-browser's default are
+/// allowed through, since honoring them is a no-op.
+fn reject_unsupported_params(action: &str, input: &BrowserInput) -> Result<()> {
+    if input.frame_id.is_some() {
+        anyhow::bail!(
+            "frame_id is not supported by the agent-browser backend, which addresses frames by selector rather than numeric id. Use action='provider_command' with provider_action='frame' and params=[\"<iframe selector>\"] to switch frames, then run the action."
+        );
+    }
+    if input.all_frames == Some(true) {
+        anyhow::bail!(
+            "all_frames is not supported by the agent-browser backend. Switch to a specific frame with provider_action='frame' and repeat the action per frame."
+        );
+    }
+    if input.window_id.is_some() {
+        anyhow::bail!(
+            "window_id is not supported by the agent-browser backend. Each jcode session already gets its own isolated browser, so cross-window targeting is unnecessary."
+        );
+    }
+    if input.page_world == Some(false) {
+        anyhow::bail!(
+            "page_world=false (isolated world execution) is not supported by the agent-browser backend; its eval always runs in the page world. Omit page_world to use the default."
+        );
+    }
+    if action == "open" && input.wait == Some(false) {
+        anyhow::bail!(
+            "wait=false is not supported by the agent-browser backend; navigation always waits for load. Omit wait to use the default."
+        );
+    }
+    Ok(())
+}
+
 pub fn build_command(action: &str, input: &BrowserInput) -> Result<CommandPlan> {
     build_command_with_caps(action, input, crate::agent_browser::BackendCaps::default())
 }
@@ -162,6 +200,8 @@ pub fn build_command_with_caps(
     input: &BrowserInput,
     caps: crate::agent_browser::BackendCaps,
 ) -> Result<CommandPlan> {
+    reject_unsupported_params(action, input)?;
+
     // Steps that must run before the final command (e.g. focus before press).
     let mut steps: Vec<Vec<String>> = Vec::new();
     let mut args: Vec<String> = Vec::new();
@@ -236,7 +276,14 @@ pub fn build_command_with_caps(
             } else {
                 "type"
             };
-            args.extend([verb.into(), selector, text.to_string()]);
+            // `submit` means "then submit the form", which agent-browser has no
+            // flag for; pressing Enter in the focused field is the equivalent.
+            if input.submit.unwrap_or(false) {
+                steps.push(vec![verb.into(), selector.clone(), text.to_string()]);
+                args.extend(["press".into(), "Enter".into()]);
+            } else {
+                args.extend([verb.into(), selector, text.to_string()]);
+            }
         }
         "fill_form" => {
             // agent-browser has no batch form-fill primitive, and its `batch`
