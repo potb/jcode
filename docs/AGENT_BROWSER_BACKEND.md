@@ -1,6 +1,6 @@
 # Replacing the Firefox browser backend with agent-browser
 
-Status: prototype landed, Firefox still present
+Status: agent-browser backend landed; Firefox still present but no longer required
 Scope: the `browser` tool and `jcode browser` CLI
 
 ## Summary
@@ -73,6 +73,34 @@ Run through a real jcode agent session, not just unit tests:
 
 Roughly 150ms per command, since the daemon stays warm between calls.
 
+### Regression check
+
+Three things make a naive `cargo test` misleading here, in increasing order of
+how badly they mislead:
+
+- `cargo test --workspace` cannot build in this environment at all, because the
+  desktop crate needs system `fontconfig`. It fails before running a single
+  test, so it proves nothing.
+- cargo stops at the first failing crate by default, which undercounts failures.
+- **Even with `--no-fail-fast`, repeated runs of the same command executed
+  different sets of test binaries.** Observed here: 17, 18, and 19 result lines
+  across three runs of one command, with the `jcode-app-core` lib binary missing
+  entirely from two of them. Comparing aggregate failure counts between two such
+  runs compares different scopes and is meaningless.
+
+Because of the third point, compare **per test**, not per suite. Run each
+candidate individually in both trees, which cannot drift in scope:
+
+```bash
+cargo test -p <pkg> --profile selfdev --lib -- --exact <test::path>
+```
+
+Measured that way against a clean worktree of base commit `d0b54f645`, every
+known-failing test behaves identically on the base and on this branch (cursor
+auth, mcp provenance, auto-poke, provider init, and the two tool-description
+token caps all fail on both; `ambient::ambient_tests::test_ambient_lock_release`
+passes on both). This work introduces no failure and fixes none of them.
+
 ## Version compatibility
 
 agent-browser moves fast and has made breaking changes. Testing 0.13.0 against
@@ -133,23 +161,43 @@ Values that happen to match agent-browser's own default (`all_frames=false`,
   73 bytes of answer, repeated on every call, so it is removed before the result
   reaches the model.
 
-## What a full Firefox removal still needs
+## The ChatGPT web route
 
-`crates/jcode-provider-openai-runtime/src/chatgpt_web.rs` (915 lines) is a second,
-independent consumer of the Firefox bridge. It backs the `gpt-5.6-pro-web` model
-route by driving the user's real, logged-in Firefox: it calls `fork` to duplicate
-an authenticated chatgpt.com tab, drives the composer, then `killFork`.
+`crates/jcode-provider-openai-runtime/src/chatgpt_web.rs` backs the
+`gpt-5.6-pro[web]` model by driving a real, logged-in chatgpt.com session. It was
+the last hard dependency on the Firefox bridge, because it forked a tab from the
+user's running Firefox using bridge actions (`fork`, `killFork`) that
+agent-browser has no equivalent for.
 
-This does not port cleanly:
+Session setup, teardown, and the DOM primitives now sit behind a `WebSession`
+transport in `chatgpt_web_transport.rs`, so the page-driving logic is shared and
+the backend is selectable:
 
-- agent-browser has no `fork` equivalent.
-- The premise is riding the user's existing Firefox login. The nearest equivalent
-  is `--profile Default` against Chrome, which reuses a Chrome profile via a
-  read-only snapshot, so it only helps if the user is logged into ChatGPT in
-  Chrome.
+- Firefox remains the default, since that is the configuration this route was
+  built and proven against.
+- `JCODE_CHATGPT_WEB_BACKEND=agent-browser` drives Chrome instead. Rather than
+  forking a tab, it opens an isolated agent-browser session against a real Chrome
+  profile, which supplies the logged-in state the route needs.
 
-Until that route is ported or dropped, removing the Firefox bridge removes the
-`gpt-5.6-pro-web` model. That is a separate piece of work.
+Two constraints, both established by testing rather than assumption:
+
+- **chatgpt.com's bot check does not pass in headless Chrome.** The page ends up
+  on `about:blank`. This backend therefore always runs headed. Verified: headed
+  with a signed-in profile reaches the composer, headless does not.
+- **`--profile` must be passed on every invocation.** agent-browser resolves the
+  browser per call, so omitting it on later calls silently attaches to a
+  different, logged-out browser. This one is easy to get wrong because the first
+  command still appears to succeed.
+
+The live check is `tests/chatgpt_web_live.rs`, ignored by default because it
+needs a signed-in profile and opens a window:
+
+```bash
+cargo test -p jcode-provider-openai-runtime --test chatgpt_web_live -- --ignored
+```
+
+With this ported, no code path requires Firefox. Removing the bridge is now a
+decision rather than a blocked task.
 
 ## Capability differences
 
@@ -174,11 +222,16 @@ Not equivalent:
 |---|---|
 | `JCODE_BROWSER_BACKEND` | `firefox` or `agent-browser` to pin the `auto` choice |
 | `JCODE_AGENT_BROWSER_BIN` | Use a specific agent-browser binary |
-| `JCODE_BROWSER_PROFILE` | Chrome profile name or path to reuse logins |
+| `JCODE_BROWSER_PROFILE` | Chrome profile to reuse logins for the browser tool |
+| `JCODE_CHATGPT_WEB_BACKEND` | `agent-browser` to serve the ChatGPT web route with Chrome |
+| `JCODE_CHATGPT_WEB_PROFILE` | Chrome profile for that route (default `Default`) |
 
 ## Recommendation
 
-Keep both backends for now. agent-browser is the better default: it installs
+agent-browser is the better default for the browser tool: it installs
 unattended, works headless, and does not rot the way the extension pairing does.
-Keep the Firefox bridge until `chatgpt_web.rs` is resolved, and for Gecko-specific
-work.
+
+Keep the Firefox bridge available for two reasons: it is the proven path for the
+ChatGPT web route, and it is the only backend that drives Gecko. Neither is a
+blocker anymore, so the bridge can be removed whenever the ChatGPT web route has
+enough mileage on Chrome.
