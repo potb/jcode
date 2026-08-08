@@ -34,6 +34,7 @@ impl BrowserProvider for AgentBrowserProvider {
             "version": status.version,
             "chrome_installed": status.chrome_installed,
             "responding": status.responding,
+            "outdated": status.outdated,
             "ready": status.ready,
             "diagnostics": status.diagnostics,
         });
@@ -45,6 +46,14 @@ impl BrowserProvider for AgentBrowserProvider {
             )
         } else if !status.binary_installed {
             "agent-browser is not installed yet. Use action='setup' to install it.".to_string()
+        } else if status.outdated {
+            format!(
+                "agent-browser {} is too old for jcode (needs {} or newer; `wait` on text and `upload` hang on older builds). Use action='setup' to install a current copy.",
+                status.version.as_deref().unwrap_or("unknown"),
+                jcode_base::agent_browser::format_version(
+                    jcode_base::agent_browser::MINIMUM_SUPPORTED_VERSION
+                )
+            )
         } else if !status.chrome_installed {
             "agent-browser is installed but no Chrome was found. Use action='setup' to download Chrome for Testing.".to_string()
         } else {

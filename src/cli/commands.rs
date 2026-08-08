@@ -1972,6 +1972,8 @@ pub async fn run_browser(action: &str) -> Result<()> {
             println!(
                 "  agent-browser: {}",
                 match (&agent.version, agent.chrome_installed) {
+                    (Some(version), _) if agent.outdated =>
+                        format!("{version} (TOO OLD, run `jcode browser setup`)"),
                     (Some(version), true) => format!("{version} (chrome available)"),
                     (Some(version), false) => format!("{version} (no chrome detected)"),
                     (None, _) => "not installed".to_string(),

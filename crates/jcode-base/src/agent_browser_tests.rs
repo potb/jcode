@@ -52,3 +52,25 @@ async fn inspect_status_reports_backend_identity() {
         assert!(status.chrome_installed);
     }
 }
+
+#[test]
+fn outdated_versions_are_below_the_supported_minimum() {
+    // 0.13 is the build where `wait --text` and `upload` hang for ~150s.
+    assert!(parse_version("agent-browser 0.13.0").unwrap() < MINIMUM_SUPPORTED_VERSION);
+    // The version verified working end-to-end.
+    assert!(parse_version("agent-browser 0.33.2").unwrap() >= MINIMUM_SUPPORTED_VERSION);
+}
+
+#[test]
+fn format_version_round_trips() {
+    let text = format_version(MINIMUM_SUPPORTED_VERSION);
+    assert_eq!(parse_version(&text), Some(MINIMUM_SUPPORTED_VERSION));
+}
+
+#[test]
+fn caps_cache_can_be_invalidated_after_an_upgrade() {
+    // Setup replaces the binary, so a stale cache would keep the old behavior.
+    invalidate_backend_caps();
+    let caps = BackendCaps::from_version_text(Some("agent-browser 0.33.2"));
+    assert!(caps.uses_stable_tab_handles());
+}

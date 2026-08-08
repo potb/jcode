@@ -22,6 +22,7 @@ pub struct AgentBrowserStatus {
     pub version: Option<String>,
     pub chrome_installed: bool,
     pub responding: bool,
+    pub outdated: bool,
     pub ready: bool,
     pub diagnostics: Vec<String>,
 }
@@ -141,6 +142,18 @@ pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 /// agent-browser 0.30 replaced positional tab indices with stable `t<N>` handles.
 pub const STABLE_TAB_HANDLE_VERSION: (u32, u32, u32) = (0, 30, 0);
 
+/// Oldest agent-browser jcode considers healthy.
+///
+/// Releases below this have upstream defects that surface as long hangs rather
+/// than errors: on 0.13, `wait --text` and `upload` block for ~150s and then
+/// fail with a daemon read error. jcode installs its own newer copy instead of
+/// driving a binary like that.
+pub const MINIMUM_SUPPORTED_VERSION: (u32, u32, u32) = (0, 30, 0);
+
+pub fn format_version(version: (u32, u32, u32)) -> String {
+    format!("{}.{}.{}", version.0, version.1, version.2)
+}
+
 /// Capabilities that vary across agent-browser releases.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackendCaps {
@@ -167,18 +180,35 @@ impl BackendCaps {
     }
 }
 
+static CAPS_CACHE: std::sync::Mutex<Option<BackendCaps>> = std::sync::Mutex::new(None);
+
 /// Cached capabilities for the resolved binary.
+///
+/// Cached because every browser action consults it, and invalidated by setup
+/// so an upgrade takes effect without restarting jcode.
 pub async fn backend_caps() -> BackendCaps {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<BackendCaps> = OnceLock::new();
-    if let Some(caps) = CACHE.get() {
-        return *caps;
+    if let Ok(guard) = CAPS_CACHE.lock()
+        && let Some(caps) = *guard
+    {
+        return caps;
     }
+
     let caps = match resolve_binary() {
         Some(bin) => BackendCaps::from_version_text(binary_version(&bin).await.as_deref()),
         None => BackendCaps::default(),
     };
-    *CACHE.get_or_init(|| caps)
+
+    if let Ok(mut guard) = CAPS_CACHE.lock() {
+        *guard = Some(caps);
+    }
+    caps
+}
+
+/// Drop cached capabilities after the binary may have changed.
+pub fn invalidate_backend_caps() {
+    if let Ok(mut guard) = CAPS_CACHE.lock() {
+        *guard = None;
+    }
 }
 
 /// Check whether some Chrome/Chromium is discoverable for agent-browser.
@@ -251,7 +281,18 @@ pub async fn inspect_status() -> AgentBrowserStatus {
     // The binary responding to --version is the cheap liveness probe. A real
     // page launch is deferred to the first action so status stays fast.
     let responding = version.is_some();
-    let ready = binary_installed && responding && chrome_installed;
+
+    let parsed = version.as_deref().and_then(parse_version);
+    let outdated = parsed.map(|v| v < MINIMUM_SUPPORTED_VERSION).unwrap_or(false);
+    if outdated && let Some(found) = parsed {
+        diagnostics.push(format!(
+            "agent-browser {} is older than the supported minimum {}; `wait` on text and `upload` hang on these builds. Run browser setup to install a current copy.",
+            format_version(found),
+            format_version(MINIMUM_SUPPORTED_VERSION)
+        ));
+    }
+
+    let ready = binary_installed && responding && chrome_installed && !outdated;
 
     AgentBrowserStatus {
         backend: "agent_browser",
@@ -261,6 +302,7 @@ pub async fn inspect_status() -> AgentBrowserStatus {
         version,
         chrome_installed,
         responding,
+        outdated,
         ready,
         diagnostics,
     }
@@ -327,6 +369,8 @@ pub async fn install_binary() -> Result<String> {
         tokio::fs::set_permissions(&dest, perms).await?;
     }
 
+    invalidate_backend_caps();
+
     Ok(format!(
         "Installed agent-browser {} to {}",
         tag,
@@ -338,12 +382,40 @@ pub async fn install_binary() -> Result<String> {
 pub async fn ensure_setup() -> Result<String> {
     let mut log = String::new();
 
-    let bin = match resolve_binary() {
-        Some(path) => {
-            log.push_str(&format!("agent-browser already present at {}\n", path.display()));
-            path
+    let existing = inspect_status().await;
+    let bin = match (&existing.binary_path, existing.outdated) {
+        (Some(path), false) => {
+            log.push_str(&format!(
+                "agent-browser already present at {}\n",
+                path.display()
+            ));
+            path.clone()
         }
-        None => {
+        (Some(path), true) => {
+            // Too old to trust: install a current copy jcode manages itself
+            // rather than leaving the user on a build that hangs.
+            log.push_str(&format!(
+                "agent-browser at {} is below the supported minimum {}; installing a current copy.\n",
+                path.display(),
+                format_version(MINIMUM_SUPPORTED_VERSION)
+            ));
+            let message = install_binary().await?;
+            log.push_str(&message);
+            log.push('\n');
+
+            // An explicit override still wins over the copy we just installed,
+            // so say so rather than reporting a confusing "still outdated".
+            if let Ok(pinned) = std::env::var("JCODE_AGENT_BROWSER_BIN")
+                && !pinned.is_empty()
+            {
+                log.push_str(&format!(
+                    "Note: JCODE_AGENT_BROWSER_BIN pins {pinned}, so the newly installed copy will not be used until that variable is unset.\n"
+                ));
+            }
+
+            managed_binary_path()
+        }
+        (None, _) => {
             let message = install_binary().await?;
             log.push_str(&message);
             log.push('\n');
