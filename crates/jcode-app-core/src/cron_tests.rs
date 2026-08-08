@@ -194,3 +194,93 @@ enabled = false
     assert!(run_job_now("does-not-exist").await.is_err());
     assert!(run_job_now("off-job").await.is_err());
 }
+
+#[tokio::test]
+async fn respect_windows_holds_a_due_job_back_when_the_window_is_closed() {
+    let _guard = crate::storage::lock_test_env();
+    let marker = TempDir::new().expect("marker dir");
+    let marker_file = marker.path().join("ran.txt");
+
+    let (_temp, _home) = configured_home(&format!(
+        r#"
+[[cron]]
+id = "windowed-job"
+every = "1m"
+command = "touch {}"
+respect_windows = true
+"#,
+        marker_file.display()
+    ));
+    crate::config::invalidate_config_cache();
+
+    // Closed window: the due first-ever run must NOT fire.
+    let deadlines = tick(false);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !marker_file.exists(),
+        "a respect_windows job must not fire while the window is closed"
+    );
+    // It is due right now, so it contributes no *future* deadline either;
+    // the window-closed sleep is governed separately by
+    // schedule_window::sleep_secs_until_open, not by this deadline.
+    assert!(deadlines.windowed.is_none());
+    assert!(deadlines.unblocked.is_none());
+
+    // Open window: the same due job now fires.
+    let _ = tick(true);
+    for _ in 0..100 {
+        if marker_file.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        marker_file.exists(),
+        "the same job must fire once the window opens"
+    );
+}
+
+#[tokio::test]
+async fn unblocked_job_deadline_is_reported_separately_from_windowed() {
+    let _guard = crate::storage::lock_test_env();
+    let (_temp, _home) = configured_home(
+        r#"
+[[cron]]
+id = "clock-job"
+every = "6h"
+command = "true"
+
+[[cron]]
+id = "quiet-hours-job"
+every = "6h"
+command = "true"
+respect_windows = true
+"#,
+    );
+    crate::config::invalidate_config_cache();
+
+    // Both jobs already "ran" (simulated) far enough in the past that their
+    // next occurrence is a future deadline rather than due-now, so `tick`
+    // reports a deadline instead of firing.
+    {
+        let mut state = CronState::load();
+        let last_run = chrono::Utc::now() - chrono::Duration::hours(1);
+        state
+            .record_run("clock-job", last_run, LastStatus::Success, Some(0), 0)
+            .unwrap();
+        state
+            .record_run("quiet-hours-job", last_run, LastStatus::Success, Some(0), 0)
+            .unwrap();
+    }
+
+    let deadlines = peek_next_due(false);
+    assert!(
+        deadlines.unblocked.is_some(),
+        "clock-job (respect_windows=false) must report an unblocked deadline"
+    );
+    assert!(
+        deadlines.windowed.is_some(),
+        "quiet-hours-job (respect_windows=true) must report a windowed deadline"
+    );
+}
+

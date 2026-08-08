@@ -222,23 +222,33 @@ fn fire(job: CronJobConfig) {
     }
 }
 
+/// The two deadlines cron feeds into the runner loop's sleep calculation,
+/// mirroring the direct/ambient split the loop already does for the
+/// scheduled-item queue (`next_direct_due` / `next_ambient_due`).
+///
+/// `unblocked` is jobs with `respect_windows = false` (the default): they are
+/// user-declared clock work and must be able to shorten the sleep even while
+/// a wall-clock window is closed, the same way a direct-delivery deadline
+/// does. `windowed` is jobs with `respect_windows = true`: they share
+/// ambient's quiet hours, so they must NOT shorten a closed-window sleep,
+/// exactly like an ambient-targeted queue deadline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CronDeadlines {
+    pub unblocked: Option<DateTime<Utc>>,
+    pub windowed: Option<DateTime<Utc>>,
+}
+
 /// Shared core of [`tick`] and [`peek_next_due`]: walk the configured jobs,
 /// firing due ones only when `fire_due` is set, and return the earliest
-/// still-future fire time across all of them.
-///
-/// A job that is due right now but held back by `respect_windows` is
-/// deliberately excluded from the returned deadline: its `next_fire` is in
-/// the past, which the runner's `idle_sleep_secs` already treats as "not a
-/// deadline" (see its `filter(|ms| *ms > 0)`), and the window-closed sleep is
-/// governed separately by `schedule_window::sleep_secs_until_open`.
-fn evaluate(window_open: bool, fire_due: bool) -> Option<DateTime<Utc>> {
+/// still-future fire time for each of the two deadline categories.
+fn evaluate(window_open: bool, fire_due: bool) -> CronDeadlines {
     let jobs = config().cron.clone();
     if jobs.is_empty() {
-        return None;
+        return CronDeadlines::default();
     }
     let state = CronState::load();
     let now = Utc::now();
-    let mut earliest: Option<DateTime<Utc>> = None;
+    let mut deadlines = CronDeadlines::default();
 
     for job in jobs {
         if !job.is_valid() {
@@ -257,7 +267,12 @@ fn evaluate(window_open: bool, fire_due: bool) -> Option<DateTime<Utc>> {
             continue;
         };
         if next > now {
-            earliest = Some(earliest.map_or(next, |e: DateTime<Utc>| e.min(next)));
+            let slot = if job.respect_windows {
+                &mut deadlines.windowed
+            } else {
+                &mut deadlines.unblocked
+            };
+            *slot = Some(slot.map_or(next, |e: DateTime<Utc>| e.min(next)));
             continue;
         }
         if job.respect_windows && !window_open {
@@ -268,16 +283,17 @@ fn evaluate(window_open: bool, fire_due: bool) -> Option<DateTime<Utc>> {
         }
     }
 
-    earliest
+    deadlines
 }
 
-/// Run any due cron jobs and return the earliest upcoming fire time.
+/// Run any due cron jobs and return the earliest upcoming fire time in each
+/// deadline category.
 ///
 /// Called once per ambient runner loop iteration, before the loop decides
 /// how long to sleep — mirrors how the loop already folds queued-item
 /// deadlines into its sleep calculation, just for a second source of
 /// deadlines.
-pub fn tick(window_open: bool) -> Option<DateTime<Utc>> {
+pub fn tick(window_open: bool) -> CronDeadlines {
     evaluate(window_open, true)
 }
 
@@ -287,7 +303,7 @@ pub fn tick(window_open: bool) -> Option<DateTime<Utc>> {
 /// ambient cycle, the same way the runner already recomputes
 /// `AmbientManager::next_item_due` post-cycle instead of trusting a
 /// pre-cycle snapshot.
-pub fn peek_next_due(window_open: bool) -> Option<DateTime<Utc>> {
+pub fn peek_next_due(window_open: bool) -> CronDeadlines {
     evaluate(window_open, false)
 }
 
