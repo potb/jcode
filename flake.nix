@@ -150,6 +150,12 @@
                 shellHook = ''
                   export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+                  # clippy-driver ships in its own store path with no standard
+                  # library, so it cannot infer a sysroot from its own location
+                  # and every `cargo clippy` fails with "can't find crate for
+                  # std". Point it at the toolchain's sysroot explicitly.
+                  export SYSROOT="$(rustc --print sysroot)"
+
                   if [[ "''${JCODE_NIX_QUIET:-0}" != "1" ]]; then
                     printf 'jcode dev shell: %s, Cargo cache %s, target cache %s\n' \
                       "$JCODE_NIX_DEVSHELL_NAME" \
