@@ -9,6 +9,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::CHATGPT_WEB_MODEL;
+use super::chatgpt_web_transport::{WebBackend, WebSession};
 
 const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?model=gpt-5-6-pro&temporary-chat=true";
 const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT']";
@@ -96,25 +97,28 @@ impl ChatGptWebState {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
 
-        let status = jcode_base::browser::ensure_browser_ready_noninteractive()
-            .await
-            .context(
-                "ChatGPT web transport needs the Firefox Browser Agent Bridge. Run `jcode browser status`, start Firefox, and log in at chatgpt.com",
-            )?;
-        if !status.ready {
-            anyhow::bail!(
-                "Firefox Browser Agent Bridge is not ready. Run `jcode browser status`, start Firefox, and log in at chatgpt.com"
-            );
+        let backend = WebBackend::resolve();
+        if backend == WebBackend::FirefoxBridge {
+            let status = jcode_base::browser::ensure_browser_ready_noninteractive()
+                .await
+                .context(
+                    "ChatGPT web transport needs the Firefox Browser Agent Bridge. Run `jcode browser status`, start Firefox, and log in at chatgpt.com",
+                )?;
+            if !status.ready {
+                anyhow::bail!(
+                    "Firefox Browser Agent Bridge is not ready. Run `jcode browser status`, start Firefox, and log in at chatgpt.com. To use Chrome instead, set JCODE_CHATGPT_WEB_BACKEND=agent-browser"
+                );
+            }
         }
 
         let _turn_guard = self.turn_lock.lock().await;
-        let (tab_id, fork_name) = open_chatgpt_tab().await?;
+        let session = WebSession::open(backend, CHATGPT_WEB_URL).await?;
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
-            wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id).await?;
-            insert_prompt(tab_id, prompt).await?;
+            wait_for_editor(&session).await?;
+            prepare_chatgpt_page(&session).await?;
+            insert_prompt(&session, prompt).await?;
             if tx.is_closed() {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
@@ -124,19 +128,16 @@ impl ChatGptWebState {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
 
-            bridge_command(
-                "click",
-                json!({ "tabId": tab_id, "selector": "#composer-submit-button" }),
-            )
+            session.click("#composer-submit-button")
             .await
             .context("Failed to submit the prompt in ChatGPT")?;
 
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
-            poll_for_response(tab_id, tx).await
+            poll_for_response(&session, tx).await
         }
         .await;
-        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        let cleanup = session.close().await;
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
             (Err(err), Ok(())) => Err(err),
@@ -159,94 +160,23 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab() -> Result<(u64, String)> {
-    let source = bridge_command("getActiveTab", json!({}))
+async fn wait_for_editor(session: &WebSession) -> Result<()> {
+    session
+        .wait_for(EDITOR_SELECTOR, Duration::from_secs(30))
         .await
-        .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
-    let source_tab_id = source
-        .get("tabId")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
-    let fork_name = next_owned_tab_name();
-    let fork = bridge_command(
-        "fork",
-        json!({ "tabId": source_tab_id, "paths": [{ "name": fork_name }] }),
-    )
-    .await
-    .context("Failed to create a temporary Firefox tab for ChatGPT")?;
-    let tab_id = fork
-        .get("forks")
-        .and_then(Value::as_array)
-        .and_then(|forks| forks.first())
-        .and_then(|fork| fork.get("tabId"))
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Browser bridge did not return the forked ChatGPT tab id")
+        .with_context(|| {
+            format!(
+                "ChatGPT composer did not load. Confirm {} is logged in at chatgpt.com and the workspace is active",
+                session.backend().label()
+            )
         })?;
-
-    if let Err(err) = bridge_command(
-        "navigate",
-        json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
-    )
-    .await
-    {
-        let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
-        return Err(err).context("Failed to open ChatGPT in the temporary Firefox tab");
-    }
-    Ok((tab_id, fork_name))
-}
-
-async fn close_chatgpt_tab(tab_id: u64, fork_name: &str) -> Result<()> {
-    match bridge_command("killFork", json!({ "fork": fork_name })).await {
-        Ok(_) => Ok(()),
-        Err(close_err) => {
-            bridge_command(
-                "navigate",
-                json!({ "tabId": tab_id, "url": "about:blank", "wait": true }),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to close the owned browser tab ({close_err:#}) and failed to clear its sensitive prompt content"
-                )
-            })?;
-            Err(close_err).context(
-                "Failed to close the owned browser tab; its sensitive content was cleared to about:blank",
-            )
-        }
-    }
-}
-
-fn next_owned_tab_name() -> String {
-    let sequence = TOOL_CALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("jcode-chatgpt-web-{millis}-{sequence}")
-}
-
-async fn wait_for_editor(tab_id: u64) -> Result<()> {
-    bridge_command(
-        "waitFor",
-        json!({
-            "tabId": tab_id,
-            "selector": EDITOR_SELECTOR,
-            "timeout": 30_000
-        }),
-    )
-    .await
-    .context(
-        "ChatGPT composer did not load. Confirm Firefox is logged in at chatgpt.com and the workspace is active",
-    )?;
     Ok(())
 }
 
-async fn prepare_chatgpt_page(tab_id: u64) -> Result<()> {
+async fn prepare_chatgpt_page(session: &WebSession) -> Result<()> {
     // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
     // but workspace migration/onboarding is deliberately never auto-confirmed.
-    let preparation = evaluate(
-        tab_id,
+    let preparation = session.evaluate(
         r#"
 const onboarding = document.querySelector('[role="dialog"]');
 if (onboarding && onboarding.innerText.includes('Business workspace is ready')) {
@@ -277,22 +207,23 @@ return { onboarding: false, model, temporary, signedOut };
 
     if preparation.get("onboarding").and_then(Value::as_bool) == Some(true) {
         anyhow::bail!(
-            "ChatGPT is waiting for a workspace onboarding choice. Open chatgpt.com in Firefox and finish onboarding; jcode will not merge or move your personal chat history automatically"
+            "ChatGPT is waiting for a workspace onboarding choice. Open chatgpt.com in {} and finish onboarding; jcode will not merge or move your personal chat history automatically",
+            session.backend().label()
         );
     }
     if preparation.get("signedOut").and_then(Value::as_bool) == Some(true) {
         anyhow::bail!(
-            "Firefox is not logged in to ChatGPT. Log in at chatgpt.com, then retry the jcode turn"
+            "{} is not logged in to ChatGPT. Log in at chatgpt.com, then retry the jcode turn",
+            session.backend().label()
         );
     }
 
     // Dismissing the temporary-chat explainer can remount the composer.
-    wait_for_editor(tab_id).await?;
+    wait_for_editor(session).await?;
     let verification = {
         let deadline = Instant::now() + MODEL_SELECTION_TIMEOUT;
         loop {
-            let current = evaluate(
-                tab_id,
+            let current = session.evaluate(
                 r#"
 const model = Array.from(document.querySelectorAll('button.__composer-pill'))
   .map(b => b.innerText.trim()).find(Boolean) || '';
@@ -335,39 +266,25 @@ fn page_verification_ready(verification: &Value) -> bool {
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
 }
 
-async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
+async fn insert_prompt(session: &WebSession, prompt: &str) -> Result<()> {
     let chunks = split_utf8_chunks(prompt, PROMPT_CHUNK_BYTES);
     let Some((first, rest)) = chunks.split_first() else {
         anyhow::bail!("Refusing to submit an empty ChatGPT web prompt");
     };
 
-    bridge_command(
-        "fillForm",
-        json!({
-            "tabId": tab_id,
-            "fields": [{ "selector": EDITOR_SELECTOR, "value": first }]
-        }),
-    )
-    .await
-    .context("Failed to initialize the ChatGPT rich-text composer")?;
+    session
+        .fill(EDITOR_SELECTOR, first)
+        .await
+        .context("Failed to initialize the ChatGPT rich-text composer")?;
 
     for chunk in rest {
-        bridge_command(
-            "type",
-            json!({
-                "tabId": tab_id,
-                "selector": EDITOR_SELECTOR,
-                "text": chunk,
-                "clear": false,
-                "append": true
-            }),
-        )
-        .await
-        .context("Failed while appending a chunk to the ChatGPT composer")?;
+        session
+            .append(EDITOR_SELECTOR, chunk)
+            .await
+            .context("Failed while appending a chunk to the ChatGPT composer")?;
     }
 
-    let verification = evaluate(
-        tab_id,
+    let verification = session.evaluate(
         r#"
 const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
 const submit = document.querySelector('#composer-submit-button');
@@ -404,7 +321,10 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
     Ok(())
 }
 
-async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) -> Result<String> {
+async fn poll_for_response(
+    session: &WebSession,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<String> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -419,8 +339,7 @@ async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) 
 
     loop {
         if tx.is_closed() {
-            let _ = evaluate(
-                tab_id,
+            let _ = session.evaluate(
                 r#"
 const stop = Array.from(document.querySelectorAll('button')).find(b =>
   /stop/i.test(b.getAttribute('aria-label') || '') || b.dataset.testid === 'stop-button'
@@ -439,8 +358,7 @@ return true;
             );
         }
 
-        let state = evaluate(
-            tab_id,
+        let state = session.evaluate(
             r#"
 const sections = Array.from(document.querySelectorAll('section[data-turn="assistant"]'));
 const section = sections.at(-1) || null;
@@ -462,7 +380,12 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
 "#,
         )
         .await
-        .context("Failed to read the ChatGPT response from Firefox")?;
+        .with_context(|| {
+            format!(
+                "Failed to read the ChatGPT response from {}",
+                session.backend().label()
+            )
+        })?;
 
         let text = state
             .get("text")
@@ -734,54 +657,6 @@ fn utf16_fingerprint(value: &str) -> (usize, u32) {
         len += 1;
     }
     (len, hash)
-}
-
-async fn evaluate(tab_id: u64, script: &str) -> Result<Value> {
-    let output = bridge_command("evaluate", json!({ "tabId": tab_id, "script": script })).await?;
-    output
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))
-}
-
-async fn bridge_command(action: &str, params: Value) -> Result<Value> {
-    let binary = jcode_base::browser::browser_binary_path();
-    if !binary.exists() {
-        anyhow::bail!(
-            "Browser bridge binary is not installed. Run `jcode browser setup` once, then log in at chatgpt.com in Firefox"
-        );
-    }
-
-    let params = serde_json::to_string(&params)?;
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .arg(action)
-        .arg(params)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
-        .await
-        .with_context(|| format!("Browser bridge action '{action}' timed out"))?
-        .with_context(|| format!("Failed to run browser bridge action '{action}'"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        let detail = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{stderr}\n{stdout}"),
-            (false, true) => stdout,
-            (true, false) => stderr,
-            (true, true) => format!("browser bridge action '{action}' failed"),
-        };
-        anyhow::bail!(detail);
-    }
-    if stdout.is_empty() {
-        return Ok(json!({ "ok": true }));
-    }
-    serde_json::from_str(&stdout)
-        .with_context(|| format!("Browser bridge action '{action}' returned invalid JSON"))
 }
 
 #[cfg(test)]
