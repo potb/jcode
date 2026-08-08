@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+mod cron_config;
+pub use cron_config::CronJobConfig;
 mod display;
 pub use display::DisplayConfig;
 pub mod keybindings;
