@@ -320,6 +320,26 @@ pub(crate) enum Command {
         revoke: Option<String>,
     },
 
+    /// Send a notification through every configured channel (ntfy, email, desktop, chat)
+    ///
+    /// Scheduled jobs and scripts use this so they reach the user through the
+    /// same channels ambient mode already uses, instead of hand-rolling curl.
+    Notify {
+        /// Notification title
+        title: String,
+
+        /// Body. If omitted, reads from stdin.
+        body: Option<String>,
+
+        /// Priority: default, high, or urgent
+        #[arg(long, default_value = "default")]
+        priority: String,
+
+        /// Body sent to ntfy, whose topic is world-readable. Defaults to the full body.
+        #[arg(long)]
+        safe_body: Option<String>,
+    },
+
     /// Review and respond to pending ambient permission requests
     Permissions,
 

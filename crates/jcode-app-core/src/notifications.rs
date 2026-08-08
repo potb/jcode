@@ -144,6 +144,28 @@ impl NotificationDispatcher {
         );
     }
 
+    /// Send a generic message through every configured channel.
+    ///
+    /// Exists so scheduled jobs outside the ambient runner (the upstream-merge
+    /// agent, user scripts, `jcode notify`) reach the user through exactly the
+    /// channels ambient already uses, instead of each one hand-rolling a curl
+    /// to ntfy and silently missing email/Telegram/desktop.
+    ///
+    /// `body` is treated as private-channel detail. `safe_body`, when given, is
+    /// what goes to ntfy, whose topic is readable by anyone who knows its name.
+    /// When it is `None` the caller is asserting `body` is safe to publish.
+    pub fn dispatch_message(
+        &self,
+        title: &str,
+        body: &str,
+        safe_body: Option<&str>,
+        priority: Priority,
+    ) {
+        let safe = safe_body.unwrap_or(body);
+        let desktop = first_lines(body, 3);
+        self.send_all(title, safe, body, &desktop, priority, None);
+    }
+
     /// Send a permission request notification (high priority).
     pub fn dispatch_permission_request(&self, action: &str, description: &str, request_id: &str) {
         let title = format!("jcode: permission needed ({})", action);
@@ -898,6 +920,25 @@ fn ntfy_body<'a>(detailed: bool, safe_body: &'a str, desktop_body: &'a str) -> &
 /// few lines. The one thing the user actually needed from it, whether a cycle
 /// is blocked on them, sat thousands of characters past the cut.
 const DESKTOP_BODY_MAX_CHARS: usize = 320;
+
+/// First `n` non-empty lines of `body`, for desktop notifications.
+///
+/// Notification daemons truncate rather than scroll, so a long body hides its
+/// own point. An ellipsis marks that more detail exists in the other channels.
+fn first_lines(body: &str, n: usize) -> String {
+    let kept: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(n)
+        .collect();
+    let total = body.lines().filter(|l| !l.trim().is_empty()).count();
+    let mut out = kept.join("\n");
+    if total > n {
+        out.push_str("\n…");
+    }
+    out
+}
 
 /// A glanceable cycle summary for a desktop popup.
 ///

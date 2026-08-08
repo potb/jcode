@@ -1414,6 +1414,50 @@ pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
     super::debug::run_debug_command(debug_cmd, "", None, None, false).await
 }
 
+/// Send a notification through every configured channel.
+///
+/// Deliberately reuses `NotificationDispatcher`, the same path ambient cycles
+/// take, so a scheduled script inherits ntfy/email/desktop/chat routing and the
+/// user's ntfy-vs-private body split rather than reimplementing any of it.
+pub async fn run_notify_command(
+    title: String,
+    body: Option<String>,
+    priority: String,
+    safe_body: Option<String>,
+) -> Result<()> {
+    use crate::notifications::{NotificationDispatcher, Priority};
+
+    let body = match body {
+        Some(b) => b,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        anyhow::bail!("notification body is empty (pass it as an argument or on stdin)");
+    }
+
+    let priority = match priority.to_ascii_lowercase().as_str() {
+        "default" | "normal" | "low" => Priority::Default,
+        "high" => Priority::High,
+        "urgent" | "critical" => Priority::Urgent,
+        other => anyhow::bail!("unknown priority '{other}' (use default, high, or urgent)"),
+    };
+
+    let dispatcher = NotificationDispatcher::new();
+    dispatcher.dispatch_message(&title, &body, safe_body.as_deref(), priority);
+
+    // Every channel is fire-and-forget on a spawned task. Returning immediately
+    // would drop the runtime mid-request and silently send nothing, which is the
+    // exact failure a notification must never have.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    println!("notification dispatched: {title}");
+    Ok(())
+}
+
 pub async fn run_transcript_command(
     text: Option<String>,
     mode: crate::protocol::TranscriptMode,
