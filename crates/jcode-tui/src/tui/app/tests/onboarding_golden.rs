@@ -140,7 +140,7 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(text.contains("Telemetry"), "telemetry pill label: {text}");
         assert!(
-            text.contains("$10 → $20 inference, $20 → $40; then provider API prices"),
+            text.contains("$10 buys $20 of inference, $20 buys $40; then API prices"),
             "subscription allowance and overage pricing: {text}"
         );
         assert!(
