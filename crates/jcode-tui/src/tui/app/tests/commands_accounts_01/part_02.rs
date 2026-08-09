@@ -23,7 +23,10 @@ fn test_fast_default_on_saves_config_and_updates_session() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }
 
@@ -51,7 +54,10 @@ fn test_fast_default_off_persists_explicit_off() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }
 
@@ -77,7 +83,10 @@ fn test_fast_status_shows_saved_default() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }
 
@@ -97,10 +106,7 @@ fn test_alignment_command_persists_and_applies_immediately() {
 
         let last = app.display_messages().last().expect("missing response");
         assert_eq!(last.role, "system");
-        assert!(
-            last.content
-                .contains("Saved default alignment: centered")
-        );
+        assert!(last.content.contains("Saved default alignment: centered"));
     });
 }
 
@@ -117,10 +123,7 @@ fn test_alignment_status_shows_current_and_saved_defaults() {
 
         let last = app.display_messages().last().expect("missing response");
         assert_eq!(last.role, "system");
-        assert!(
-            last.content
-                .contains("Alignment is currently centered.")
-        );
+        assert!(last.content.contains("Alignment is currently centered."));
         assert!(last.content.contains("Saved default: left-aligned."));
         assert!(last.content.contains("/alignment centered"));
         assert!(last.content.contains("Alt+C"));
@@ -239,7 +242,10 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
     assert!(msg.content.contains("GPT-5.6 Sol"));
     assert!(!msg.content.contains("$10/mo"));
     assert!(!msg.content.contains("usable inference budget"));
-    assert!(!msg.content.contains("Claude Fable 5 - claude-fable-5 [Ultra]"));
+    assert!(
+        !msg.content
+            .contains("Claude Fable 5 - claude-fable-5 [Ultra]")
+    );
 }
 
 #[test]

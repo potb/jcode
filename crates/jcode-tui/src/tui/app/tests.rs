@@ -1560,7 +1560,10 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 
     assert!(pending, "older server must queue a reload");

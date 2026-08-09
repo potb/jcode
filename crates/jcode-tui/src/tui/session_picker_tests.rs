@@ -673,7 +673,10 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     if let Some(previous_home) = previous_home {
         crate::env::set_var("JCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }
 

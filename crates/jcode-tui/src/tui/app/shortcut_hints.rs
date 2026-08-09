@@ -364,7 +364,10 @@ mod tests {
         if let Some(prev) = prev {
             crate::env::set_var("JCODE_HOME", prev);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::set_var(
+                "JCODE_HOME",
+                crate::tui::app::tests::shared_test_jcode_home(),
+            );
         }
     }
 }
