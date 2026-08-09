@@ -285,9 +285,7 @@ impl SelfDevTool {
         }
 
         if !server::server_has_newer_binary() {
-            return Ok(ToolOutput::new(
-                "Already running the newest installed jcode build; no reload needed.",
-            ));
+            return Ok(ToolOutput::new(Self::no_reload_needed_message()));
         }
 
         let hash = jcode_build_meta::git_hash().to_string();
@@ -310,6 +308,48 @@ impl SelfDevTool {
                 err
             ))),
         }
+    }
+
+    /// Explain why no reload happened.
+    ///
+    /// "Already running the newest build" is true of the *reload candidates*,
+    /// which are the `shared-server` and `stable` channels. It is not true of
+    /// the `current` channel, which a local build advances on its own. A build
+    /// installed as `current` therefore leaves the daemon running the old code
+    /// while `jcode --version` reports the new one, and the bare message sent
+    /// the reader looking for a phantom bug elsewhere. When that is the actual
+    /// situation, say so and name the one-line fix.
+    pub(super) fn no_reload_needed_message() -> String {
+        const BASE: &str = "Already running the newest installed jcode build; no reload needed.";
+
+        let Some(stale) = Self::stale_shared_server_version() else {
+            return BASE.to_string();
+        };
+
+        format!(
+            "{BASE}\n\nNote: the `current` channel is at {stale}, which the daemon does not \
+             follow. Reload candidates are the `shared-server` and `stable` channels, so a build \
+             published only to `current` will not be picked up. Point \
+             ~/.jcode/builds/shared-server at that version (and write it to \
+             ~/.jcode/builds/shared-server-version), then reload again."
+        )
+    }
+
+    /// The `current` version when it differs from the channel the daemon
+    /// reloads from, i.e. the case the note above is about.
+    fn stale_shared_server_version() -> Option<String> {
+        let read = |value: Result<Option<String>>| -> Option<String> {
+            value
+                .ok()
+                .flatten()
+                .map(|version| version.trim().to_string())
+                .filter(|version| !version.is_empty())
+        };
+
+        let current = read(build::read_current_version())?;
+        let shared = read(build::read_shared_server_version());
+
+        (shared.as_deref() != Some(current.as_str())).then_some(current)
     }
 
     /// Resolve the default location for a cloned self-dev source checkout.

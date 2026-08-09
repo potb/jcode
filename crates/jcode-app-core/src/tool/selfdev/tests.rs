@@ -1441,3 +1441,57 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
     assert_eq!(reloaded.state, BuildRequestState::Queued);
     assert!(reloaded.error.is_none());
 }
+
+/// A build published only to `current` leaves the daemon on the old code,
+/// because the reload candidates are `shared-server` and `stable`. The
+/// "no reload needed" message has to surface that, or the reader concludes the
+/// new build is live when it is not.
+#[test]
+fn no_reload_message_flags_a_current_channel_the_daemon_does_not_follow() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+    let current = build::current_version_file().expect("current version file");
+    std::fs::create_dir_all(current.parent().expect("builds dir")).expect("create builds dir");
+    std::fs::write(&current, "newbuild1").expect("write current version");
+    std::fs::write(
+        build::shared_server_version_file().expect("shared version file"),
+        "oldbuild0",
+    )
+    .expect("write shared-server version");
+
+    let message = SelfDevTool::no_reload_needed_message();
+    assert!(
+        message.contains("newbuild1"),
+        "message should name the current version that will not be picked up: {message}"
+    );
+    assert!(
+        message.contains("shared-server"),
+        "message should name the channel that has to be advanced: {message}"
+    );
+}
+
+/// The note is only warranted when the channels actually disagree; when they
+/// match, the plain message must stay plain.
+#[test]
+fn no_reload_message_stays_bare_when_the_channels_agree() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+    let current = build::current_version_file().expect("current version file");
+    std::fs::create_dir_all(current.parent().expect("builds dir")).expect("create builds dir");
+    std::fs::write(&current, "samebuild").expect("write current version");
+    std::fs::write(
+        build::shared_server_version_file().expect("shared version file"),
+        "samebuild",
+    )
+    .expect("write shared-server version");
+
+    let message = SelfDevTool::no_reload_needed_message();
+    assert!(
+        !message.contains("Note:"),
+        "matching channels should not carry the stale-channel note: {message}"
+    );
+}
