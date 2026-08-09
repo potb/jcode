@@ -468,7 +468,7 @@ fn ambient_prompt_names_the_configured_pull_request_repo() {
         "the prompt must spell out the exact PR command for the fork"
     );
     assert!(
-        configured.contains("Never open a PR against the upstream"),
+        configured.contains("never open a `jcode` PR against the upstream repository"),
         "the upstream default is the failure mode, so it must be called out"
     );
 
@@ -860,3 +860,242 @@ fn proactive_work_setting_reaches_the_prompt() {
         "the flag must change the prompt; identical output means it is inert"
     );
 }
+
+#[test]
+fn ambient_prompt_ranks_configured_priority_projects_above_busier_ones() {
+    // The whole point of the knob: the priority project must win even when a
+    // different project has more recent sessions, since session count measures
+    // where the user has been, not what matters.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let session = |id: &str, dir: &str| RecentSessionInfo {
+        id: id.into(),
+        status: "closed".into(),
+        topic: Some("work".into()),
+        duration_secs: 60,
+        extraction_status: "extracted".into(),
+        working_dir: Some(dir.into()),
+    };
+    // jcode is busier: three sessions against private_project's one.
+    let sessions = vec![
+        session("s1", "/home/potb/jcode"),
+        session("s2", "/home/potb/jcode"),
+        session("s3", "/home/potb/jcode/crates/jcode-tui"),
+        session("s4", "/home/potb/projects/workspace/private_project"),
+    ];
+
+    let render = |extra: &str| {
+        std::fs::write(
+            temp.path().join("config.toml"),
+            format!("[ambient]\nenabled = true\n{extra}"),
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &sessions,
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let prioritized = render(
+        "project_priority = [\"/home/potb/projects/workspace/private_project\", \"/home/potb/jcode\"]\n",
+    );
+    let section = prioritized
+        .split("## Projects Active Recently")
+        .nth(1)
+        .expect("projects section");
+    let private_project = section
+        .find("/home/potb/projects/workspace/private_project")
+        .expect("private_project listed");
+    let jcode = section.find("/home/potb/jcode (").expect("jcode listed");
+    assert!(
+        private_project < jcode,
+        "private_project is the configured first priority, so it must outrank the \
+         busier jcode project; got section:\n{section}"
+    );
+    assert!(
+        section.contains("/home/potb/projects/workspace/private_project (1 session(s)) [priority]"),
+        "priority projects must be marked so the agent can act on the ranking"
+    );
+    assert!(
+        prioritized.contains("exhaust useful work in a higher-priority project"),
+        "an ordering the agent is not told to honour is just cosmetics"
+    );
+
+    // A session in a subdirectory belongs to its project.
+    assert!(
+        section.contains("/home/potb/jcode/crates/jcode-tui (1 session(s)) [priority]"),
+        "a subdirectory session must inherit its project's priority"
+    );
+
+    // Without the config, activity order rules and nothing is tagged.
+    let unset = render("");
+    let section = unset
+        .split("## Projects Active Recently")
+        .nth(1)
+        .expect("projects section");
+    assert!(
+        !section.contains("[priority]"),
+        "with no priority configured the prompt must not invent one"
+    );
+    assert!(!unset.contains("exhaust useful work in a higher-priority project"));
+    let private_project = section
+        .find("/home/potb/projects/workspace/private_project")
+        .expect("private_project listed");
+    let jcode = section.find("/home/potb/jcode (").expect("jcode listed");
+    assert!(
+        jcode < private_project,
+        "unconfigured, the busier project still sorts first"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
+fn ambient_prompt_surfaces_a_priority_project_with_no_recent_sessions() {
+    // The neglected important project is exactly the case the knob exists for.
+    // Listing only "projects active recently" would hide it entirely.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let sessions = vec![RecentSessionInfo {
+        id: "s1".into(),
+        status: "closed".into(),
+        topic: Some("work".into()),
+        duration_secs: 60,
+        extraction_status: "extracted".into(),
+        working_dir: Some("/home/potb/jcode".into()),
+    }];
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nproject_priority = [\"/home/potb/projects/workspace/private_project\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &sessions,
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+
+    assert!(
+        prompt.contains("## Priority Projects With No Recent Sessions"),
+        "an idle priority project must still be surfaced"
+    );
+    let idle = prompt
+        .split("## Priority Projects With No Recent Sessions")
+        .nth(1)
+        .expect("idle section");
+    assert!(idle.contains("/home/potb/projects/workspace/private_project"));
+    assert!(
+        idle.contains("No recent session does not mean no work"),
+        "the agent must be told why an idle project still deserves a look"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
+fn priority_matching_respects_path_boundaries() {
+    // `/home/potb/jcode-cron` is a different project from `/home/potb/jcode`.
+    // A naive prefix test silently merges them.
+    let priority = vec!["/home/potb/jcode".to_string()];
+    assert_eq!(
+        crate::ambient::prompt::priority_rank(&priority, "/home/potb/jcode"),
+        0
+    );
+    assert_eq!(
+        crate::ambient::prompt::priority_rank(&priority, "/home/potb/jcode/crates/x"),
+        0,
+        "a subdirectory belongs to its project"
+    );
+    assert_eq!(
+        crate::ambient::prompt::priority_rank(&priority, "/home/potb/jcode/"),
+        0,
+        "a trailing slash is the same directory"
+    );
+    assert_eq!(
+        crate::ambient::prompt::priority_rank(&priority, "/home/potb/jcode-cron"),
+        usize::MAX,
+        "a sibling sharing a name prefix is a different project"
+    );
+    assert_eq!(
+        crate::ambient::prompt::priority_rank(&priority, "/home/potb/other"),
+        usize::MAX
+    );
+}
+
+#[test]
+fn ambient_prompt_scopes_the_pr_repo_override_to_its_own_repository() {
+    // `pr_repo` names one repo. Told to send "every" PR there, ambient would
+    // push a private_project branch to the jcode fork once it works across projects.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\npr_repo = \"potb/jcode\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &[],
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+
+    assert!(
+        prompt.contains("For work in the `jcode` repository"),
+        "the override must be scoped to the repo it names"
+    );
+    assert!(prompt.contains("gh pr create --repo potb/jcode"));
+    assert!(
+        prompt.contains("For any other project, target that project's own `origin`"),
+        "another project's PRs must not be routed to this fork"
+    );
+    assert!(
+        !prompt.contains("Open every pull request against"),
+        "the unscoped instruction is the bug being fixed"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+

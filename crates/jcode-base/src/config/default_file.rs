@@ -613,6 +613,12 @@ work_branch_prefix = "ambient/"
 # Run around the clock while KEEPING the schedule above, so you can restore your
 # quiet hours by flipping one flag instead of retyping them (default: false).
 # ignore_active_windows = false
+# Projects ambient should work on first, most important first. Ambient otherwise
+# ranks projects by how many recent sessions touched them, which measures where
+# you have been rather than what matters, so the repo you happen to sit in all
+# day crowds out the important one. Listed projects rank above unlisted ones and
+# are surfaced even with no recent activity. Absolute paths ("~" is expanded).
+# project_priority = ["/home/you/work/main-app", "/home/you/src/side-project"]
 
 # Recurring jobs jcode itself runs on a schedule ("jcode cron"), replacing
 # external timers (systemd, cron(8), launchd). Repeat [[cron]] for more jobs.

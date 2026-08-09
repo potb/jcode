@@ -1130,11 +1130,16 @@ with no PR looks identical to having done nothing.
 
 ```toml
 [ambient]
-pr_repo = "you/your-fork"   # every PR opens here
+pr_repo = "you/your-fork"   # PRs for THAT repo open here
 ```
 
 With this set, the cycle prompt names the exact `gh pr create` command for that
 fork and tells the agent never to target the upstream repository.
+
+The setting names one repo, so it is scoped to that repo. Work in any other
+project targets that project's own `origin`; the prompt says so explicitly,
+because an unscoped "open every PR here" rule sends an unrelated project's
+branch to this fork the moment ambient works across more than one repo.
 
 Two traps this closes, both observed in real cycles:
 
@@ -1160,6 +1165,32 @@ cycle prompt:
 - **Memory Graph Health** lists every per-project memory graph found under
   `~/.jcode/memory/projects/`, with each project's path, size, and gardening
   backlog, and rolls those counts into the totals.
+
+#### Choosing which project to work on
+
+Session count answers "where has the user been", not "what matters". Left to
+activity alone, the repo you happen to sit in all day crowds out the one you
+actually care about. State the order instead:
+
+```toml
+[ambient]
+project_priority = ["/home/you/work/main-app", "/home/you/src/side-project"]
+```
+
+Listed projects sort above unlisted ones in **Projects Active Recently**,
+regardless of session counts, and are tagged `[priority]` so the agent can act
+on the ranking rather than just read it. The prompt tells it to exhaust useful
+work in a higher-priority project before dropping to a lower one. Queued and
+scheduled items still run when they come due.
+
+A listed project with no recent sessions is *not* dropped: it gets its own
+**Priority Projects With No Recent Sessions** section. That is the case the
+setting exists for, since the important project is often precisely the
+neglected one.
+
+Paths are absolute (a leading `~` is expanded) and match on directory
+boundaries, so a session in a subdirectory counts toward its project while a
+name-prefix sibling like `/src/jcode-cron` does not match `/src/jcode`.
 
 Project graph files are named by a hash of the project path. Saving a project
 memory records the reverse mapping in

@@ -464,6 +464,52 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
     recent
 }
 
+/// The user's configured project priority, highest first, with `~` expanded
+/// and trailing slashes removed so entries compare against session working
+/// directories.
+fn configured_project_priority() -> Vec<String> {
+    crate::config::config()
+        .ambient
+        .project_priority
+        .iter()
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() {
+                return None;
+            }
+            let expanded = if let Some(rest) = p.strip_prefix("~/") {
+                match std::env::var("HOME") {
+                    Ok(home) => format!("{}/{}", home.trim_end_matches('/'), rest),
+                    Err(_) => p.to_string(),
+                }
+            } else {
+                p.to_string()
+            };
+            Some(expanded.trim_end_matches('/').to_string())
+        })
+        .collect()
+}
+
+/// Whether a session working directory belongs to a configured project.
+///
+/// A session started in a subdirectory of the project still belongs to it, so
+/// this is a path-boundary prefix test rather than string equality. The
+/// boundary check matters: `/src/jcode-cron` must not match `/src/jcode`.
+fn paths_match(session_dir: &str, project: &str) -> bool {
+    let dir = session_dir.trim_end_matches('/');
+    let proj = project.trim_end_matches('/');
+    dir == proj || dir.strip_prefix(proj).is_some_and(|r| r.starts_with('/'))
+}
+
+/// Index of `dir` in the configured priority list, or `usize::MAX` when it is
+/// not a priority project. Lower sorts first.
+pub(crate) fn priority_rank(priority: &[String], dir: &str) -> usize {
+    priority
+        .iter()
+        .position(|p| paths_match(dir, p))
+        .unwrap_or(usize::MAX)
+}
+
 /// Build the dynamic system prompt for an ambient cycle.
 ///
 /// Populates the template from AMBIENT_MODE.md with real data from the
@@ -590,10 +636,39 @@ pub fn build_ambient_system_prompt(
     }
     if !project_counts.is_empty() {
         prompt.push_str("## Projects Active Recently\n");
+        let priority = configured_project_priority();
+        // Session count answers "where has the user been", not "what matters".
+        // A configured priority is an explicit answer to the second question,
+        // so it outranks activity; unlisted projects keep the activity order
+        // behind the listed ones.
         let mut ranked: Vec<_> = project_counts.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        for (dir, count) in ranked {
-            prompt.push_str(&format!("- {} ({} session(s))\n", dir, count));
+        ranked.sort_by(|a, b| {
+            let rank_a = priority_rank(&priority, a.0);
+            let rank_b = priority_rank(&priority, b.0);
+            rank_a
+                .cmp(&rank_b)
+                .then(b.1.cmp(&a.1))
+                .then(a.0.cmp(b.0))
+        });
+        let any_prioritized = ranked
+            .iter()
+            .any(|(dir, _)| priority_rank(&priority, dir) < usize::MAX);
+        for (dir, count) in &ranked {
+            let tag = if priority_rank(&priority, dir) < usize::MAX {
+                " [priority]"
+            } else {
+                ""
+            };
+            prompt.push_str(&format!("- {} ({} session(s)){}\n", dir, count, tag));
+        }
+        if any_prioritized {
+            prompt.push_str(
+                "Projects marked [priority] are the user's stated priorities, listed \
+                 highest first. When choosing proactive work, exhaust useful work in \
+                 a higher-priority project before spending a cycle on a lower one, \
+                 regardless of which project has more recent sessions. Queued and \
+                 scheduled items still run when due.\n",
+            );
         }
         prompt.push_str(
             "To work in one of these projects, use its path as the working directory: \
@@ -601,6 +676,32 @@ pub fn build_ambient_system_prompt(
              working directory is set.\n",
         );
         prompt.push('\n');
+    }
+
+    // A priority entry the user configured but that has no recent sessions is
+    // exactly the case this knob exists for: the important project is the one
+    // being neglected. Listing only "projects active recently" would hide it.
+    {
+        let priority = configured_project_priority();
+        let seen: std::collections::BTreeSet<&str> = recent_sessions
+            .iter()
+            .filter_map(|s| s.working_dir.as_deref())
+            .collect();
+        let idle: Vec<&String> = priority
+            .iter()
+            .filter(|p| !seen.iter().any(|s| paths_match(s, p)))
+            .collect();
+        if !idle.is_empty() {
+            prompt.push_str("## Priority Projects With No Recent Sessions\n");
+            for p in idle {
+                prompt.push_str(&format!("- {}\n", p));
+            }
+            prompt.push_str(
+                "These rank above the active projects above. No recent session does \
+                 not mean no work: check their branches, tests, and open PRs before \
+                 falling back to a lower-priority project.\n\n",
+            );
+        }
     }
 
     // --- Memory Graph Health ---
@@ -822,16 +923,25 @@ pub fn build_ambient_system_prompt(
     // defaults to the UPSTREAM of a fork and fails with a permissions error,
     // which is how a cycle's work ended up stranded on a pushed branch the
     // user never saw.
+    //
+    // The setting names ONE repo, so it cannot mean "every PR everywhere":
+    // once ambient works across several projects, an unscoped rule would send
+    // another project's PR to this fork. It is an override for the repo it
+    // names; elsewhere the project's own `origin` is correct.
     let pr_repo = crate::config::config().ambient.pr_repo.trim().to_string();
     if !pr_repo.is_empty() {
+        let repo_name = pr_repo.rsplit('/').next().unwrap_or(&pr_repo);
         prompt.push_str(&format!(
             "\n## Pull Requests\n\
-             Open every pull request against `{pr_repo}`, using \
-             `gh pr create --repo {pr_repo} --fill`. This is the user's own \
-             fork and the only place they review your work. Never open a PR \
-             against the upstream repository, and never leave code work as a \
-             pushed branch with no PR: to the user that is indistinguishable \
-             from having done nothing.\n"
+             For work in the `{repo_name}` repository, open pull requests against \
+             `{pr_repo}` with `gh pr create --repo {pr_repo} --fill`. That is the \
+             user's own fork and the only place they review that project's work; \
+             never open a `{repo_name}` PR against the upstream repository.\n\
+             For any other project, target that project's own `origin` remote \
+             (plain `gh pr create --fill` from its working directory), and check \
+             with `git remote -v` if unsure. Never leave code work as a pushed \
+             branch with no PR: to the user that is indistinguishable from having \
+             done nothing.\n"
         ));
     }
 

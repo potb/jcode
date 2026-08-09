@@ -11,7 +11,7 @@ pub mod headroom;
 mod manager;
 mod paths;
 mod persistence;
-mod prompt;
+pub(crate) mod prompt;
 pub mod runner;
 pub mod schedule_window;
 #[cfg(test)]
