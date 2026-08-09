@@ -416,7 +416,6 @@ const FLICKER_UI_NOTICE_MAX_AGE_MS: u64 = 30_000;
 
 static FRAME_PERF_STATS: OnceLock<Mutex<FramePerfStats>> = OnceLock::new();
 static SLOW_FRAME_HISTORY: OnceLock<Mutex<SlowFrameHistory>> = OnceLock::new();
-#[cfg(not(test))]
 static FLICKER_FRAME_HISTORY: OnceLock<Mutex<FlickerFrameHistory>> = OnceLock::new();
 static FRAME_RESOURCE_START: OnceLock<Mutex<Option<FrameResourceStart>>> = OnceLock::new();
 
@@ -428,32 +427,20 @@ fn slow_frame_history() -> &'static Mutex<SlowFrameHistory> {
     SLOW_FRAME_HISTORY.get_or_init(|| Mutex::new(SlowFrameHistory::default()))
 }
 
-/// The flicker history is per-thread under test, process-global otherwise.
-///
-/// Production has one render thread, so a single global is the natural home for
-/// it. The test binary does not: `cargo test` runs many tests in parallel and
-/// dozens of them call `ui::draw`, every one of which records a sample here.
-/// Tests that assert on a *count* (`buffered_samples == 3` after three draws)
-/// then measure whatever else happened to be rendering at the same moment, and
-/// fail for reasons that have nothing to do with the code under test. That was
-/// observed as the whole TUI suite failing 1-3 random tests per run in
-/// parallel while passing 3/3 runs under `--test-threads=1`.
-///
-/// Giving each test thread its own history makes those assertions mean what
-/// they say. The per-thread instance is leaked (one small buffer per test
-/// thread, for the life of the test binary) so the signature can stay
-/// `&'static` and callers do not have to change.
-#[cfg(test)]
+/// Per-thread under test, process-global otherwise: many parallel tests call
+/// `ui::draw` and each records a sample, so a test asserting a sample count was
+/// really counting whatever else was rendering (1-3 random failures per
+/// parallel run; clean under `--test-threads=1`). Leaked to stay `&'static`.
 fn flicker_frame_history() -> &'static Mutex<FlickerFrameHistory> {
-    thread_local! {
-        static THREAD_HISTORY: &'static Mutex<FlickerFrameHistory> =
-            Box::leak(Box::new(Mutex::new(FlickerFrameHistory::default())));
+    #[cfg(test)]
+    {
+        thread_local! {
+            static H: &'static Mutex<FlickerFrameHistory> =
+                Box::leak(Box::new(Mutex::new(FlickerFrameHistory::default())));
+        }
+        return H.with(|history| *history);
     }
-    THREAD_HISTORY.with(|history| *history)
-}
-
-#[cfg(not(test))]
-fn flicker_frame_history() -> &'static Mutex<FlickerFrameHistory> {
+    #[allow(unreachable_code)]
     FLICKER_FRAME_HISTORY.get_or_init(|| Mutex::new(FlickerFrameHistory::default()))
 }
 
