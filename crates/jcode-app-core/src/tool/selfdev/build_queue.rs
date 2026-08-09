@@ -667,6 +667,7 @@ export -f cargo
                 .spawn_with_notify(
                     "selfdev-build-watch",
                     Some("build watch".to_string()),
+                    None,
                     &ctx.session_id,
                     notify,
                     wake,
@@ -769,6 +770,7 @@ export -f cargo
             .spawn_with_notify(
                 "selfdev-build",
                 Some("selfdev build".to_string()),
+                None,
                 &ctx.session_id,
                 notify,
                 wake,
@@ -1110,6 +1112,7 @@ export -f cargo
             .spawn_with_notify(
                 "selfdev-test",
                 Some("selfdev test".to_string()),
+                None,
                 &ctx.session_id,
                 notify,
                 wake,

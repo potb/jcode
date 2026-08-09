@@ -359,6 +359,7 @@ impl BackgroundTaskManager {
         info: &BackgroundTaskInfo,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         pid: u32,
         started_at: &str,
@@ -370,6 +371,7 @@ impl BackgroundTaskManager {
             task_id: info.task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name,
+            command,
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -412,7 +414,7 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
-        self.spawn_with_notify(tool_name, None, session_id, true, false, execute_fn)
+        self.spawn_with_notify(tool_name, None, None, session_id, true, false, execute_fn)
             .await
     }
 
@@ -421,6 +423,7 @@ impl BackgroundTaskManager {
         &self,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         notify: bool,
         wake: bool,
@@ -441,6 +444,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: display_name.clone(),
+            command: command.clone(),
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -473,6 +477,7 @@ impl BackgroundTaskManager {
         let task_id_clone = task_id.clone();
         let tool_name_owned = tool_name.to_string();
         let display_name_owned = display_name.clone();
+        let command_owned = command.clone();
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
@@ -516,6 +521,7 @@ impl BackgroundTaskManager {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
                 display_name: display_name_owned.clone(),
+                command: command_owned.clone(),
                 session_id: session_id_owned.clone(),
                 status: status.clone(),
                 exit_code,
@@ -586,6 +592,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name,
+            command,
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
@@ -617,7 +624,7 @@ impl BackgroundTaskManager {
         session_id: &str,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
-        self.adopt_with_options(tool_name, None, session_id, true, false, handle)
+        self.adopt_with_options(tool_name, None, None, session_id, true, false, handle)
             .await
     }
 
@@ -629,6 +636,7 @@ impl BackgroundTaskManager {
         &self,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         notify: bool,
         wake: bool,
@@ -643,6 +651,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: display_name.clone(),
+            command: command.clone(),
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -678,6 +687,7 @@ impl BackgroundTaskManager {
         let started_at = Instant::now();
         let started_at_rfc3339 = initial_status.started_at.clone();
         let display_name_owned = initial_status.display_name.clone();
+        let command_owned = initial_status.command.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
@@ -727,6 +737,7 @@ impl BackgroundTaskManager {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
                 display_name: display_name_owned.clone(),
+                command: command_owned.clone(),
                 session_id: session_id_owned.clone(),
                 status: status.clone(),
                 exit_code,
@@ -788,6 +799,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: None,
+            command: initial_status.command.clone(),
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
@@ -1131,6 +1143,7 @@ impl BackgroundTaskManager {
                 task_id: task.task_id,
                 tool_name: task.tool_name,
                 display_name: task.display_name,
+                command: task.command,
                 session_id: task.session_id,
                 status: BackgroundTaskStatus::Failed,
                 exit_code: None,
@@ -1251,6 +1264,10 @@ impl BackgroundTaskManager {
                     .as_ref()
                     .and_then(|status| status.display_name.clone())
                     .or(task.display_name),
+                command: prior_status
+                    .as_ref()
+                    .and_then(|status| status.command.clone())
+                    .or(task.command),
                 session_id: task.session_id,
                 status: BackgroundTaskStatus::Failed,
                 exit_code: None,

@@ -968,6 +968,7 @@ impl BashTool {
                     .adopt_with_options(
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         params.notify,
                         params.wake,
@@ -1071,6 +1072,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1128,6 +1130,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1178,6 +1181,7 @@ impl BashTool {
             .spawn_with_notify(
                 "bash",
                 Some(display_name.clone()),
+                Some(params.command.clone()),
                 &ctx.session_id,
                 notify,
                 wake,

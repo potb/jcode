@@ -159,7 +159,7 @@ async fn run_plan_driver_guard_blocks_while_driver_task_is_live() {
 
     // Keep the fake driver alive long enough for the second claim to observe it.
     let info = manager
-        .spawn_with_notify("swarm", None, session, false, false, |_| async {
+        .spawn_with_notify("swarm", None, None, session, false, false, |_| async {
             tokio::time::sleep(Duration::from_secs(5)).await;
             Ok(crate::background::TaskResult::completed(Some(0)))
         })
