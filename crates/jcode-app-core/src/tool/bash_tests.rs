@@ -26,13 +26,209 @@ fn repository_commands_export_a_logged_cargo_function() {
 
 #[test]
 fn cargo_routing_is_limited_to_the_jcode_repository() {
-    assert!(wrap_repo_cargo_commands("cargo test", Some(std::path::Path::new("/"))).is_none());
-    assert!(wrap_repo_cargo_commands("cargo test", None).is_none());
+    // Outside a wrapper-bearing repo the shim still installs, because the
+    // command may cd into one; what matters is that it degrades to real cargo.
+    let outside = wrap_repo_cargo_commands("cargo test", Some(std::path::Path::new("/")))
+        .expect("shim installs even outside a known repo");
+    assert!(outside.contains("command cargo \"$@\""));
+}
+
+/// The exported function exists so *child scripts* route through the wrapper
+/// too. Gating installation on the command text mentioning cargo would silently
+/// break `./scripts/build.sh`, whose cargo call jcode never sees.
+#[test]
+fn a_child_script_that_calls_cargo_still_routes_through_the_wrapper() {
+    let repo = tempfile::tempdir().expect("repo");
+    let scripts = repo.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    std::fs::write(
+        scripts.join("dev_cargo.sh"),
+        "#!/bin/sh\necho WRAPPER_RAN \"$@\"\n",
+    )
+    .expect("write wrapper");
+    let child = repo.path().join("build.sh");
+    std::fs::write(&child, "#!/usr/bin/env bash\ncargo build --from-script\n")
+        .expect("write child script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [scripts.join("dev_cargo.sh"), child.clone()] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+    }
+
+    // The command text mentions no cargo at all.
+    let command = format!("cd {} && ./build.sh", repo.path().display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(repo.path()))
+        .expect("a repo command must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WRAPPER_RAN build --from-script"),
+        "a child script's cargo call must route through the wrapper, got: {stdout}"
+    );
+}
+
+/// A session with no working directory (an ambient cycle) must still be able to
+/// build: it cds into a repo inside the command itself. Without a wrapper it
+/// runs bare `cargo`, which on a Nix-dev-shell machine does not exist at all,
+/// so the agent can write a fix but never compile or test it.
+#[test]
+fn a_session_without_a_working_directory_still_gets_a_cargo_wrapper() {
+    let wrapped = wrap_repo_cargo_commands("cd /home/user/repo && cargo test", None)
+        .expect("a cargo command must be wrapped even with no working dir");
+
+    assert!(wrapped.contains("export -f cargo"));
+    assert!(
+        wrapped.contains("scripts/dev_cargo.sh"),
+        "the fallback must still look for the repo wrapper, got: {wrapped}"
+    );
+    assert!(
+        wrapped.contains("command cargo \"$@\""),
+        "outside a wrapper-bearing repo it must fall back to the real cargo"
+    );
+    assert!(wrapped.ends_with("cd /home/user/repo && cargo test"));
+}
+
+/// The dynamic fallback must actually route to the repo wrapper once the
+/// command has cd'd into a repo, not merely mention it.
+#[test]
+fn the_dynamic_cargo_shim_finds_the_wrapper_after_a_cd() {
+    let repo = tempfile::tempdir().expect("repo");
+    let scripts = repo.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let wrapper = scripts.join("dev_cargo.sh");
+    std::fs::write(&wrapper, "#!/bin/sh\necho WRAPPER_RAN \"$@\"\n").expect("write wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod wrapper");
+    }
+
+    // A nested directory proves the shim walks up, as a real `cd crates/x` would.
+    let nested = repo.path().join("crates").join("thing");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+
+    let command = format!("cd {} && cargo build --frobnicate", nested.display());
+    let wrapped =
+        wrap_repo_cargo_commands(&command, None).expect("cargo command must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        // The suite itself may run under scripts/dev_cargo.sh, which exports
+        // this to stop recursion. Inheriting it would make the shim take its
+        // passthrough branch and silently prove nothing.
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WRAPPER_RAN build --frobnicate"),
+        "cargo must route through the repo wrapper found from $PWD, got: {stdout}"
+    );
 }
 
 #[test]
 fn cargo_wrapper_path_is_shell_quoted() {
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+}
+
+/// `dev_cargo.sh` derives the repo root from its own path, so a session pinned
+/// to repo A that cds into worktree B must NOT run A's wrapper: that builds and
+/// tests A while the agent believes it verified B. An ambient cycle hit exactly
+/// this and got a green 67-test run whose binary never contained its new test.
+#[test]
+fn cd_into_another_worktree_uses_that_worktrees_wrapper_not_the_sessions() {
+    let root = tempfile::tempdir().expect("root");
+    let make_repo = |name: &str| {
+        let repo = root.path().join(name);
+        let scripts = repo.join("scripts");
+        std::fs::create_dir_all(&scripts).expect("scripts dir");
+        let wrapper = scripts.join("dev_cargo.sh");
+        std::fs::write(&wrapper, format!("#!/bin/sh\necho {name}_WRAPPER \"$@\"\n"))
+            .expect("write wrapper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        repo
+    };
+    let session_repo = make_repo("SESSION");
+    let other_worktree = make_repo("OTHER");
+
+    let command = format!("cd {} && cargo test", other_worktree.display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(session_repo.as_path()))
+        .expect("a repo session must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("OTHER_WRAPPER test"),
+        "cargo must run the wrapper of the directory it is in, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("SESSION_WRAPPER"),
+        "the session's wrapper must not hijack a build in another worktree, got: {stdout}"
+    );
+}
+
+/// A command that never cds still has to work, so the session's wrapper remains
+/// the fallback when `$PWD` is not inside a repo.
+#[test]
+fn a_command_that_never_cds_falls_back_to_the_session_wrapper() {
+    let repo = tempfile::tempdir().expect("repo");
+    // `find_repo_in_ancestors` only recognizes a real jcode checkout, so the
+    // fixture needs the same markers a worktree has.
+    std::fs::create_dir_all(repo.path().join(".git")).expect("git dir");
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("cargo toml");
+    let scripts = repo.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let wrapper = scripts.join("dev_cargo.sh");
+    std::fs::write(&wrapper, "#!/bin/sh\necho SESSION_WRAPPER \"$@\"\n").expect("write wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+
+    // Run from a directory with no wrapper anywhere above it.
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let command = format!("cd {} && cargo check", elsewhere.path().display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(repo.path()))
+        .expect("a repo session must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SESSION_WRAPPER check"),
+        "with no repo under $PWD the session wrapper must still apply, got: {stdout}"
+    );
 }
 
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {

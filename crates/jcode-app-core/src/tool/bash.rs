@@ -42,27 +42,59 @@ fn shell_single_quote(value: &str) -> String {
 /// Route ordinary `cargo` invocations (including those inside child scripts)
 /// through the repository wrapper. Besides applying the project's build policy,
 /// that wrapper appends real action timings to rust-actions.jsonl.
+///
+/// The repo is resolved from the session working directory when there is one.
+/// Sessions without a working directory (notably ambient cycles) still need to
+/// build: they `cd` into a repo inside the command itself, so fall back to a
+/// shim that looks for the wrapper from `$PWD` at call time. On a machine whose
+/// toolchain lives in a Nix dev shell there is no `cargo` on PATH at all, so
+/// without this such a session cannot compile or test anything it writes.
+///
+/// Resolution is `$PWD`-first in every case. `dev_cargo.sh` derives the repo
+/// root from its OWN path, so pinning the session's wrapper would make
+/// `cd ../other-worktree && cargo test` silently build and test the session's
+/// repo instead: a green run whose binary never contained the change under
+/// test. The session directory is only the fallback for commands that never cd.
 #[cfg(unix)]
 fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option<String> {
-    let working_dir = working_dir?;
-    let repo = crate::build::find_repo_in_ancestors(working_dir)?;
-    let wrapper = repo.join("scripts").join("dev_cargo.sh");
-    if !wrapper.is_file() {
-        return None;
-    }
+    // Deliberately NOT gated on the command mentioning cargo. The whole point
+    // of exporting the function is that *child scripts* pick it up too, and
+    // `./scripts/build.sh` never mentions cargo in the text jcode sees.
+    let session_wrapper = working_dir
+        .and_then(crate::build::find_repo_in_ancestors)
+        .map(|repo| repo.join("scripts").join("dev_cargo.sh"))
+        .filter(|wrapper| wrapper.is_file());
+
+    let session_export = match session_wrapper {
+        Some(wrapper) => format!(
+            "export JCODE_DEV_CARGO_SCRIPT={}\n",
+            shell_single_quote(&wrapper.to_string_lossy())
+        ),
+        None => String::new(),
+    };
 
     Some(format!(
-        r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
-cargo() {{
+        r#"{session_export}cargo() {{
   if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
     command cargo "$@"
-  else
-    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
+    return
   fi
+  local __jcode_dir="$PWD"
+  while [[ -n "$__jcode_dir" && "$__jcode_dir" != "/" ]]; do
+    if [[ -x "$__jcode_dir/scripts/dev_cargo.sh" ]]; then
+      JCODE_IN_DEV_CARGO=1 "$__jcode_dir/scripts/dev_cargo.sh" "$@"
+      return
+    fi
+    __jcode_dir="$(dirname "$__jcode_dir")"
+  done
+  if [[ -n "${{JCODE_DEV_CARGO_SCRIPT:-}}" && -x "${{JCODE_DEV_CARGO_SCRIPT}}" ]]; then
+    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
+    return
+  fi
+  command cargo "$@"
 }}
 export -f cargo
-{command}"#,
-        wrapper = shell_single_quote(&wrapper.to_string_lossy()),
+{command}"#
     ))
 }
 
