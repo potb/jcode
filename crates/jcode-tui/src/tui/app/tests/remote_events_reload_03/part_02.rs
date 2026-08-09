@@ -86,7 +86,10 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }
 
@@ -383,4 +386,3 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
-

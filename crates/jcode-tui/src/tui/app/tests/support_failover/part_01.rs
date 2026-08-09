@@ -354,10 +354,6 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// exclusion already covers the transition; a cross-thread `try_lock` miss
 /// falls back to the pre-serialization benign race for that one call.
 pub(crate) fn ensure_test_jcode_home_if_unset() {
-    use std::sync::OnceLock;
-
-    static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
-
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
@@ -377,12 +373,32 @@ pub(crate) fn ensure_test_jcode_home_if_unset() {
         return;
     }
 
-    let path = TEST_HOME.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&path);
-        path
-    });
-    crate::env::set_var("JCODE_HOME", path);
+    crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
+}
+
+/// The process-wide fallback `JCODE_HOME` for tests that do not scope their own.
+///
+/// `JCODE_HOME` is process-global while tests run in parallel, so the value a
+/// test observes is whatever the last writer left. Leaving it *unset* is the
+/// dangerous state: `app_config_dir()` then resolves to the developer's real
+/// `~/.config/jcode`, and auth probes read real credentials. Tests that assert
+/// on model routes (which are derived from `AuthStatus`) then depend on who is
+/// logged in on the machine, and fail intermittently.
+///
+/// Every helper that borrows `JCODE_HOME` restores it to this directory rather
+/// than to unset, so the fallback is always a sandbox.
+pub(crate) fn shared_test_jcode_home() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+
+    static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    TEST_HOME
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&path);
+            path
+        })
+        .clone()
 }
 
 fn clear_persisted_test_ui_state() {
@@ -419,7 +435,10 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        // Restore to the shared sandbox, not to unset. Unset resolves to the
+        // developer's real ~/.config/jcode, and any test running concurrently
+        // on another thread would read real credentials during this window.
+        crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
     }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
@@ -438,10 +457,8 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
 /// silently following a config default they do not control.
 fn with_reasoning_current_home<T>(f: impl FnOnce() -> T) -> T {
     with_temp_jcode_home(|| {
-        crate::config::Config::set_reasoning_display(
-            crate::config::ReasoningDisplayMode::Current,
-        )
-        .expect("pin reasoning display to current for the test config");
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Current)
+            .expect("pin reasoning display to current for the test config");
         crate::config::invalidate_config_cache();
         f()
     })

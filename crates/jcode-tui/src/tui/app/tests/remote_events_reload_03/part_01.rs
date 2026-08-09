@@ -753,7 +753,10 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
         &mut remote,
     );
 
-    assert!(needs_redraw, "resumed session history must redraw immediately");
+    assert!(
+        needs_redraw,
+        "resumed session history must redraw immediately"
+    );
     assert!(app.is_processing());
     assert!(app.processing_started.is_some());
     assert!(app.time_since_activity().is_some());
@@ -872,6 +875,9 @@ fn test_remote_swarm_status_does_not_clobber_newer_session_history_on_disk() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
 }

@@ -918,7 +918,10 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
     }
     if let Some(prev_test) = prev_test {
         crate::env::set_var("JCODE_TEST_SESSION", prev_test);
