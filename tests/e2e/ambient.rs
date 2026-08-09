@@ -339,6 +339,7 @@ fn test_ambient_system_prompt_builder() {
         missing_embeddings: 0,
         duplicate_candidates: 3,
         last_consolidation: None,
+        projects: Vec::new(),
     };
     let recent_sessions = vec![];
     let feedback: Vec<String> = vec![];

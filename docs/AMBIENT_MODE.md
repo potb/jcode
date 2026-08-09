@@ -659,6 +659,26 @@ Semantics worth knowing:
 - **`jcode ambient trigger` overrides the window.** An explicit human request
   is not the scheduled work the constraint exists to hold back.
 
+#### Suspending the windows without losing them
+
+To run around the clock for a while, do not delete the schedule: set the flag.
+
+```toml
+[ambient]
+active_windows = ["weekdays 09:00-23:00"]   # kept, just not enforced
+ignore_active_windows = true
+```
+
+A tuned schedule is worth keeping, and deleting it is the only other way to
+escape it. With the flag set every window decision sees an unrestricted clock:
+cycle gating, sleep length, and `[[cron]]` jobs with `respect_windows = true`.
+Clear the flag and the original quiet hours come back with nothing to retype.
+
+`ambient:status` reports both views, so the suspension is never mistaken for
+lost config: `active_windows` is what you configured,
+`active_windows_enforced` is what is actually in force (`unrestricted` while
+ignored), and `active_windows_ignored` says which mode you are in.
+
 ### Notifications (what reaches your phone)
 
 Windows decide *when* the agent runs; this decides *when it interrupts you*.
@@ -1064,6 +1084,36 @@ First time ambient runs, there's no usage history, no patterns, no feedback memo
 ---
 
 ## Per-Project Configuration
+
+### Multi-project context
+
+A single ambient agent serves every project, one cycle at a time. The cycle
+itself has no working directory, so per-project context does not load
+automatically. Two pieces of project awareness are therefore built into the
+cycle prompt:
+
+- **Recent Sessions** lines carry `project: <working dir>`, and a
+  **Projects Active Recently** section ranks those directories. Without this the
+  agent cannot tell which repo yesterday's work belonged to.
+- **Memory Graph Health** lists every per-project memory graph found under
+  `~/.jcode/memory/projects/`, with each project's path, size, and gardening
+  backlog, and rolls those counts into the totals.
+
+Project graph files are named by a hash of the project path. Saving a project
+memory records the reverse mapping in
+`~/.jcode/memory/projects/index.json`; graphs written before that registry
+existed are named by scanning recent session files for a matching working
+directory, and fall back to showing the hash.
+
+Reading is not the same as writing. `MemoryManager` only resolves a project
+graph when it has a project directory, so a project-scoped `remember` from a
+cycle with no working directory is dropped. To act on a specific project,
+schedule work with that project's `working_dir`: the runner then gives the child
+session the right directory, which restores its `AGENTS.md`, git state, and
+project memory.
+
+`ambient:prompt` on the debug socket dumps the exact context a cycle would see,
+which is the quickest way to confirm what the agent can and cannot observe.
 
 Some projects may need different ambient behavior (e.g. sensitive work projects, personal repos with different preferences):
 

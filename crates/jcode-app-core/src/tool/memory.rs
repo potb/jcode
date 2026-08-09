@@ -543,6 +543,54 @@ mod tests {
         }
     }
 
+    /// Project graphs are named by a path hash, so anything surveying them from
+    /// outside a project (the ambient agent) can only name them if writing a
+    /// project memory also records the reverse mapping.
+    #[tokio::test]
+    async fn project_memory_write_records_the_project_path_for_later_lookup() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        tool.execute(
+            json!({
+                "action": "remember",
+                "content": "registry-probe",
+                "scope": "project"
+            }),
+            test_ctx(Some(project.path().to_path_buf())),
+        )
+        .await
+        .expect("remember should succeed");
+
+        let manager = MemoryManager::new().with_project_dir(project.path());
+        let graph_id = manager
+            .project_graph_path()
+            .expect("path")
+            .expect("project dir set")
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("stem")
+            .to_string();
+
+        let registry = MemoryManager::load_projects_registry();
+        assert_eq!(
+            registry.get(&graph_id).map(String::as_str),
+            Some(project.path().to_string_lossy().as_ref()),
+            "the project path must be recoverable from the graph id, got: {:?}",
+            registry
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// Issue #729 regression, behavioral rather than structural.
     ///
     /// `create_headless_session` used to call `enable_memory_test_mode()`

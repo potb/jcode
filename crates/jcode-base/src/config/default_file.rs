@@ -602,6 +602,12 @@ work_branch_prefix = "ambient/"
 # Enabling this trusts the ambient agent within its initiative scope. Decisions
 # are still recorded in the permission history as "ambient_auto_approve".
 # auto_approve_permissions = false
+# Wall-clock windows, in LOCAL time, when ambient may start a cycle. Empty means
+# always. Scheduled items due while closed are not dropped; they run at reopen.
+# active_windows = ["weekdays 09:00-19:00"]
+# Run around the clock while KEEPING the schedule above, so you can restore your
+# quiet hours by flipping one flag instead of retyping them (default: false).
+# ignore_active_windows = false
 
 # Recurring jobs jcode itself runs on a schedule ("jcode cron"), replacing
 # external timers (systemd, cron(8), launchd). Repeat [[cron]] for more jobs.

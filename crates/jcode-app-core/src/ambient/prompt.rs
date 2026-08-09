@@ -17,6 +17,22 @@ pub struct MemoryGraphHealth {
     pub missing_embeddings: usize,
     pub duplicate_candidates: usize,
     pub last_consolidation: Option<DateTime<Utc>>,
+    /// Per-project graph breakdown, so the ambient agent can see that project
+    /// memory exists at all and which project owns which memories.
+    pub projects: Vec<ProjectGraphHealth>,
+}
+
+/// Health of a single per-project memory graph.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectGraphHealth {
+    /// Project working directory, when it could be resolved from sessions.
+    pub working_dir: Option<String>,
+    /// Graph file stem (the project path hash), always available.
+    pub graph_id: String,
+    pub total: usize,
+    pub active: usize,
+    pub low_confidence: usize,
+    pub missing_embeddings: usize,
 }
 
 /// Summary of a recent session for the ambient prompt.
@@ -27,6 +43,8 @@ pub struct RecentSessionInfo {
     pub topic: Option<String>,
     pub duration_secs: i64,
     pub extraction_status: String,
+    /// Project this session ran in, when the session recorded one.
+    pub working_dir: Option<String>,
 }
 
 /// Resource budget info for the ambient prompt.
@@ -40,6 +58,11 @@ pub struct ResourceBudget {
 }
 
 /// Gather memory graph health stats from the MemoryManager.
+///
+/// The ambient agent has no working directory of its own, so
+/// `memory_manager.load_project_graph()` would report an empty project graph
+/// and hide every per-project memory the user has. Survey the project graph
+/// directory directly so ambient can see and garden project memory too.
 pub fn gather_memory_graph_health(
     memory_manager: &crate::memory::MemoryManager,
 ) -> MemoryGraphHealth {
@@ -99,7 +122,178 @@ pub fn gather_memory_graph_health(
     // placeholder for now — ambient agent will discover them during its cycle.
     health.duplicate_candidates = 0;
 
+    // Fold in every per-project graph the manager itself cannot reach.
+    let own_project_graph = memory_manager
+        .project_graph_path()
+        .ok()
+        .flatten()
+        .and_then(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(ToOwned::to_owned)
+        });
+    for project in gather_project_graph_health() {
+        // Don't double count the project the manager already loaded above.
+        if own_project_graph.as_deref() == Some(project.graph_id.as_str()) {
+            health.projects.push(project);
+            continue;
+        }
+        health.total += project.total;
+        health.active += project.active;
+        health.inactive += project.total.saturating_sub(project.active);
+        health.low_confidence += project.low_confidence;
+        health.missing_embeddings += project.missing_embeddings;
+        health.projects.push(project);
+    }
     health
+        .projects
+        .sort_by(|a, b| b.total.cmp(&a.total).then(a.graph_id.cmp(&b.graph_id)));
+
+    health
+}
+
+/// Survey every per-project memory graph under `~/.jcode/memory/projects/`.
+pub fn gather_project_graph_health() -> Vec<ProjectGraphHealth> {
+    let Ok(dir) = crate::memory::MemoryManager::projects_memory_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let registry = crate::memory::MemoryManager::load_projects_registry();
+    let mut out = Vec::new();
+    let mut unnamed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "json").unwrap_or(true) {
+            continue;
+        }
+        let Some(graph_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // The reverse-mapping registry itself is not a project graph.
+        if graph_id == "index" {
+            continue;
+        }
+        let Ok(graph) = crate::storage::read_json::<crate::memory_graph::MemoryGraph>(&path) else {
+            continue;
+        };
+        let working_dir = registry.get(graph_id).cloned();
+        if working_dir.is_none() {
+            unnamed.push(graph_id.to_string());
+        }
+        out.push(ProjectGraphHealth {
+            working_dir,
+            graph_id: graph_id.to_string(),
+            total: graph.memories.len(),
+            active: graph.memories.values().filter(|m| m.active).count(),
+            low_confidence: graph
+                .memories
+                .values()
+                .filter(|m| m.active && m.effective_confidence() < 0.1)
+                .count(),
+            missing_embeddings: graph
+                .memories
+                .values()
+                .filter(|m| m.active && m.embedding.is_none())
+                .count(),
+        });
+    }
+
+    // Graphs written before the registry existed have no recorded path. Recover
+    // their names from session history rather than showing the user a hash.
+    if !unnamed.is_empty() {
+        let recovered = project_dirs_from_session_history(&unnamed);
+        for project in out.iter_mut() {
+            if project.working_dir.is_none() {
+                project.working_dir = recovered.get(&project.graph_id).cloned();
+            }
+        }
+    }
+    out
+}
+
+/// Recover graph-id -> project-dir pairs for the given ids from session files.
+///
+/// Deserializes only the working directory field, so this stays cheap even
+/// though the sessions directory can hold tens of thousands of transcripts.
+/// Stops as soon as every requested id is named.
+fn project_dirs_from_session_history(
+    wanted: &[String],
+) -> std::collections::HashMap<String, String> {
+    #[derive(serde::Deserialize)]
+    struct WorkingDirOnly {
+        #[serde(default)]
+        working_dir: Option<String>,
+    }
+
+    let mut found = std::collections::HashMap::new();
+    let wanted: std::collections::HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    let Ok(sessions_dir) = crate::storage::jcode_dir().map(|d| d.join("sessions")) else {
+        return found;
+    };
+    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
+        return found;
+    };
+
+    let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().map(|e| e != "json").unwrap_or(true) {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((path, modified))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.truncate(PROJECT_NAME_SESSION_SCAN_LIMIT);
+
+    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (path, _) in candidates {
+        if found.len() == wanted.len() {
+            break;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<WorkingDirOnly>(&text) else {
+            continue;
+        };
+        let Some(dir) = parsed.working_dir else {
+            continue;
+        };
+        if !seen_dirs.insert(dir.clone()) {
+            continue;
+        }
+        if let Some(id) = project_graph_id_for_dir(&dir)
+            && wanted.contains(id.as_str())
+        {
+            found.entry(id).or_insert(dir);
+        }
+    }
+    found
+}
+
+/// Session files scanned when naming otherwise-anonymous project graphs.
+const PROJECT_NAME_SESSION_SCAN_LIMIT: usize = 2000;
+
+/// Resolve the project graph id for a working directory.
+fn project_graph_id_for_dir(dir: &str) -> Option<String> {
+    crate::memory::MemoryManager::new()
+        .with_project_dir(dir)
+        .project_graph_path()
+        .ok()
+        .flatten()
+        .and_then(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(ToOwned::to_owned)
+        })
 }
 
 /// Gather feedback memories relevant to ambient mode.
@@ -259,6 +453,7 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
                 topic: session.display_title().map(ToOwned::to_owned),
                 duration_secs: duration,
                 extraction_status: extraction.to_string(),
+                working_dir: session.working_dir.clone(),
             });
         }
     }
@@ -374,13 +569,39 @@ pub fn build_ambient_system_prompt(
         for s in recent_sessions {
             let topic = s.topic.as_deref().unwrap_or("(no title)");
             let dur = format_duration_rough(chrono::Duration::seconds(s.duration_secs));
+            let project = s.working_dir.as_deref().unwrap_or("(no project)");
             prompt.push_str(&format!(
-                "- {} | {} | {} | {} | extraction: {}\n",
-                s.id, s.status, dur, topic, s.extraction_status,
+                "- {} | {} | {} | {} | project: {} | extraction: {}\n",
+                s.id, s.status, dur, topic, project, s.extraction_status,
             ));
         }
     }
     prompt.push('\n');
+
+    // --- Projects seen recently ---
+    // Ambient has no working directory of its own, so without this it cannot
+    // tell which repo any of the work above belongs to.
+    let mut project_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for s in recent_sessions {
+        if let Some(dir) = s.working_dir.as_deref() {
+            *project_counts.entry(dir).or_insert(0) += 1;
+        }
+    }
+    if !project_counts.is_empty() {
+        prompt.push_str("## Projects Active Recently\n");
+        let mut ranked: Vec<_> = project_counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        for (dir, count) in ranked {
+            prompt.push_str(&format!("- {} ({} session(s))\n", dir, count));
+        }
+        prompt.push_str(
+            "To work in one of these projects, use its path as the working directory: \
+             per-project memory, AGENTS.md, and git state only resolve when a \
+             working directory is set.\n",
+        );
+        prompt.push('\n');
+    }
 
     // --- Memory Graph Health ---
     prompt.push_str("## Memory Graph Health\n");
@@ -413,6 +634,20 @@ pub fn build_ambient_system_prompt(
         prompt.push_str(&format!("- Last consolidation: {} ago\n", ago));
     } else {
         prompt.push_str("- Last consolidation: never\n");
+    }
+    if !graph_health.projects.is_empty() {
+        prompt.push_str("- Per-project memory graphs:\n");
+        for p in &graph_health.projects {
+            let name = p.working_dir.as_deref().unwrap_or(p.graph_id.as_str());
+            prompt.push_str(&format!(
+                "  - {}: {} memories ({} active, {} low confidence, {} without embeddings)\n",
+                name, p.total, p.active, p.low_confidence, p.missing_embeddings,
+            ));
+        }
+        prompt.push_str(
+            "  Project memories only load when the working directory is set to that \
+             project, so garden them from a session in the matching directory.\n",
+        );
     }
     prompt.push('\n');
 
