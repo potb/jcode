@@ -10,8 +10,27 @@ async fn unknown_prefix_returns_none_so_the_dispatch_chain_falls_through() {
 
 #[tokio::test]
 async fn cron_run_requires_a_non_empty_id() {
-    let err = maybe_handle_cron_command("cron:run:").await.unwrap_err();
-    assert!(err.to_string().contains("Usage: cron:run"));
+    let output = maybe_handle_cron_command("cron:run:")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.contains("Usage: cron:run"));
+}
+
+#[tokio::test]
+async fn cron_run_answers_an_unknown_id_instead_of_dropping_the_connection() {
+    // Returning `Err` propagates out of the debug-client handler and closes
+    // the socket, so the caller gets an empty reply with no explanation. This
+    // was observed live: `cron:run:nope` returned literally nothing.
+    let _guard = crate::storage::lock_test_env();
+    let output = maybe_handle_cron_command("cron:run:definitely-not-a-job")
+        .await
+        .expect("an unknown id is user error, not a transport failure")
+        .expect("the cron namespace must claim its own command");
+    assert!(
+        output.contains("definitely-not-a-job"),
+        "the reply should name the job that could not be found, got: {output}"
+    );
 }
 
 #[tokio::test]

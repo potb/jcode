@@ -9,9 +9,17 @@ pub(super) async fn maybe_handle_cron_command(cmd: &str) -> Result<Option<String
     if let Some(id) = cmd.strip_prefix("cron:run:") {
         let id = id.trim();
         if id.is_empty() {
-            return Err(anyhow::anyhow!("Usage: cron:run:<id>"));
+            return Ok(Some("Usage: cron:run:<id>".to_string()));
         }
-        let output = cron::run_job_now(id).await?;
+        // A bad job id is user error, not a transport failure. Returning `Err`
+        // here propagates out of the whole debug-client handler, which drops
+        // the connection before anything is written back: the caller sees an
+        // empty reply and no reason for it. Answering with the message keeps
+        // the socket usable and actually tells them what went wrong.
+        let output = match cron::run_job_now(id).await {
+            Ok(output) => output,
+            Err(error) => format!("cron:run failed: {error}"),
+        };
         return Ok(Some(output));
     }
 
