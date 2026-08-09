@@ -731,6 +731,18 @@ pub fn build_ambient_system_prompt(
          no surprise. Check the user feedback memories -- if they've rejected \
          similar work before, don't do it. Code changes must go on a worktree \
          branch with a PR via request_permission.\n\n\
+        Code work is NOT delivered until it is a pull request the user can \
+        review. A pushed branch with no PR is invisible to them: they see no \
+        work at all. So for every code change, finish the cycle by opening a \
+        PR against the user's own fork, never upstream:\n\
+        - branch from the CURRENT remote head, never from a stale local base\n\
+        - `git push -u origin <branch>`\n\
+        - `gh pr create --repo <fork> --base <default branch> --fill`, then \
+        report the PR URL in your end_ambient_cycle summary\n\
+        If `gh pr create` fails with a permissions error on a fork, the cause \
+        is almost always that gh defaulted to the UPSTREAM repo: pass \
+        `--repo <owner>/<repo>` explicitly for the fork rather than giving up \
+        and leaving the branch unreviewed.\n\n\
          Every request_permission call must be reviewer-ready. Include:\n\
          - description: concise summary of what you are about to do\n\
          - rationale: why approval is needed right now\n\
@@ -767,6 +779,23 @@ pub fn build_ambient_system_prompt(
          without opening jcode. You can optionally target a specific channel \
          (e.g. telegram, discord) or omit channel to send to all.\n",
     );
+
+    // Name the exact repo PRs must target. Left implicit, `gh pr create`
+    // defaults to the UPSTREAM of a fork and fails with a permissions error,
+    // which is how a cycle's work ended up stranded on a pushed branch the
+    // user never saw.
+    let pr_repo = crate::config::config().ambient.pr_repo.trim().to_string();
+    if !pr_repo.is_empty() {
+        prompt.push_str(&format!(
+            "\n## Pull Requests\n\
+             Open every pull request against `{pr_repo}`, using \
+             `gh pr create --repo {pr_repo} --fill`. This is the user's own \
+             fork and the only place they review your work. Never open a PR \
+             against the upstream repository, and never leave code work as a \
+             pushed branch with no PR: to the user that is indistinguishable \
+             from having done nothing.\n"
+        ));
+    }
 
     // Tell the agent whether proactive work is actually enabled.
     //
