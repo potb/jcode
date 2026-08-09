@@ -458,6 +458,7 @@ fn test_reload_persisted_background_tasks_note_mentions_running_task() {
         &info,
         "bash",
         None,
+        None,
         &session_id,
         std::process::id(),
         &started_at,
@@ -495,6 +496,7 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
     rt.block_on(manager.register_detached_task(
         &info,
         "bash",
+        None,
         None,
         &session_id,
         std::process::id(),

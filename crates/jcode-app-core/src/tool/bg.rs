@@ -217,6 +217,7 @@ fn task_metadata(
     json!({
         "task_id": task.task_id,
         "display_name": task.display_name,
+        "command": task.command,
         "tool_name": task.tool_name,
         "status": status_label(&task.status),
         "is_terminal": is_terminal(&task.status),
@@ -257,6 +258,9 @@ fn format_task_details(task: &background::TaskStatusFile) -> String {
         task.started_at,
     );
 
+    if let Some(command) = task.command.as_ref() {
+        output.push_str(&format!("Command: {}\n", command));
+    }
     if let Some(completed) = task.completed_at.as_ref() {
         output.push_str(&format!("Completed: {}\n", completed));
     }
@@ -809,6 +813,7 @@ impl Tool for BgTool {
                                 "task_id": task.task_id,
                                 "task": task_metadata(manager, &task),
                                 "display_name": task.display_name,
+        "command": task.command,
                                 "status": status_label(&task.status),
                                 "wait_reason": reason_str,
                                 "timed_out": matches!(reason, background::BackgroundTaskWaitReason::Timeout),
