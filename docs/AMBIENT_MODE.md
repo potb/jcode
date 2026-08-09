@@ -724,6 +724,44 @@ routine. When debugging a missing notification, check the log for
 `routine cycle, no notification sent` - that line means the gate decided,
 as distinct from a broken channel.
 
+### Two-way channels (how the agent reaches you, and you reach it)
+
+ntfy is one-way: it pushes a line to your phone and nothing comes back. The
+`send_message` tool posts to a different set of channels, each of which can
+also carry your reply back as a directive for the next cycle. All are off by
+default, and **a cycle with none of them enabled has no delivery path at all**
+— its `end_ambient_cycle` summary is the only thing you will ever see.
+
+| Channel | Enable with | Also needs |
+|---|---|---|
+| `telegram` | `telegram_enabled` | `telegram_bot_token`, `telegram_chat_id` |
+| `discord` | `discord_enabled` | `discord_bot_token`, `discord_channel_id` |
+| `github` | `github_enabled` | `github_repo`, plus a token (config, `GITHUB_TOKEN`/`GH_TOKEN`, or `gh auth`) |
+| `jade_relay` | `jade_relay_enabled` | `jade_relay_api_base`, `jade_relay_token`, `jade_relay_session_id` |
+
+The matching `*_reply_enabled` flag is what turns an inbound message into an
+agent directive; without it the channel is send-only.
+
+GitHub is the least setup for a phone-reachable channel, since it needs no bot
+or hosted service: ambient opens one issue per topic, your comments come back
+as directives, and closing the issue marks the topic settled. The
+`github_issue` tool is the rest of that lifecycle (`list`, `open`, `comment`,
+`close`) and it refuses with `The GitHub channel is disabled
+(safety.github_enabled)` when the flag is off — note that the tool merely
+*existing* does not mean the channel is on.
+
+**Enabling a channel is not the same as configuring it.** A channel that is
+switched on but missing a credential is skipped at registry build time rather
+than failing loudly. `send_message` names those explicitly, so a reply like:
+
+```
+No messaging channels configured. Enable telegram, discord, or github under
+[safety] in config. Skipped: github: enabled but incomplete (github_repo set,
+token missing).
+```
+
+means the fix is the missing token, *not* enabling some other channel.
+
 ### Agent-Initiated Scheduling
 
 The ambient agent has a `schedule_ambient` tool to request its next wake-up:
