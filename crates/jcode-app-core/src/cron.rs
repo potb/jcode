@@ -279,7 +279,29 @@ fn evaluate(window_open: bool, fire_due: bool) -> CronDeadlines {
             continue;
         }
         if fire_due {
-            fire(job);
+            // Fold in the fire AFTER this one. Without it a job that just
+            // fired contributes no deadline at all, the loop falls back to its
+            // 30s idle poll, and an `every = "5s"` job quietly runs every
+            // thirty seconds.
+            //
+            // Project from the slot the job was DUE at, not from wall-clock
+            // now. The run is async and records `last_run` a few milliseconds
+            // later, so projecting from `now` lands the next deadline a
+            // hair *behind* the loop's own `Utc::now()` a moment later; the
+            // sleep math then discards it as already-past and falls back to
+            // the full poll anyway. Anchoring on `next` keeps the cadence on
+            // the schedule's grid instead of drifting by one execution's
+            // latency every cycle.
+            let projected = schedule::next_fire(&job, Some(next), next);
+            fire(job.clone());
+            if let Some(next_after) = projected {
+                let slot = if job.respect_windows {
+                    &mut deadlines.windowed
+                } else {
+                    &mut deadlines.unblocked
+                };
+                *slot = Some(slot.map_or(next_after, |e: DateTime<Utc>| e.min(next_after)));
+            }
         }
     }
 

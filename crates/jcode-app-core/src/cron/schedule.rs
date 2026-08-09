@@ -131,12 +131,16 @@ fn next_fire_at(
     let now_local = now.with_timezone(&Local);
     match last_run {
         None => {
-            if catch_up {
-                Some(now)
-            } else {
-                let occurrence = next_at_occurrence(&spec.days, spec.time, now_local)?;
-                Some(occurrence.with_timezone(&Utc))
-            }
+            // A first-ever wall-clock job waits for its next real occurrence,
+            // regardless of `catch_up`. "daily 03:00" with no history means
+            // "starting tomorrow morning", not "you have missed every 03:00
+            // since the epoch, run right now" — and running right now is
+            // exactly what the user did NOT ask for when they named a time.
+            // `catch_up` still governs the case that motivates it: a fire that
+            // was genuinely missed while the daemon was down, which requires a
+            // `last_run` to be missed relative to in the first place.
+            let occurrence = next_at_occurrence(&spec.days, spec.time, now_local)?;
+            Some(occurrence.with_timezone(&Utc))
         }
         Some(last) => {
             let last_local = last.with_timezone(&Local);

@@ -165,10 +165,17 @@ fn invalid_every_spec_yields_no_fire_time() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn at_job_first_run_fires_now_with_catch_up() {
+fn at_job_first_run_waits_for_the_next_occurrence_even_with_catch_up() {
+    // Naming a time of day is a statement about WHEN, so a job with no history
+    // must not fire the moment the daemon first sees it. This was a real bug:
+    // a `daily 03:00` upstream-merge job ran on the spot at 01:53 the first
+    // time the config was loaded.
     let job = at_job("x", "daily 03:00");
-    let now = utc(2026, 1, 1, 12, 0);
-    assert_eq!(next_fire(&job, None, now), Some(now));
+    assert!(job.catch_up, "catch_up defaults on; that is the point here");
+    // 2026-01-01 is a Thursday, local time.
+    let now = local(2026, 1, 1, 12, 0).with_timezone(&Utc);
+    let expected = local(2026, 1, 2, 3, 0).with_timezone(&Utc);
+    assert_eq!(next_fire(&job, None, now), Some(expected));
 }
 
 #[test]

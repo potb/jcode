@@ -284,3 +284,37 @@ respect_windows = true
     );
 }
 
+
+#[tokio::test]
+async fn a_job_that_just_fired_still_reports_its_following_deadline() {
+    // Regression: `tick` used to fire a due job and then move on without
+    // recording when that job runs NEXT, so the runner loop saw no cron
+    // deadline at all and fell back to its 30s idle poll. Observed live as an
+    // `every = "5s"` job ticking roughly twice a minute.
+    let _guard = crate::storage::lock_test_env();
+    let (_temp, _home) = configured_home(
+        r#"
+[[cron]]
+id = "fast-job"
+every = "5s"
+command = "true"
+"#,
+    );
+    crate::config::invalidate_config_cache();
+
+    let before = chrono::Utc::now();
+    let deadlines = tick(true);
+
+    let next = deadlines
+        .unblocked
+        .expect("a job that just fired must still report its following fire");
+    let delay = next - before;
+    assert!(
+        delay > chrono::Duration::zero() && delay <= chrono::Duration::seconds(6),
+        "the next fire should be about one interval away, got {delay}"
+    );
+    assert!(
+        deadlines.windowed.is_none(),
+        "the job does not opt into windows, so nothing belongs in the windowed slot"
+    );
+}
