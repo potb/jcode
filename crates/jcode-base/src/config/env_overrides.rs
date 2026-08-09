@@ -614,6 +614,23 @@ impl Config {
                 self.safety.telegram_reply_enabled = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_GITHUB_ISSUE_REPO") {
+            self.safety.github_repo = Some(v);
+            self.safety.github_enabled = true;
+        }
+        if let Ok(v) = std::env::var("JCODE_GITHUB_ISSUE_LABEL")
+            && !v.trim().is_empty()
+        {
+            self.safety.github_label = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_GITHUB_TOKEN") {
+            self.safety.github_token = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_GITHUB_REPLY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.safety.github_reply_enabled = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_DISCORD_BOT_TOKEN") {
             self.safety.discord_bot_token = Some(v);
             self.safety.discord_enabled = true;

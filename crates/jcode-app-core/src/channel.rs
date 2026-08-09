@@ -14,6 +14,13 @@ pub trait MessageChannel: Send + Sync {
 
     async fn send(&self, text: &str) -> anyhow::Result<()>;
 
+    /// Send into a specific existing thread of this channel (for GitHub, an
+    /// issue number). Channels with no notion of threads ignore the target and
+    /// fall back to a plain send, so callers never have to special-case them.
+    async fn send_to_thread(&self, _thread: &str, text: &str) -> anyhow::Result<()> {
+        self.send(text).await
+    }
+
     async fn reply_loop(&self, runner: AmbientRunnerHandle);
 }
 
@@ -59,6 +66,35 @@ impl ChannelRegistry {
                 config.discord_reply_enabled,
                 config.discord_bot_user_id.clone(),
             )));
+        }
+
+        if config.github_enabled {
+            match (
+                config.github_repo.clone(),
+                GitHubChannel::resolve_token(config.github_token.as_deref()),
+            ) {
+                (Some(repo), Some(token)) => {
+                    logging::info(&format!(
+                        "registering github notification channel repo={} label={} reply_enabled={}",
+                        repo, config.github_label, config.github_reply_enabled
+                    ));
+                    channels.push(Arc::new(GitHubChannel::new(
+                        repo,
+                        config.github_label.clone(),
+                        token,
+                        config.github_allowed_logins.clone(),
+                        config.github_reply_enabled,
+                        config.github_poll_seconds,
+                    )));
+                }
+                (repo, token) => {
+                    logging::warn(&format!(
+                        "github_enabled but incomplete (repo={} token={}); skipping",
+                        repo.is_some(),
+                        token.is_some()
+                    ));
+                }
+            }
         }
 
         if config.jade_relay_enabled {
@@ -750,6 +786,413 @@ impl MessageChannel for JadeRelayChannel {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// GitHub issue channel
+// ---------------------------------------------------------------------------
+
+/// A notification channel backed by GitHub issues, one issue per topic.
+///
+/// Every other reply channel needs a bot and a hosted service to be reachable
+/// from a phone. GitHub is already reachable, already authenticates the user,
+/// and a private repo (or an allowlist of logins) limits who can answer.
+///
+/// Topics get their own issue rather than sharing one mailbox thread, because
+/// a single thread collapses unrelated questions into one stream where the
+/// reply "yes" is ambiguous and nothing is ever done. An issue per topic gives
+/// each question its own reply thread, its own notification, and a close button
+/// that means "this one is settled".
+pub struct GitHubChannel {
+    repo: String,
+    label: String,
+    token: String,
+    /// Logins allowed to issue directives. Empty means "anyone except the
+    /// account we post as", which on a private repo is the collaborator set.
+    allowed_logins: Vec<String>,
+    reply_enabled: bool,
+    poll_seconds: u64,
+    client: reqwest::Client,
+}
+
+impl GitHubChannel {
+    pub fn new(
+        repo: String,
+        label: String,
+        token: String,
+        allowed_logins: Vec<String>,
+        reply_enabled: bool,
+        poll_seconds: u64,
+    ) -> Self {
+        Self {
+            repo,
+            label,
+            token,
+            allowed_logins,
+            reply_enabled,
+            poll_seconds: poll_seconds.max(5),
+            client: crate::provider::shared_http_client(),
+        }
+    }
+
+    /// Resolve a token from config, the usual env vars, or the `gh` CLI.
+    ///
+    /// Falling back to `gh auth token` matters because the user already has a
+    /// working credential there; requiring a second PAT pasted into a config
+    /// file is both friction and one more secret at rest.
+    pub fn resolve_token(configured: Option<&str>) -> Option<String> {
+        if let Some(t) = configured.map(str::trim).filter(|t| !t.is_empty()) {
+            return Some(t.to_string());
+        }
+        for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+            if let Ok(v) = std::env::var(var)
+                && !v.trim().is_empty()
+            {
+                return Some(v.trim().to_string());
+            }
+        }
+        let out = std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if token.is_empty() { None } else { Some(token) }
+    }
+
+    fn request(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req.header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "jcode-ambient")
+    }
+
+    /// The login of the account the token belongs to, used to skip our own
+    /// comments without the user having to configure it.
+    async fn viewer_login(&self) -> Option<String> {
+        let resp = self
+            .request(self.client.get("https://api.github.com/user"))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let user: GitHubUser = resp.json().await.ok()?;
+        Some(user.login)
+    }
+
+    /// Open a new topic issue and return its number.
+    pub async fn open_issue(&self, title: &str, body: &str) -> anyhow::Result<u64> {
+        let url = format!("https://api.github.com/repos/{}/issues", self.repo);
+        let resp = self
+            .request(self.client.post(&url))
+            .json(&serde_json::json!({
+                "title": title,
+                "body": body,
+                "labels": [self.label],
+            }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub issue create failed ({}): {}", status, body);
+        }
+        let issue: GitHubIssue = resp.json().await?;
+        Ok(issue.number)
+    }
+
+    /// Comment on an existing topic issue.
+    pub async fn comment(&self, issue: u64, body: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/issues/{}/comments",
+            self.repo, issue
+        );
+        let resp = self
+            .request(self.client.post(&url))
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub comment post failed ({}): {}", status, body);
+        }
+        Ok(())
+    }
+
+    /// Close a topic issue once it is settled.
+    pub async fn close_issue(&self, issue: u64) -> anyhow::Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/issues/{}",
+            self.repo, issue
+        );
+        let resp = self
+            .request(self.client.patch(&url))
+            .json(&serde_json::json!({ "state": "closed" }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub issue close failed ({}): {}", status, body);
+        }
+        Ok(())
+    }
+
+    /// Numbers of the open issues that belong to this channel.
+    ///
+    /// Comments are polled repo-wide (one request instead of one per issue), so
+    /// this is the filter that keeps unrelated issue traffic from being read as
+    /// directives to the agent.
+    async fn topic_issue_numbers(&self) -> anyhow::Result<std::collections::HashSet<u64>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/issues?state=open&labels={}&per_page=100",
+            self.repo,
+            urlencoding_encode(&self.label)
+        );
+        let resp = self.request(self.client.get(&url)).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub issue list failed ({}): {}", status, body);
+        }
+        let issues: Vec<GitHubIssue> = resp.json().await?;
+        Ok(issues.into_iter().map(|i| i.number).collect())
+    }
+
+    /// Open topic issues as (number, title) pairs, for the agent's backlog.
+    pub async fn list_open_topics(&self) -> anyhow::Result<Vec<(u64, String)>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/issues?state=open&labels={}&per_page=100",
+            self.repo,
+            urlencoding_encode(&self.label)
+        );
+        let resp = self.request(self.client.get(&url)).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub issue list failed ({}): {}", status, body);
+        }
+        let issues: Vec<GitHubIssue> = resp.json().await?;
+        Ok(issues.into_iter().map(|i| (i.number, i.title)).collect())
+    }
+
+    /// All issue comments in the repo created at or after `since` (RFC3339).
+    async fn poll_comments(&self, since: &str) -> anyhow::Result<Vec<GitHubComment>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/issues/comments?since={}&per_page=100&sort=created&direction=asc",
+            self.repo,
+            urlencoding_encode(since)
+        );
+        let resp = self.request(self.client.get(&url)).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GitHub comments error ({}): {}", status, body);
+        }
+        Ok(resp.json().await?)
+    }
+
+    fn is_allowed(&self, login: &str, viewer: Option<&str>) -> bool {
+        if !self.allowed_logins.is_empty() {
+            return self
+                .allowed_logins
+                .iter()
+                .any(|l| l.eq_ignore_ascii_case(login));
+        }
+        viewer
+            .map(|v| !v.eq_ignore_ascii_case(login))
+            .unwrap_or(true)
+    }
+}
+
+/// Split a message into an issue title and body.
+///
+/// The first line becomes the title so the issue list reads as a list of
+/// topics rather than a wall of identical subjects. GitHub rejects very long
+/// titles, so an overlong first line is truncated and kept in full in the body.
+pub fn split_title_body(text: &str) -> (String, String) {
+    let trimmed = text.trim();
+    let first_line = trimmed.lines().next().unwrap_or("").trim();
+    let mut title: String = first_line
+        .trim_start_matches(['#', '*', '-', ' '])
+        .chars()
+        .take(120)
+        .collect();
+    if title.trim().is_empty() {
+        title = "Ambient update".to_string();
+    }
+    (title.trim().to_string(), trimmed.to_string())
+}
+
+/// Parse an issue number out of a comment's `issue_url`.
+pub fn issue_number_from_url(url: &str) -> Option<u64> {
+    url.rsplit('/').next()?.parse().ok()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubUser {
+    #[serde(default)]
+    login: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitHubIssue {
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GitHubComment {
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub issue_url: String,
+    #[serde(default)]
+    pub user: Option<GitHubCommentUser>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GitHubCommentUser {
+    #[serde(default)]
+    pub login: String,
+}
+
+#[async_trait]
+impl MessageChannel for GitHubChannel {
+    fn name(&self) -> &str {
+        "github"
+    }
+
+    fn is_send_enabled(&self) -> bool {
+        true
+    }
+
+    fn is_reply_enabled(&self) -> bool {
+        self.reply_enabled
+    }
+
+    /// A plain send opens a new topic issue: each notification is its own
+    /// thread the user can answer or close independently.
+    async fn send(&self, text: &str) -> anyhow::Result<()> {
+        let (title, body) = split_title_body(text);
+        self.open_issue(&title, &body).await?;
+        Ok(())
+    }
+
+    async fn send_to_thread(&self, thread: &str, text: &str) -> anyhow::Result<()> {
+        let issue: u64 = thread
+            .trim()
+            .trim_start_matches('#')
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid GitHub issue number: {}", thread))?;
+        self.comment(issue, text).await
+    }
+
+    async fn reply_loop(&self, runner: AmbientRunnerHandle) {
+        let viewer = self.viewer_login().await;
+        logging::info(&format!(
+            "github reply loop started repo={} label={} viewer={}",
+            self.repo,
+            self.label,
+            viewer.as_deref().unwrap_or("unknown")
+        ));
+
+        // Start from now so switching this on does not replay an existing
+        // backlog as a burst of stale directives.
+        let mut since = chrono::Utc::now().to_rfc3339();
+
+        loop {
+            let topics = match self.topic_issue_numbers().await {
+                Ok(t) => t,
+                Err(e) => {
+                    logging::error(&format!("GitHub issue list error: {}", e));
+                    tokio::time::sleep(std::time::Duration::from_secs(self.poll_seconds)).await;
+                    continue;
+                }
+            };
+
+            match self.poll_comments(&since).await {
+                Ok(comments) => {
+                    for c in comments {
+                        if c.created_at > since {
+                            since = c.created_at.clone();
+                        }
+                        let issue = match issue_number_from_url(&c.issue_url) {
+                            Some(n) if topics.contains(&n) => n,
+                            _ => continue,
+                        };
+                        let login = c.user.as_ref().map(|u| u.login.clone()).unwrap_or_default();
+                        if !self.is_allowed(&login, viewer.as_deref()) {
+                            continue;
+                        }
+                        let trimmed = c.body.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                            let (approved, message) =
+                                crate::notifications::parse_permission_reply(trimmed);
+                            if let Err(e) = crate::safety::record_permission_via_file(
+                                &req_id,
+                                approved,
+                                "github_issue",
+                                message,
+                            ) {
+                                logging::error(&format!(
+                                    "Failed to record permission from GitHub for {}: {}",
+                                    req_id, e
+                                ));
+                            } else {
+                                let _ = self
+                                    .comment(
+                                        issue,
+                                        &format!(
+                                            "Permission {} for `{}`.",
+                                            if approved { "approved" } else { "denied" },
+                                            req_id
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            continue;
+                        }
+
+                        // Tag the source with the issue so the agent knows which
+                        // topic is being answered and can reply in that thread.
+                        let source = format!("github#{}", issue);
+                        let injected = runner.inject_message(trimmed, &source).await;
+                        logging::info(&format!(
+                            "github comment injected issue={} from={} injected={}",
+                            issue, login, injected
+                        ));
+                        let ack = if injected {
+                            "Delivered to the running cycle."
+                        } else {
+                            "Queued; waking the agent now."
+                        };
+                        if let Err(e) = self.comment(issue, ack).await {
+                            logging::error(&format!("github ack failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    logging::error(&format!("GitHub poll error: {}", e));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(self.poll_seconds)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,6 +1287,182 @@ mod tests {
         cfg.jade_relay_session_id = Some("sess-1".to_string());
         let reg = ChannelRegistry::from_config(&cfg);
         assert!(reg.channel_names().iter().any(|n| n == "jade_relay"));
+    }
+
+    #[test]
+    fn test_github_registry_wiring() {
+        let mut cfg = SafetyConfig {
+            github_enabled: true,
+            github_token: Some("tok".to_string()),
+            ..SafetyConfig::default()
+        };
+        // Incomplete: skipped rather than half-registered.
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(!reg.channel_names().iter().any(|n| n == "github"));
+
+        cfg.github_repo = Some("owner/repo".to_string());
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(reg.channel_names().iter().any(|n| n == "github"));
+    }
+
+    #[test]
+    fn test_github_split_title_body() {
+        // First line becomes the title so the issue list reads as topics.
+        let (t, b) = split_title_body("## Flaky test in bg_panel\nDetails here.");
+        assert_eq!(t, "Flaky test in bg_panel");
+        assert!(b.contains("Details here."));
+
+        // An overlong first line is truncated for the title but kept in full
+        // in the body, since GitHub rejects very long titles.
+        let long = "x".repeat(400);
+        let (t, b) = split_title_body(&long);
+        assert_eq!(t.chars().count(), 120);
+        assert_eq!(b.chars().count(), 400);
+
+        // Leading blank lines are skipped rather than producing a blank title.
+        let (t, _) = split_title_body("   \n\nbody only");
+        assert_eq!(t, "body only");
+
+        // Content with no usable first line still yields a title, because
+        // GitHub rejects an empty one.
+        let (t, _) = split_title_body("### \nrest");
+        assert_eq!(t, "Ambient update");
+    }
+
+    #[test]
+    fn test_github_issue_number_from_url() {
+        assert_eq!(
+            issue_number_from_url("https://api.github.com/repos/o/r/issues/42"),
+            Some(42)
+        );
+        assert_eq!(issue_number_from_url("nonsense"), None);
+    }
+
+    #[test]
+    fn test_github_allowed_logins() {
+        // Empty allowlist: anyone except the account we post as, so the agent
+        // never answers its own comment and loops.
+        let ch = GitHubChannel::new(
+            "owner/repo".to_string(),
+            "ambient".to_string(),
+            "tok".to_string(),
+            Vec::new(),
+            true,
+            60,
+        );
+        assert!(ch.is_allowed("potb", Some("jcode-bot")));
+        assert!(!ch.is_allowed("jcode-bot", Some("jcode-bot")));
+        assert!(!ch.is_allowed("JCODE-BOT", Some("jcode-bot")));
+
+        // Explicit allowlist wins and is case-insensitive.
+        let ch = GitHubChannel::new(
+            "owner/repo".to_string(),
+            "ambient".to_string(),
+            "tok".to_string(),
+            vec!["PotB".to_string()],
+            true,
+            60,
+        );
+        assert!(ch.is_allowed("potb", Some("jcode-bot")));
+        assert!(!ch.is_allowed("stranger", Some("jcode-bot")));
+    }
+
+    #[test]
+    fn test_github_comment_parse() {
+        let json = r#"[{
+            "body": "ship it",
+            "created_at": "2026-08-09T15:00:00Z",
+            "user": {"login": "potb"}
+        }]"#;
+        let parsed: Vec<GitHubComment> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed[0].body, "ship it");
+        assert_eq!(parsed[0].user.as_ref().unwrap().login, "potb");
+    }
+
+    #[test]
+    fn test_github_poll_interval_floor() {
+        // A zero or tiny interval would hammer the API into rate limiting.
+        let ch = GitHubChannel::new(
+            "o/r".to_string(),
+            "ambient".to_string(),
+            "t".to_string(),
+            Vec::new(),
+            true,
+            0,
+        );
+        assert_eq!(ch.poll_seconds, 5);
+    }
+
+    /// Poll a condition for up to ~15s, for APIs that are eventually consistent.
+    async fn wait_for<F, Fut>(mut f: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..15 {
+            if f().await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        false
+    }
+
+    /// Live end-to-end test against real GitHub: open a topic issue, comment
+    /// on it, see it in the open-topic list, then close it. Ignored by default.
+    ///   JCODE_GH_LIVE_REPO=owner/repo cargo test -p jcode-app-core \
+    ///     github_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires a real GitHub token and repo"]
+    async fn test_github_live_roundtrip() {
+        let repo = match std::env::var("JCODE_GH_LIVE_REPO") {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("skipping: JCODE_GH_LIVE_REPO not set");
+                return;
+            }
+        };
+        let token = GitHubChannel::resolve_token(None).expect("a GitHub token");
+        let ch = GitHubChannel::new(
+            repo,
+            "ambient".to_string(),
+            token,
+            vec!["potb".to_string()],
+            true,
+            60,
+        );
+
+        let title = format!("Live channel test {}", chrono::Utc::now().timestamp());
+        let n = ch
+            .open_issue(&title, "Opened by the GitHub channel live test.")
+            .await
+            .expect("open issue");
+        eprintln!("opened #{}", n);
+
+        ch.comment(n, "Live test comment.").await.expect("comment");
+
+        // GitHub's issue list is eventually consistent: a just-created issue
+        // can be missing from it for a second or two, so poll rather than
+        // asserting on the first read.
+        let appears = wait_for(|| async {
+            ch.list_open_topics()
+                .await
+                .map(|t| t.iter().any(|(num, ti)| *num == n && ti == &title))
+                .unwrap_or(false)
+        })
+        .await;
+        assert!(appears, "new issue should appear in the open topic list");
+
+        ch.close_issue(n).await.expect("close");
+        let gone = wait_for(|| async {
+            ch.list_open_topics()
+                .await
+                .map(|t| !t.iter().any(|(num, _)| *num == n))
+                .unwrap_or(false)
+        })
+        .await;
+        assert!(gone, "closed issue should leave the open topic list");
+        eprintln!("LIVE GITHUB ROUNDTRIP OK: #{} opened, commented, closed", n);
     }
 
     /// Live end-to-end test against the real Jade relay. Ignored by default;
