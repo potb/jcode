@@ -316,6 +316,12 @@ impl MemoryManager {
         let Some(project_dir) = self.get_project_dir() else {
             return;
         };
+        // A directory that does not exist is not a project. Registering one
+        // would let a single typo'd or probing read pin a bogus path in the
+        // registry forever, and the registry is what names graphs in reports.
+        if !project_dir.is_dir() {
+            return;
+        }
         let Ok(Some(path)) = self.project_memory_path() else {
             return;
         };

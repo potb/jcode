@@ -673,6 +673,49 @@ mod tests {
         }
     }
 
+    /// A path that is not a directory is not a project. Registering one would
+    /// let a single typo pin a bogus entry in the registry permanently, and the
+    /// registry is what names graphs in ambient's per-project report.
+    #[tokio::test]
+    async fn reading_a_nonexistent_project_does_not_pollute_the_registry() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        let listed = tool
+            .execute(
+                json!({
+                    "action": "list",
+                    "scope": "project",
+                    "project_dir": "/nonexistent/path/for/registry/probe",
+                }),
+                test_ctx(None),
+            )
+            .await
+            .expect("listing a missing project must not error");
+        assert!(
+            listed.output.contains("No memories"),
+            "a missing project must read as empty, got: {}",
+            listed.output
+        );
+
+        let registry = MemoryManager::load_projects_registry();
+        assert!(
+            !registry
+                .values()
+                .any(|dir| dir.contains("/nonexistent/path/for/registry/probe")),
+            "a nonexistent path must never be registered, got: {registry:?}"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// Reading a project's memory must register its path too. The registry is
     /// the only way something outside a project (ambient) can name a hash-named
     /// graph, and a project the user only reads from would otherwise stay an
