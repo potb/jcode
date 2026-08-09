@@ -1458,6 +1458,11 @@ pub struct App {
     // Polled on idle ticks so config.toml keybinding edits hot-reload
     // without a restart.
     keybindings_config_generation: u64,
+    // The keybinding config the snapshot above was parsed from. The
+    // generation is bumped by *any* config invalidation, so it alone cannot
+    // tell a real keybinding edit from an unrelated one; comparing against
+    // this keeps the "Config reloaded from disk" notice truthful.
+    keybindings_snapshot: crate::config::KeybindingsConfig,
     // Active external dictation session, if one is running
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running
