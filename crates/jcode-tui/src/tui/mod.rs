@@ -473,6 +473,36 @@ pub trait TuiState {
         false
     }
 
+    // ---- Background tasks ----
+    /// Tasks to render in the inline background-task band.
+    ///
+    /// Already filtered by the session scope the user selected, and ordered
+    /// newest first, so the renderer only has to decide layout.
+    fn bg_panel_tasks(&self) -> Vec<jcode_tui_render::background_gallery::BgTask> {
+        Vec::new()
+    }
+    /// Whether the background band has anything to show.
+    fn bg_panel_active(&self) -> bool {
+        false
+    }
+    /// Selected task index in the inline background panel (display order).
+    fn bg_panel_selected(&self) -> usize {
+        0
+    }
+    /// Whether the inline background panel currently has keyboard focus.
+    fn bg_panel_focused(&self) -> bool {
+        false
+    }
+    /// Whether the background page currently replaces the transcript viewport.
+    fn bg_panel_full_page(&self) -> bool {
+        false
+    }
+    /// Whether the panel lists every session's tasks rather than just this
+    /// session's.
+    fn bg_panel_show_all_sessions(&self) -> bool {
+        false
+    }
+
     // ---- Workspace ----
     /// Whether workspace mode is enabled for this client.
     fn workspace_mode_enabled(&self) -> bool {

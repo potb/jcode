@@ -11,6 +11,7 @@ use ratatui::prelude::*;
 
 use jcode_tui_style::color::rgb;
 
+use crate::gallery_text::{clamp_line_to_width, count_digits, disp_w, truncate_label};
 use crate::swarm_tiles::{SwarmGalleryConfig, SwarmTile, render_swarm_gallery};
 
 /// Accent color for a member lifecycle status.
@@ -1490,38 +1491,6 @@ fn dock_tail_lines(member: &GalleryMember, width: usize, rows: usize) -> Vec<Lin
         .collect()
 }
 
-/// Truncate a styled line so its display width never exceeds `max_width`.
-/// Splits mid-span if needed, dropping a trailing wide glyph that would
-/// straddle the boundary.
-fn clamp_line_to_width(line: &mut Line<'static>, max_width: usize) {
-    use unicode_width::UnicodeWidthChar;
-    let mut used = 0usize;
-    let mut clamped: Vec<Span<'static>> = Vec::new();
-    for span in line.spans.drain(..) {
-        let w = disp_w(&span.content);
-        if used + w <= max_width {
-            used += w;
-            clamped.push(span);
-            continue;
-        }
-        // Partial span: take chars while they fit.
-        let mut taken = String::new();
-        for ch in span.content.chars() {
-            let cw = ch.width().unwrap_or(0);
-            if used + cw > max_width {
-                break;
-            }
-            used += cw;
-            taken.push(ch);
-        }
-        if !taken.is_empty() {
-            clamped.push(Span::styled(taken, span.style));
-        }
-        break;
-    }
-    line.spans = clamped;
-}
-
 /// Render the expanded detail viewport for the hovered agent in the focused
 /// strip: a header, a tail of the agent's live transcript, and its todo list.
 ///
@@ -1895,48 +1864,6 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
         ));
     }
     Line::from(spans)
-}
-
-/// Truncate `s` to at most `max` display columns (wide glyphs count as 2),
-/// appending an ellipsis when truncated.
-fn truncate_label(s: &str, max: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if disp_w(s) <= max {
-        return s.to_string();
-    }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let target = max - 1;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw > target {
-            break;
-        }
-        used += cw;
-        out.push(ch);
-    }
-    out.push('…');
-    out
-}
-
-/// Terminal display width of a string (wide glyphs like 🐝 count as 2).
-fn disp_w(s: &str) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    s.width()
-}
-
-/// Number of decimal digits in `n` (for budgeting "+N" markers).
-fn count_digits(n: usize) -> usize {
-    let mut n = n.max(1);
-    let mut d = 0;
-    while n > 0 {
-        d += 1;
-        n /= 10;
-    }
-    d
 }
 
 #[cfg(test)]

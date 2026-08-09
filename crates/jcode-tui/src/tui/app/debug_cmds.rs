@@ -187,6 +187,26 @@ impl App {
             "OK: reload triggered".to_string()
         } else if cmd == "state" {
             // Return current state as JSON for easier parsing
+            // Resolved the way the renderer resolves it. Snapshot tails are
+            // deliberately empty (lazy: only the selected task's output is read,
+            // and only at render time), so reporting the raw tail here would
+            // always show nothing and look like a bug.
+            let bg_panel_selected_output = {
+                let tasks = crate::tui::TuiState::bg_panel_tasks(self);
+                let ordered = jcode_tui_render::background_gallery::sort_tasks_for_display(&tasks);
+                let selected = crate::tui::TuiState::bg_panel_selected(self)
+                    .min(ordered.len().saturating_sub(1));
+                ordered
+                    .get(selected)
+                    .map(|task| {
+                        if task.output_tail.is_empty() {
+                            crate::tui::app::bg_panel_output_tail(&task.id, 64)
+                        } else {
+                            task.output_tail.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+            };
             serde_json::json!({
                 "processing": self.is_processing,
                 "messages": self.messages.len(),
@@ -206,6 +226,32 @@ impl App {
                 "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
                 "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
+                // Background-task panel: exposed so headless tests can assert
+                // on panel behavior without parsing the rendered frame.
+                "bg_panel_focused": crate::tui::TuiState::bg_panel_focused(self),
+                "bg_panel_full_page": crate::tui::TuiState::bg_panel_full_page(self),
+                "bg_panel_selected": crate::tui::TuiState::bg_panel_selected(self),
+                "bg_panel_all_sessions": crate::tui::TuiState::bg_panel_show_all_sessions(self),
+                // output_tail is included because it is the whole point of the
+                // panel: "show me what my background tasks printed". Without it
+                // the debug bridge can confirm a task is LISTED but not that
+                // its output is reachable, and the visual-debug dump only
+                // records transcript messages, never the rendered strip. That
+                // gap made a stdout/stderr claim unverifiable at runtime.
+                "bg_panel_tasks": crate::tui::TuiState::bg_panel_tasks(self)
+                    .iter()
+                    .map(|task| serde_json::json!({
+                        "id": task.id,
+                        "label": task.label,
+                        "status": task.status.label(),
+                        "output_tail": task.output_tail,
+                    }))
+                    .collect::<Vec<_>>(),
+                // Resolved the way the renderer resolves it. Snapshot tails are
+                // deliberately empty (lazy: only the selected task's output is
+                // read, and only at render time), so reporting the raw tail
+                // here would always show nothing and look like a bug.
+                "bg_panel_selected_output": bg_panel_selected_output,
                 "version": jcode_build_meta::version(),
             })
             .to_string()

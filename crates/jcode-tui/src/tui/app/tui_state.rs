@@ -1475,15 +1475,21 @@ impl crate::tui::TuiState for App {
             } else {
                 Some(self.session.id.as_str())
             };
-            let (running_count, running_tasks, progress) = match background_session_id {
-                Some(session_id) => bg_manager.running_snapshot_for_session(session_id),
-                None => bg_manager.running_snapshot(),
+            let rows = match background_session_id {
+                Some(session_id) => bg_manager.running_rows_for_session(session_id),
+                None => bg_manager.local_running_rows(),
             };
+            let running_count = rows.len();
+            let running_tasks: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
+            let running_task_ids: Vec<String> =
+                rows.iter().map(|row| row.task_id.clone()).collect();
+            let progress = rows.iter().find(|row| row.detail.is_some()).cloned();
 
             if running_count > 0 {
                 Some(crate::tui::info_widget::BackgroundInfo {
                     running_count,
                     running_tasks,
+                    running_task_ids,
                     progress_summary: progress.as_ref().map(|progress| progress.label.clone()),
                     progress_detail: progress
                         .as_ref()
@@ -1770,6 +1776,33 @@ impl crate::tui::TuiState for App {
 
     fn swarm_panel_full_page(&self) -> bool {
         self.swarm_panel_full_page && self.inline_swarm_gallery_active()
+    }
+
+    // The real implementations live as inherent methods in
+    // `super::bg_panel_state`; these are explicit delegations so the reader
+    // does not have to rely on inherent-over-trait method resolution.
+    fn bg_panel_tasks(&self) -> Vec<jcode_tui_render::background_gallery::BgTask> {
+        App::bg_panel_tasks(self)
+    }
+
+    fn bg_panel_active(&self) -> bool {
+        App::bg_panel_active(self)
+    }
+
+    fn bg_panel_selected(&self) -> usize {
+        App::bg_panel_selected(self)
+    }
+
+    fn bg_panel_focused(&self) -> bool {
+        App::bg_panel_focused(self)
+    }
+
+    fn bg_panel_full_page(&self) -> bool {
+        App::bg_panel_full_page(self)
+    }
+
+    fn bg_panel_show_all_sessions(&self) -> bool {
+        App::bg_panel_show_all_sessions(self)
     }
 
     fn diagram_focus(&self) -> bool {

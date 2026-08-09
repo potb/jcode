@@ -175,6 +175,7 @@ TESTER COMMANDS (tester: prefix):
   tester:<id>:scroll-suite - Run scroll+diagram test suite
   tester:<id>:side-panel-latency - Benchmark headless side-panel input->frame latency
   tester:<id>:mermaid-ui-bench - Benchmark live Mermaid UI render path
+  tester:<id>:raw:<cmd>    - Forward any client debug command verbatim (e.g. raw:swarm-gallery:2)
   tester:<id>:stop         - Stop tester
 
 Examples:

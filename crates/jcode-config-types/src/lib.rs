@@ -980,6 +980,14 @@ pub struct KeybindingsConfig {
     /// prompt, esc exits). Active only when `agents.swarm_spawn_mode = "inline"`
     /// and the session manages swarm agents.
     pub swarm_panel_focus: String,
+    /// Focus/unfocus the inline background-task panel for keyboard navigation
+    /// (default: "alt+b"; alt+↑/↓ select, alt+a toggles the session filter,
+    /// esc exits). Active whenever background tasks exist to show.
+    ///
+    /// Alt+B no longer carries the readline word-back alias in the chat input;
+    /// Alt+Left still moves back a word. Set this to "" to disable the panel
+    /// chord entirely, or to another chord to free Alt+B.
+    pub background_panel_focus: String,
     /// Spawn a fresh jcode session in a new terminal window (default: unbound).
     /// Example: "alt+enter".
     pub new_terminal: String,
@@ -1028,6 +1036,7 @@ impl Default for KeybindingsConfig {
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
             todo_card_toggle: get("todo_card_toggle", "alt+x"),
             swarm_panel_focus: get("swarm_panel_focus", "alt+n"),
+            background_panel_focus: get("background_panel_focus", "alt+b"),
             new_terminal: get("new_terminal", ""),
             open_resume: get(
                 "open_resume",

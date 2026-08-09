@@ -1389,8 +1389,25 @@ impl BackgroundTaskManager {
         Self::finish_running_rows(self.local_running_rows())
     }
 
+    fn finish_running_rows(
+        mut rows: Vec<RunningBackgroundProgress>,
+    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
+        rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        let latest = rows.iter().find(|row| row.detail.is_some()).cloned();
+
+        (
+            rows.len(),
+            rows.iter().map(|row| row.label.clone()).collect(),
+            latest,
+        )
+    }
+
     /// Rows for tasks whose futures are owned by this process.
-    fn local_running_rows(&self) -> Vec<RunningBackgroundProgress> {
+    ///
+    /// Public because callers that need the task ids (the background panel and
+    /// the status widget) cannot recover them from
+    /// [`Self::running_snapshot`], which reduces rows to labels.
+    pub fn local_running_rows(&self) -> Vec<RunningBackgroundProgress> {
         let Ok(tasks) = self.tasks.try_read() else {
             return Vec::new();
         };
@@ -1417,19 +1434,6 @@ impl BackgroundTaskManager {
         rows
     }
 
-    fn finish_running_rows(
-        mut rows: Vec<RunningBackgroundProgress>,
-    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
-        rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
-        let latest = rows.iter().find(|row| row.detail.is_some()).cloned();
-
-        (
-            rows.len(),
-            rows.iter().map(|row| row.label.clone()).collect(),
-            latest,
-        )
-    }
-
     /// Best-effort synchronous snapshot of running tasks for `session_id`,
     /// including tasks owned by *another* live process.
     ///
@@ -1444,6 +1448,16 @@ impl BackgroundTaskManager {
         &self,
         session_id: &str,
     ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
+        Self::finish_running_rows(self.running_rows_for_session(session_id))
+    }
+
+    /// Same merge as [`Self::running_snapshot_for_session`], keeping the task
+    /// ids.
+    ///
+    /// The snapshot form reduces each row to a label, which leaves callers
+    /// that need to address a specific task (the background panel, and the
+    /// status widget's "inspect this task" hint) with no way back to its id.
+    pub fn running_rows_for_session(&self, session_id: &str) -> Vec<RunningBackgroundProgress> {
         let mut rows = self.local_running_rows();
         let mut seen: std::collections::HashSet<String> =
             rows.iter().map(|row| row.task_id.clone()).collect();
@@ -1467,7 +1481,8 @@ impl BackgroundTaskManager {
             });
         }
 
-        Self::finish_running_rows(rows)
+        rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        rows
     }
 
     /// Cached scan of status files for tasks that belong to `session_id` and
@@ -1526,6 +1541,13 @@ impl BackgroundTaskManager {
         matches
     }
 
+    fn finish_running_rows(
+        mut rows: Vec<RunningBackgroundProgress>,
+    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
+        rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        rows
+    }
+
     /// Best-effort synchronous lookup of detached tasks that are still running
     /// for a specific session.
     ///
@@ -1572,6 +1594,76 @@ impl BackgroundTaskManager {
 
         matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         matches
+    }
+
+    /// Best-effort synchronous listing of every task status file on disk.
+    ///
+    /// [`Self::list`] is the authoritative version: it also reconciles
+    /// detached/orphaned status files. This variant exists for synchronous
+    /// callers such as the TUI's background panel, which runs on the render
+    /// thread and only needs a read-only view. Liveness is approximated the
+    /// same way the reconcilers do, so a task whose owning process is gone is
+    /// reported as orphaned instead of a phantom `Running`.
+    pub fn list_sync(&self) -> Vec<TaskStatusFile> {
+        let mut results = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
+            return results;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
+                continue;
+            };
+            results.push(status);
+        }
+
+        results.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        results
+    }
+
+    /// Synchronous single-task status read. See [`Self::list_sync`].
+    pub fn status_sync(&self, task_id: &str) -> Option<TaskStatusFile> {
+        let content = std::fs::read_to_string(self.status_path_for(task_id)).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Synchronous output read. See [`Self::list_sync`].
+    pub fn output_sync(&self, task_id: &str) -> Option<String> {
+        std::fs::read_to_string(self.output_path_for(task_id)).ok()
+    }
+
+    /// Whether a status file that claims to be `Running` still has a live
+    /// owner, so callers can distinguish real work from a stale phantom.
+    pub fn task_looks_live(&self, status: &TaskStatusFile) -> bool {
+        if status.status != BackgroundTaskStatus::Running {
+            return false;
+        }
+        if self.is_live_task(&status.task_id) {
+            return true;
+        }
+        if status.detached {
+            return status
+                .pid
+                .map(crate::platform::is_process_running)
+                .unwrap_or(false);
+        }
+        match status.owner_pid {
+            // Same process image: `is_live_task` above already answered.
+            Some(owner) if owner == std::process::id() => {
+                status.owner_instance.as_deref() != Some(model::process_instance_token())
+            }
+            Some(owner) => crate::platform::is_process_running(owner),
+            // No owner metadata (older build, or another machine-wide writer):
+            // assume live rather than mislabel someone else's task as dead.
+            None => true,
+        }
     }
 }
 

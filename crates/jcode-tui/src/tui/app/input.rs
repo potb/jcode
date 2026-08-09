@@ -2045,11 +2045,21 @@ pub(super) fn delete_input_word_back(app: &mut App) {
 
 pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
     match code {
-        // Alt/Option+Left/Right move by word, matching Alt+B / Alt+F.
-        KeyCode::Left | KeyCode::Char('b') => {
+        // Alt/Option+Left moves back a word. The readline-style Alt+B alias
+        // that used to live here is deliberately gone: Alt+B now belongs to
+        // the background-task panel and to backgrounding a running tool, and
+        // the user asked for it to be unbound from word-back. Alt+Left still
+        // does it, and Alt+F is untouched since nothing competes for it.
+        KeyCode::Left => {
             app.cursor_pos = app.find_word_boundary_back();
             true
         }
+        // Alt+B when neither the panel nor the backgrounding action claimed
+        // it. It must still be consumed rather than falling through: an
+        // unhandled Alt chord reaches text input and types a literal "b" into
+        // the composer, which is worse than doing nothing. Doing nothing is
+        // correct here, because both real owners already declined.
+        KeyCode::Char('b') => true,
         KeyCode::Right | KeyCode::Char('f') => {
             app.cursor_pos = app.find_word_boundary_forward();
             true
@@ -2073,10 +2083,19 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             paste_from_clipboard(app);
             true
         }
+        // Copy the chat viewport, but only with an empty composer so the
+        // chord cannot clobber text the user is mid-way through writing.
         KeyCode::Char('a') if app.input.is_empty() => {
             app.copy_chat_viewport_context_to_clipboard();
             true
         }
+        // Alt+A with a non-empty composer has no action, but it must still be
+        // consumed: falling through reaches text input and types a literal
+        // "a", which is never what an Alt chord should do. The background
+        // panel also binds Alt+A (session-filter toggle) while focused, so the
+        // chord now has two owners and a third silent behavior would be a
+        // trap.
+        KeyCode::Char('a') => true,
         _ => false,
     }
 }
@@ -2299,6 +2318,46 @@ pub(super) fn handle_pre_control_shortcuts(
     {
         use crate::tui::TuiState as _;
         if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+            return true;
+        }
+    }
+
+    // Background tasks: Alt+B cycles chat → inline controls → full page → chat.
+    //
+    // Alt+B is shared with "move the running tool to the background" (handled
+    // below). That action wins while a tool is actually running: it is the
+    // thing that CREATES background tasks, so shadowing it would break the
+    // feature that fills this panel. The panel therefore only claims Alt+B
+    // when no tool is running, which is exactly when the other action is a
+    // no-op anyway.
+    // Like the swarm panel, the focused view keeps plain typing flowing to the
+    // chat input, so watching a build never blocks writing the next prompt.
+    if app
+        .toggle_keys
+        .background_panel_focus
+        .matches(code, modifiers)
+        && !super::bg_panel_state::background_tool_action_owns_key(app, code, modifiers)
+    {
+        match app.cycle_bg_panel_view() {
+            super::bg_panel_state::BgPanelCycle::NothingToShow => {
+                app.set_status_notice("No background tasks");
+            }
+            super::bg_panel_state::BgPanelCycle::Closed => {
+                app.set_status_notice("Background view closed");
+            }
+            super::bg_panel_state::BgPanelCycle::Opened(
+                super::bg_panel_state::BgPanelView::Controls,
+            ) => {
+                app.set_status_notice(crate::tui::keybind::bg_view_hint("full page"));
+            }
+            super::bg_panel_state::BgPanelCycle::Opened(_) => {
+                app.set_status_notice(crate::tui::keybind::bg_page_hint());
+            }
+        }
+        return true;
+    }
+    {
+        if app.bg_panel_focused() && app.handle_bg_panel_key(code, modifiers) {
             return true;
         }
     }

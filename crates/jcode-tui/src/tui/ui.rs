@@ -2711,6 +2711,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         None
     };
     let swarm_page_active = app.swarm_panel_full_page();
+    let bg_page_active = !swarm_page_active && app.bg_panel_full_page();
 
     // Check diagram display mode and get active diagrams early so we can
     // determine the horizontal split before computing input width etc.
@@ -2724,18 +2725,21 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     let pane_enabled = app.diagram_pane_enabled();
     let pane_position = app.diagram_pane_position();
-    let has_side_panel_content = !swarm_page_active && app.side_panel().focused_page().is_some();
+    let has_side_panel_content =
+        !swarm_page_active && !bg_page_active && app.side_panel().focused_page().is_some();
     let diff_mode = app.diff_mode();
     let collect_diffs = diff_mode.is_pinned();
     // Images now render inline in the transcript, so the side panel only handles
     // pinned file diffs. `pin_images` no longer feeds the side-panel surface.
-    let has_pinned_content = if collect_diffs && !swarm_page_active {
+    let has_pinned_content = if collect_diffs && !swarm_page_active && !bg_page_active {
         collect_pinned_diffs_cached(app.display_messages(), app.display_messages_version())
     } else {
         false
     };
-    let has_file_diff_edits =
-        !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
+    let has_file_diff_edits = !swarm_page_active
+        && !bg_page_active
+        && diff_mode.is_file()
+        && app.has_display_edit_tool_messages();
     let has_right_side_pane_content =
         has_side_panel_content || has_pinned_content || has_file_diff_edits;
     // The side panel is itself a single right-hand auxiliary surface and can render
@@ -2746,6 +2750,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // layouts.
     let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if !swarm_page_active
+        && !bg_page_active
         && diagram_mode == crate::config::DiagramDisplayMode::Pinned
         && pane_enabled
         && !suppress_side_diagram
@@ -2936,7 +2941,50 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         Vec::new()
     };
-    let swarm_strip_height = swarm_strip_lines.len() as u16;
+    // The background-task strip shares the swarm strip's slot in the bottom
+    // chrome. Two independent bands would double the rows that push the
+    // transcript up, so exactly one band owns the slot each frame; the
+    // arbitration itself lives in `bg_gallery::strip_owner` so it is testable.
+    let strip_owner = super::info_widget::bg_gallery::strip_owner(
+        !swarm_strip_lines.is_empty(),
+        app.bg_panel_active(),
+        app.bg_panel_focused(),
+        swarm_page_active || bg_page_active,
+        super::info_widget::bg_strip_stands_down_for_dock(),
+        chat_area.width as usize,
+    );
+    use super::info_widget::bg_gallery::StripOwner;
+
+    let bg_strip_lines: Vec<Line<'static>> = if strip_owner == StripOwner::Background {
+        let focus_key = crate::tui::keybind::bg_panel_focus_key_label();
+        let spinner_frame =
+            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize;
+        // Same budget rule as the swarm strip: never more than a third of the
+        // chat column, so the transcript stays usable on short terminals.
+        let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
+        super::info_widget::bg_gallery::render_bg_strip_lines(
+            &app.bg_panel_tasks(),
+            app.bg_panel_selected(),
+            app.bg_panel_focused(),
+            &focus_key,
+            spinner_frame,
+            chat_area.width as usize,
+            if app.bg_panel_focused() {
+                focused_budget
+            } else {
+                4
+            },
+        )
+    } else {
+        Vec::new()
+    };
+    let swarm_strip_lines: Vec<Line<'static>> = if strip_owner == StripOwner::Swarm {
+        swarm_strip_lines
+    } else {
+        Vec::new()
+    };
+
+    let swarm_strip_height = (swarm_strip_lines.len() + bg_strip_lines.len()) as u16;
 
     // Calculate pending messages (queued + interleave) for numbering and layout
     let pending_count = input_ui::pending_prompt_count(app);
@@ -3120,7 +3168,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // after `clear`: the prompt sits at the top and the history is one scroll
     // away. Scrolling up, new output, or streaming all end the state (see
     // `terminal_clear_collapsed`) and restore the normal layout.
-    let terminal_clear_collapsed = !swarm_page_active && app.terminal_clear_collapsed();
+    let terminal_clear_collapsed =
+        !swarm_page_active && !bg_page_active && app.terminal_clear_collapsed();
     let content_height = if terminal_clear_collapsed {
         0
     } else {
@@ -3129,7 +3178,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = terminal_clear_collapsed
-        || (!swarm_page_active && content_height + fixed_height <= available_height);
+        || (!swarm_page_active
+            && !bg_page_active
+            && content_height + fixed_height <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
@@ -3172,7 +3223,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Draw the inline swarm strip directly above the status line if present.
     if swarm_strip_height > 0 {
         clear_area(frame, chunks[2]);
-        frame.render_widget(Paragraph::new(swarm_strip_lines.clone()), chunks[2]);
+        let strip_lines = if bg_strip_lines.is_empty() {
+            swarm_strip_lines.clone()
+        } else {
+            bg_strip_lines.clone()
+        };
+        frame.render_widget(Paragraph::new(strip_lines), chunks[2]);
     }
 
     // Capture layout info for visual debug
@@ -3278,6 +3334,25 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         let lines = super::info_widget::swarm_gallery::render_swarm_page_lines(
             &members,
             app.swarm_panel_selected(),
+            spinner_frame,
+            messages_area.width as usize,
+            messages_area.height as usize,
+        );
+        clear_area(frame, messages_area);
+        frame.render_widget(Paragraph::new(lines), messages_area);
+        info_widget::Margins {
+            right_widths: Vec::new(),
+            left_widths: Vec::new(),
+            centered: false,
+            ..Default::default()
+        }
+    } else if bg_page_active {
+        let spinner_frame =
+            (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize;
+        let lines = super::info_widget::bg_gallery::render_bg_page_lines(
+            &app.bg_panel_tasks(),
+            app.bg_panel_selected(),
+            app.bg_panel_show_all_sessions(),
             spinner_frame,
             messages_area.width as usize,
             messages_area.height as usize,
