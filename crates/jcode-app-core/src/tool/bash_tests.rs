@@ -142,6 +142,95 @@ fn cargo_wrapper_path_is_shell_quoted() {
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
 }
 
+/// `dev_cargo.sh` derives the repo root from its own path, so a session pinned
+/// to repo A that cds into worktree B must NOT run A's wrapper: that builds and
+/// tests A while the agent believes it verified B. An ambient cycle hit exactly
+/// this and got a green 67-test run whose binary never contained its new test.
+#[test]
+fn cd_into_another_worktree_uses_that_worktrees_wrapper_not_the_sessions() {
+    let root = tempfile::tempdir().expect("root");
+    let make_repo = |name: &str| {
+        let repo = root.path().join(name);
+        let scripts = repo.join("scripts");
+        std::fs::create_dir_all(&scripts).expect("scripts dir");
+        let wrapper = scripts.join("dev_cargo.sh");
+        std::fs::write(&wrapper, format!("#!/bin/sh\necho {name}_WRAPPER \"$@\"\n"))
+            .expect("write wrapper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        repo
+    };
+    let session_repo = make_repo("SESSION");
+    let other_worktree = make_repo("OTHER");
+
+    let command = format!("cd {} && cargo test", other_worktree.display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(session_repo.as_path()))
+        .expect("a repo session must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("OTHER_WRAPPER test"),
+        "cargo must run the wrapper of the directory it is in, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("SESSION_WRAPPER"),
+        "the session's wrapper must not hijack a build in another worktree, got: {stdout}"
+    );
+}
+
+/// A command that never cds still has to work, so the session's wrapper remains
+/// the fallback when `$PWD` is not inside a repo.
+#[test]
+fn a_command_that_never_cds_falls_back_to_the_session_wrapper() {
+    let repo = tempfile::tempdir().expect("repo");
+    // `find_repo_in_ancestors` only recognizes a real jcode checkout, so the
+    // fixture needs the same markers a worktree has.
+    std::fs::create_dir_all(repo.path().join(".git")).expect("git dir");
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("cargo toml");
+    let scripts = repo.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    let wrapper = scripts.join("dev_cargo.sh");
+    std::fs::write(&wrapper, "#!/bin/sh\necho SESSION_WRAPPER \"$@\"\n").expect("write wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+
+    // Run from a directory with no wrapper anywhere above it.
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let command = format!("cd {} && cargo check", elsewhere.path().display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(repo.path()))
+        .expect("a repo session must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SESSION_WRAPPER check"),
+        "with no repo under $PWD the session wrapper must still apply, got: {stdout}"
+    );
+}
+
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),

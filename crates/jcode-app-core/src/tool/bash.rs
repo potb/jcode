@@ -49,36 +49,32 @@ fn shell_single_quote(value: &str) -> String {
 /// shim that looks for the wrapper from `$PWD` at call time. On a machine whose
 /// toolchain lives in a Nix dev shell there is no `cargo` on PATH at all, so
 /// without this such a session cannot compile or test anything it writes.
+///
+/// Resolution is `$PWD`-first in every case. `dev_cargo.sh` derives the repo
+/// root from its OWN path, so pinning the session's wrapper would make
+/// `cd ../other-worktree && cargo test` silently build and test the session's
+/// repo instead: a green run whose binary never contained the change under
+/// test. The session directory is only the fallback for commands that never cd.
 #[cfg(unix)]
 fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option<String> {
     // Deliberately NOT gated on the command mentioning cargo. The whole point
     // of exporting the function is that *child scripts* pick it up too, and
     // `./scripts/build.sh` never mentions cargo in the text jcode sees.
-    let static_wrapper = working_dir
+    let session_wrapper = working_dir
         .and_then(crate::build::find_repo_in_ancestors)
         .map(|repo| repo.join("scripts").join("dev_cargo.sh"))
         .filter(|wrapper| wrapper.is_file());
 
-    if let Some(wrapper) = static_wrapper {
-        return Some(format!(
-            r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
-cargo() {{
-  if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
-    command cargo "$@"
-  else
-    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
-  fi
-}}
-export -f cargo
-{command}"#,
-            wrapper = shell_single_quote(&wrapper.to_string_lossy()),
-        ));
-    }
+    let session_export = match session_wrapper {
+        Some(wrapper) => format!(
+            "export JCODE_DEV_CARGO_SCRIPT={}\n",
+            shell_single_quote(&wrapper.to_string_lossy())
+        ),
+        None => String::new(),
+    };
 
-    // No repo known up front. Resolve per call from wherever the command has
-    // cd'd to, and fall back to the real cargo outside any jcode-style repo.
     Some(format!(
-        r#"cargo() {{
+        r#"{session_export}cargo() {{
   if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
     command cargo "$@"
     return
@@ -91,6 +87,10 @@ export -f cargo
     fi
     __jcode_dir="$(dirname "$__jcode_dir")"
   done
+  if [[ -n "${{JCODE_DEV_CARGO_SCRIPT:-}}" && -x "${{JCODE_DEV_CARGO_SCRIPT}}" ]]; then
+    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
+    return
+  fi
   command cargo "$@"
 }}
 export -f cargo
