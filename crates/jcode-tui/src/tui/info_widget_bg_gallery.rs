@@ -191,6 +191,7 @@ mod tests {
         BgTask {
             id: id.to_string(),
             label: "cargo test".to_string(),
+            command: None,
             tool: "bash".to_string(),
             status: jcode_tui_render::background_gallery::BgStatus::Running,
             exit_code: None,

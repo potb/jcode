@@ -7,6 +7,7 @@ fn sample_task(id: &str) -> BgTask {
     BgTask {
         id: id.to_string(),
         label: "sample".to_string(),
+        command: None,
         tool: "bash".to_string(),
         status: BgStatus::Running,
         exit_code: None,

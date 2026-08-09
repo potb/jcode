@@ -90,6 +90,10 @@ pub struct BgTask {
     pub id: String,
     /// Human label: the command or display name, already collapsed to one line.
     pub label: String,
+    /// Full command line that spawned the task, when the tool recorded one.
+    /// The `label` is often a collapsed display name ("bash", a title), so the
+    /// detail view shows this to answer "what is this task actually running?".
+    pub command: Option<String>,
     /// Tool that spawned it ("bash", "selfdev", ...).
     pub tool: String,
     pub status: BgStatus,
@@ -407,6 +411,28 @@ fn render_task_detail(task: &BgTask, width: usize, budget: usize) -> Vec<Line<'s
     let bar_w = disp_w(BAR);
     let text_budget = width.saturating_sub(bar_w).max(4);
     let mut out: Vec<Line<'static>> = Vec::new();
+
+    // Command line: the task row shows only the collapsed label, which for a
+    // named task ("build", "bash") says nothing about what is running. Skip it
+    // when it would just repeat the label.
+    if let Some(command) = task
+        .command
+        .as_deref()
+        .map(single_line)
+        .filter(|command| !command.trim().is_empty() && command.trim() != task.label.trim())
+    {
+        out.push(Line::from(vec![
+            Span::styled(BAR.to_string(), Style::default().fg(rgb(80, 80, 90))),
+            Span::styled(
+                truncate_label(&command, text_budget),
+                Style::default().fg(rgb(170, 190, 220)),
+            ),
+        ]));
+        if out.len() >= budget {
+            out.truncate(budget);
+            return out;
+        }
+    }
 
     // Meta line: status, exit code, progress or error. Only worth a row when
     // it says something the task row did not.
