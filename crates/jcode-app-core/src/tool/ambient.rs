@@ -1086,7 +1086,11 @@ impl Tool for SendChannelMessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Optional: specific channel to send to (e.g. 'telegram', 'discord'). Omit to send to all."
+                    "description": "Optional: specific channel to send to (e.g. 'telegram', 'discord', 'github'). Omit to send to all. On github this opens a NEW issue per message."
+                },
+                "thread": {
+                    "type": "string",
+                    "description": "Optional: existing thread to reply in instead of starting a new one. For github, the issue number (e.g. '12')."
                 }
             },
             "required": ["message"]
@@ -1100,14 +1104,28 @@ impl Tool for SendChannelMessageTool {
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: message"))?;
 
         let channel_name = args.get("channel").and_then(|v| v.as_str());
+        // Replying in an existing thread is what keeps one topic in one place;
+        // without it every answer would open a fresh issue and the thread the
+        // user is reading would go silent.
+        let thread = args
+            .get("thread")
+            .and_then(|v| v.as_str())
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty());
 
         let config = crate::config::config();
         let registry = crate::channel::ChannelRegistry::from_config(&config.safety);
 
         if let Some(name) = channel_name {
             match registry.find_by_name(name) {
-                Some(ch) => match ch.send(message).await {
-                    Ok(()) => Ok(ToolOutput::new(format!("Message sent via {}.", name))),
+                Some(ch) => match match thread {
+                    Some(t) => ch.send_to_thread(t, message).await,
+                    None => ch.send(message).await,
+                } {
+                    Ok(()) => Ok(ToolOutput::new(match thread {
+                        Some(t) => format!("Message sent via {} in thread {}.", name, t),
+                        None => format!("Message sent via {}.", name),
+                    })),
                     Err(e) => Ok(ToolOutput::new(format!(
                         "Failed to send via {}: {}",
                         name, e
@@ -1144,6 +1162,181 @@ impl Tool for SendChannelMessageTool {
                 "Message sent: {}",
                 results.join(", ")
             )))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHubIssueTool — manage the per-topic issue threads
+// ---------------------------------------------------------------------------
+
+/// Manage the GitHub issues the ambient agent uses as topic threads.
+///
+/// `send_message` opens new topics; this tool is the rest of the lifecycle:
+/// list what is still open, continue a topic, and close it when resolved. Open
+/// issues are only a useful backlog if resolved ones actually get closed.
+pub struct GitHubIssueTool;
+
+impl Default for GitHubIssueTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GitHubIssueTool {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn channel() -> Result<crate::channel::GitHubChannel> {
+        let config = crate::config::config();
+        let safety = &config.safety;
+        if !safety.github_enabled {
+            anyhow::bail!("The GitHub channel is disabled (safety.github_enabled).");
+        }
+        let repo = safety
+            .github_repo
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("safety.github_repo is not set"))?;
+        let token = crate::channel::GitHubChannel::resolve_token(safety.github_token.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!("No GitHub token available (config, GITHUB_TOKEN, or `gh auth`)")
+            })?;
+        Ok(crate::channel::GitHubChannel::new(
+            repo,
+            safety.github_label.clone(),
+            token,
+            safety.github_allowed_logins.clone(),
+            safety.github_reply_enabled,
+            safety.github_poll_seconds,
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for GitHubIssueTool {
+    fn name(&self) -> &str {
+        "github_issue"
+    }
+
+    fn description(&self) -> &str {
+        "List, comment on, open, or close the GitHub issues used as topic threads with the user."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "intent": super::intent_schema_property(),
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "open", "comment", "close"],
+                    "description": "list = open topics; open = new topic issue; comment = continue a topic; close = mark a topic resolved"
+                },
+                "issue": {
+                    "type": "integer",
+                    "description": "Issue number, required for comment and close"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title for action=open. Defaults to the first line of body."
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Issue body for action=open, or the comment text for action=comment"
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Optional closing comment posted before closing, for action=close"
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, args: Value, _context: ToolContext) -> Result<ToolOutput> {
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list")
+            .to_lowercase();
+
+        let channel = match Self::channel() {
+            Ok(c) => c,
+            Err(e) => return Ok(ToolOutput::new(e.to_string())),
+        };
+
+        let issue_num = args.get("issue").and_then(|v| v.as_u64());
+        let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+        match action.as_str() {
+            "list" => match channel.list_open_topics().await {
+                Ok(items) if items.is_empty() => {
+                    Ok(ToolOutput::new("No open topic issues.".to_string()))
+                }
+                Ok(items) => {
+                    let lines: Vec<String> = items
+                        .iter()
+                        .map(|(n, t)| format!("#{} {}", n, t))
+                        .collect();
+                    Ok(ToolOutput::new(format!(
+                        "Open topics:\n{}",
+                        lines.join("\n")
+                    )))
+                }
+                Err(e) => Ok(ToolOutput::new(format!("Failed to list issues: {}", e))),
+            },
+            "open" => {
+                if body.trim().is_empty() {
+                    return Ok(ToolOutput::new("action=open requires body".to_string()));
+                }
+                let (derived_title, derived_body) = crate::channel::split_title_body(body);
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or(derived_title);
+                match channel.open_issue(&title, &derived_body).await {
+                    Ok(n) => Ok(ToolOutput::new(format!("Opened issue #{}.", n))),
+                    Err(e) => Ok(ToolOutput::new(format!("Failed to open issue: {}", e))),
+                }
+            }
+            "comment" => {
+                let Some(n) = issue_num else {
+                    return Ok(ToolOutput::new("action=comment requires issue".to_string()));
+                };
+                if body.trim().is_empty() {
+                    return Ok(ToolOutput::new("action=comment requires body".to_string()));
+                }
+                match channel.comment(n, body).await {
+                    Ok(()) => Ok(ToolOutput::new(format!("Commented on #{}.", n))),
+                    Err(e) => Ok(ToolOutput::new(format!("Failed to comment: {}", e))),
+                }
+            }
+            "close" => {
+                let Some(n) = issue_num else {
+                    return Ok(ToolOutput::new("action=close requires issue".to_string()));
+                };
+                // Close with a reason where one was given: an issue that just
+                // goes quiet tells the user nothing about how it ended.
+                if let Some(c) = args
+                    .get("comment")
+                    .and_then(|v| v.as_str())
+                    .filter(|c| !c.trim().is_empty())
+                    && let Err(e) = channel.comment(n, c).await
+                {
+                    return Ok(ToolOutput::new(format!("Failed to post closing comment: {}", e)));
+                }
+                match channel.close_issue(n).await {
+                    Ok(()) => Ok(ToolOutput::new(format!("Closed #{}.", n))),
+                    Err(e) => Ok(ToolOutput::new(format!("Failed to close: {}", e))),
+                }
+            }
+            other => Ok(ToolOutput::new(format!(
+                "Unknown action '{}'. Use list, open, comment, or close.",
+                other
+            ))),
         }
     }
 }

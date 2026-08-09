@@ -1458,6 +1458,39 @@ pub struct SafetyConfig {
     pub discord_bot_user_id: Option<String>,
     /// Enable Discord reply → agent directive feature (default: false)
     pub discord_reply_enabled: bool,
+    /// Enable the GitHub issue channel (default: false).
+    ///
+    /// Notifications are posted as comments on a single tracking issue, and
+    /// your replies on that issue come back as agent directives. Unlike a chat
+    /// bot this needs no extra service: GitHub already authenticates you, and
+    /// an issue on a private repo (or with comments limited to collaborators)
+    /// is only readable and writable by people you have already trusted.
+    #[serde(default)]
+    pub github_enabled: bool,
+    /// Repository the tracking issue lives in, as `owner/repo`.
+    #[serde(default)]
+    pub github_repo: Option<String>,
+    /// Label applied to every issue this channel opens, and the filter used
+    /// when reading replies.
+    ///
+    /// Without it a reply-polling agent would treat every comment in the repo
+    /// as an instruction, including on issues opened by other people.
+    #[serde(default = "default_github_label")]
+    pub github_label: String,
+    /// GitHub token (prefer the `GITHUB_TOKEN`/`GH_TOKEN` env var, or leave
+    /// unset to reuse the `gh` CLI's stored credentials).
+    #[serde(default)]
+    pub github_token: Option<String>,
+    /// Only accept directives from these logins. Empty means accept any
+    /// comment author except the account the agent posts as.
+    #[serde(default)]
+    pub github_allowed_logins: Vec<String>,
+    /// Enable GitHub issue comment → agent directive feature (default: false)
+    #[serde(default)]
+    pub github_reply_enabled: bool,
+    /// Seconds between issue comment polls (default: 60).
+    #[serde(default = "default_github_poll_seconds")]
+    pub github_poll_seconds: u64,
     /// Enable the Jade cloud relay channel (remote control via cloud mailbox, default: false)
     pub jade_relay_enabled: bool,
     /// Jade relay API base URL (e.g. https://...lambda-url.us-east-1.on.aws/)
@@ -1476,6 +1509,14 @@ pub struct SafetyConfig {
     pub jade_relay_launch_enabled: bool,
     /// Default working directory for remotely launched headed sessions
     pub jade_relay_launch_working_dir: Option<String>,
+}
+
+fn default_github_label() -> String {
+    "ambient".to_string()
+}
+
+fn default_github_poll_seconds() -> u64 {
+    60
 }
 
 impl Default for SafetyConfig {
@@ -1503,6 +1544,13 @@ impl Default for SafetyConfig {
             discord_channel_id: None,
             discord_bot_user_id: None,
             discord_reply_enabled: false,
+            github_enabled: false,
+            github_repo: None,
+            github_label: default_github_label(),
+            github_token: None,
+            github_allowed_logins: Vec::new(),
+            github_reply_enabled: false,
+            github_poll_seconds: default_github_poll_seconds(),
             jade_relay_enabled: false,
             jade_relay_api_base: None,
             jade_relay_token: None,

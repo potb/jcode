@@ -701,6 +701,19 @@ desktop_notifications = true
 # discord_bot_user_id = ""   # Bot's user ID (for filtering own messages)
 # discord_reply_enabled = false  # Messages in channel become agent directives
 
+# GitHub issue channel: ambient opens one issue per topic, your replies on those
+# issues come back as directives, and closing an issue marks that topic settled.
+# It needs no separate bot or hosted service to be reachable from a phone, and
+# access is whoever can comment (use github_allowed_logins on a public repo).
+# The token falls back to GITHUB_TOKEN/GH_TOKEN, then to the `gh` CLI login.
+# github_enabled = false
+# github_repo = "owner/repo"
+# github_label = "ambient"        # Label on issues the agent opens and reads
+# github_token = ""                # Prefer JCODE_GITHUB_TOKEN / gh auth token
+# github_allowed_logins = []       # Empty = anyone but the posting account
+# github_reply_enabled = false     # Issue comments become agent directives
+# github_poll_seconds = 60
+
 # Jade cloud relay (outbound-only long polling, disabled by default).
 # Prefer environment variables for secrets:
 # JCODE_JADE_RELAY_API_BASE, JCODE_JADE_RELAY_TOKEN, JCODE_JADE_RELAY_TOKEN_ID,

@@ -1169,6 +1169,12 @@ impl Registry {
             Arc::new(ambient::SendChannelMessageTool::new()) as Arc<dyn Tool>,
         )
         .await;
+
+        self.register(
+            "github_issue".to_string(),
+            Arc::new(ambient::GitHubIssueTool::new()) as Arc<dyn Tool>,
+        )
+        .await;
     }
 
     /// Unregister a tool

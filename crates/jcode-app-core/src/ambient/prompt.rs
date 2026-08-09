@@ -780,6 +780,44 @@ pub fn build_ambient_system_prompt(
          (e.g. telegram, discord) or omit channel to send to all.\n",
     );
 
+    // The user is frequently away from the machine but can always reach
+    // GitHub, so issues are the one reply path that works from a phone and is
+    // still restricted to people who can comment on the repo.
+    let safety = &crate::config::config().safety;
+    if safety.github_enabled
+        && let Some(repo) = safety.github_repo.clone()
+    {
+        let label = safety.github_label.clone();
+        prompt.push_str(&format!(
+            "\n## GitHub Issues\n\n\
+             The user is often away from this machine but can always reach \
+             GitHub. `{repo}` is where you talk to them: `send_message` with \
+             channel `github` OPENS A NEW ISSUE labelled `{label}`, one per \
+             topic, and their comments on those issues arrive as directives on \
+             your next cycle, tagged `[github#N message from user]`.\n\n\
+             Because each topic is its own issue, treat it as a unit of work \
+             with a lifecycle:\n\
+             - One issue per distinct question, decision or piece of work. Do \
+             not pile unrelated things into one thread, and do not open a new \
+             issue for something that already has one.\n\
+             - The first line of your message becomes the issue title, so make \
+             it a specific, readable summary.\n\
+             - Continue an existing topic with `github_issue` \
+             (action=\"comment\", issue=N) rather than opening a duplicate.\n\
+             - When a topic is resolved, CLOSE it with `github_issue` \
+             (action=\"close\", issue=N, comment=\"<what the outcome was>\"). \
+             An open issue means unfinished business, so leaving settled ones \
+             open makes the list useless. Only the user closes an issue that \
+             was waiting on their decision.\n\
+             - `github_issue` (action=\"list\") shows the open topics. Check it \
+             each cycle: open issues are your backlog, not a notification log.\n\n\
+             Raising a question there does NOT license you to stop. Open the \
+             issue, state the assumption you are proceeding on, and continue \
+             the work in the same cycle. Their answer is a correction to apply \
+             later, never a gate to wait behind.\n"
+        ));
+    }
+
     // Name the exact repo PRs must target. Left implicit, `gh pr create`
     // defaults to the UPSTREAM of a fork and fails with a permissions error,
     // which is how a cycle's work ended up stranded on a pushed branch the
@@ -838,6 +876,13 @@ pub fn build_ambient_system_prompt(
              `request_permission` call is approved immediately and never reaches \
              a human. Do not use it as a safety net or a way to defer a decision: \
              nobody is on the other end. Prefer just doing the work.\n\n\
+             Never park work in an \"awaiting approval\" or \"waiting for the \
+             user\" state, and never carry such an item across cycles. There is \
+             no human in the loop between cycles, so a task that waits is a task \
+             that never happens. When the user has asked for something, execute \
+             it in the cycle you pick it up: decide, do it, and report the result. \
+             If you are unsure between two reasonable options, pick the safer one \
+             and say which you picked rather than asking and stopping.\n\n\
              This makes your own judgment the only real check. Stay inside the \
              scope of the initiative or task you were given, keep changes on \
              branches with PRs, and never take an action that would be hard to \
