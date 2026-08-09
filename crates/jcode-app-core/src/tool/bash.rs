@@ -51,13 +51,9 @@ fn shell_single_quote(value: &str) -> String {
 /// without this such a session cannot compile or test anything it writes.
 #[cfg(unix)]
 fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option<String> {
-    // Only rewrite commands that actually mention cargo: prepending a shell
-    // function to every command would be noise, and would change the shape of
-    // unrelated command output.
-    if !command.contains("cargo") {
-        return None;
-    }
-
+    // Deliberately NOT gated on the command mentioning cargo. The whole point
+    // of exporting the function is that *child scripts* pick it up too, and
+    // `./scripts/build.sh` never mentions cargo in the text jcode sees.
     let static_wrapper = working_dir
         .and_then(crate::build::find_repo_in_ancestors)
         .map(|repo| repo.join("scripts").join("dev_cargo.sh"))

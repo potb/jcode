@@ -26,9 +26,54 @@ fn repository_commands_export_a_logged_cargo_function() {
 
 #[test]
 fn cargo_routing_is_limited_to_the_jcode_repository() {
-    // Commands with no cargo in them are never rewritten, wherever they run.
-    assert!(wrap_repo_cargo_commands("echo hi", Some(std::path::Path::new("/"))).is_none());
-    assert!(wrap_repo_cargo_commands("echo hi", None).is_none());
+    // Outside a wrapper-bearing repo the shim still installs, because the
+    // command may cd into one; what matters is that it degrades to real cargo.
+    let outside = wrap_repo_cargo_commands("cargo test", Some(std::path::Path::new("/")))
+        .expect("shim installs even outside a known repo");
+    assert!(outside.contains("command cargo \"$@\""));
+}
+
+/// The exported function exists so *child scripts* route through the wrapper
+/// too. Gating installation on the command text mentioning cargo would silently
+/// break `./scripts/build.sh`, whose cargo call jcode never sees.
+#[test]
+fn a_child_script_that_calls_cargo_still_routes_through_the_wrapper() {
+    let repo = tempfile::tempdir().expect("repo");
+    let scripts = repo.path().join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts dir");
+    std::fs::write(
+        scripts.join("dev_cargo.sh"),
+        "#!/bin/sh\necho WRAPPER_RAN \"$@\"\n",
+    )
+    .expect("write wrapper");
+    let child = repo.path().join("build.sh");
+    std::fs::write(&child, "#!/usr/bin/env bash\ncargo build --from-script\n")
+        .expect("write child script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [scripts.join("dev_cargo.sh"), child.clone()] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+    }
+
+    // The command text mentions no cargo at all.
+    let command = format!("cd {} && ./build.sh", repo.path().display());
+    let wrapped = wrap_repo_cargo_commands(&command, Some(repo.path()))
+        .expect("a repo command must be wrapped");
+
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .env_remove("JCODE_IN_DEV_CARGO")
+        .output()
+        .expect("run wrapped command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WRAPPER_RAN build --from-script"),
+        "a child script's cargo call must route through the wrapper, got: {stdout}"
+    );
 }
 
 /// A session with no working directory (an ambient cycle) must still be able to
