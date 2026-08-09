@@ -4,6 +4,7 @@ fn task(id: &str, label: &str, status: BgStatus) -> BgTask {
     BgTask {
         id: id.to_string(),
         label: label.to_string(),
+        command: None,
         tool: "bash".to_string(),
         status,
         exit_code: None,
@@ -440,4 +441,47 @@ fn the_strip_draws_nothing_into_degenerate_geometry() {
             );
         }
     }
+}
+
+#[test]
+fn focused_detail_shows_the_command_behind_a_collapsed_label() {
+    // The task row shows only "build", which does not say what is running.
+    let mut tasks = vec![task("111111aaaa", "build", BgStatus::Running)];
+    tasks[0].command = Some("cargo build --release -p jcode-tui".to_string());
+
+    let lines = render_bg_strip(&tasks, 0, true, &hints(), None, 0, 80, 4, 10);
+    let out = text(&lines);
+    assert!(
+        out.contains("cargo build --release -p jcode-tui"),
+        "command not surfaced: {out}"
+    );
+    // It belongs under the row it describes, not above it.
+    let row = out.find("111111aaaa").expect("task row");
+    let cmd = out.find("cargo build").expect("command line");
+    assert!(row < cmd, "command must render under its row: {out}");
+}
+
+#[test]
+fn command_line_is_omitted_when_it_only_repeats_the_label() {
+    let mut tasks = vec![task("111111aaaa", "cargo test", BgStatus::Running)];
+    tasks[0].command = Some("cargo test".to_string());
+    let lines = render_bg_strip(&tasks, 0, true, &hints(), None, 0, 80, 4, 10);
+    let out = text(&lines);
+    assert_eq!(
+        out.matches("cargo test").count(),
+        1,
+        "duplicate command line wastes a row: {out}"
+    );
+}
+
+#[test]
+fn multiline_command_is_collapsed_to_one_row() {
+    let mut tasks = vec![task("111111aaaa", "build", BgStatus::Running)];
+    tasks[0].command = Some("set -e\nmake all".to_string());
+    let lines = render_bg_strip(&tasks, 0, true, &hints(), None, 0, 80, 4, 10);
+    for line in &lines {
+        let content: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!content.contains('\n'), "embedded newline breaks layout");
+    }
+    assert!(text(&lines).contains("set -e"), "{}", text(&lines));
 }

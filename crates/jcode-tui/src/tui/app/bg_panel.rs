@@ -108,6 +108,7 @@ fn to_bg_task(
     BgTask {
         id: status.task_id.clone(),
         label,
+        command: status.command.clone(),
         tool: status.tool_name.clone(),
         status: mapped,
         exit_code: status.exit_code,
