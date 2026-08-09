@@ -206,10 +206,16 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     // is a complete bypass.
     let mut tokens = tokens;
     let mut wrapped_by: Option<String> = None;
+    // `env` with no assignments and no program is just a read-only dump of the
+    // environment (`env | grep FOO`), not a hidden command. Only treat a
+    // vanished payload as suspicious when the wrapper actually carried one.
+    let mut wrapper_carried_assignment = false;
     loop {
         let Some(first) = tokens.first() else {
             // Ran off the end while unwrapping: the payload is invisible.
-            if let Some(wrapper) = wrapped_by {
+            if let Some(wrapper) =
+            wrapped_by.filter(|w| w != "env" || wrapper_carried_assignment)
+        {
                 findings.push(RiskFinding {
                     level: RiskLevel::Confirm,
                     reason: format!(
@@ -234,6 +240,9 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         while idx < rest.len() {
             let token = &rest[idx];
             if token.is_operator || token.text.contains('=') {
+                if !token.is_operator {
+                    wrapper_carried_assignment = true;
+                }
                 idx += 1;
                 continue;
             }
@@ -258,7 +267,9 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
 
     let Some(program) = tokens.first() else {
         // A wrapper with nothing recognizable after it hides its payload.
-        if let Some(wrapper) = wrapped_by {
+        if let Some(wrapper) =
+            wrapped_by.filter(|w| w != "env" || wrapper_carried_assignment)
+        {
             findings.push(RiskFinding {
                 level: RiskLevel::Confirm,
                 reason: format!(

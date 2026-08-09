@@ -467,3 +467,15 @@ fn redirection_into_real_files_is_still_assessed() {
     // And a destructive verb is unaffected by trailing redirection.
     assert_eq!(level("rm -rf ~ 2>/dev/null"), RiskLevel::Catastrophic);
 }
+
+/// `env | grep FOO` is a read-only dump of the environment, not a hidden
+/// command, so it must not be held for justification. `env FOO=bar` with a
+/// vanished payload still is suspicious.
+#[test]
+fn bare_env_is_not_a_hidden_command() {
+    let ctx = ctx();
+    assert_eq!(level("env", &ctx), RiskLevel::Safe);
+    assert_eq!(level("env | grep PATH", &ctx), RiskLevel::Safe);
+    assert_eq!(level("env FOO=bar", &ctx), RiskLevel::Confirm);
+    assert_eq!(level("env rm -rf ~", &ctx), RiskLevel::Catastrophic);
+}
