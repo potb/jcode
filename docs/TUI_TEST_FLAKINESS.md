@@ -1,7 +1,12 @@
 # jcode-tui test flakiness: root cause
 
-`cargo test -p jcode-tui --lib` fails 1-4 tests per run, with a varying set.
-This is a parallelism race on process-global state, not a logic bug.
+**Status: the root cause below is fixed. See "What was fixed" for the current
+shape of the code, and "Still open" for what remains.** The diagnosis is kept
+because the same failure mode recurs whenever a test reaches for a process
+global.
+
+`cargo test -p jcode-tui --lib` failed 1-4 tests per run, with a varying set.
+This was a parallelism race on process-global state, not a logic bug.
 
 ## Evidence
 
@@ -27,8 +32,8 @@ That wipes **process-global** render state: the flicker frame history, layout
 snapshots, status-area snapshots, copy targets, and scroll positions.
 
 Rendering tests guard exactly that state with `render_state_test_lock()`. But
-`create_test_app` clears it *without* taking the lock, so any of its ~810 call
-sites can reset a concurrently-running render test's state mid-assertion.
+`create_test_app` cleared it *without* taking the lock, so any of its ~810 call
+sites could reset a concurrently-running render test's state mid-assertion.
 
 The mechanism for the most frequent victim
 (`test_changelog_overlay_repeated_renders_are_stable`) is documented in
@@ -55,20 +60,57 @@ minutes. Measured, then reverted.
 at the top of that test. Both measured over 5 runs: the test still failed 5/5
 with *and* without the change. Reverted rather than committed as churn.
 
-## Suggested direction
+## What was fixed
 
-The real fix is to stop sharing this state across tests rather than to
-serialize access to it:
+The state described above is historical: the shared state was removed rather
+than serialized. As of `99b0a8adb`:
 
-1. Make the render state thread-local rather than process-global, so parallel
-   tests cannot observe each other's resets. Production has one render thread,
-   so this should not change runtime behavior.
-2. Failing that, have `create_test_app` skip the render-state clear entirely.
-   Only rendering tests depend on it, and they already clear it under the lock.
-   This needs an audit of which app tests implicitly rely on the current clear.
+1. **The flicker history is thread-local under `cfg(test)`.**
+   `flicker_frame_history()` in `crates/jcode-tui/src/tui/ui_frame_metrics.rs`
+   returns a per-thread `Box::leak`ed `Mutex` when compiled for tests, and the
+   process-global `OnceLock` otherwise. Production still has one render thread,
+   so runtime behavior is unchanged. This removes the shared mutable state
+   instead of adding coordination around it.
 
-Option 1 is preferred: it removes the shared mutable state instead of adding
-coordination around it.
+2. **The remaining render globals are guarded reentrantly.**
+   `clear_test_render_state_for_tests` (`ui.rs`) routes through
+   `with_render_state_lock`, which takes `render_state_test_lock()` only if the
+   current thread does not already hold it. Ownership is tracked in the
+   `RENDER_STATE_LOCK_HELD` thread-local set by `RenderStateTestGuard`, so
+   nested calls become no-ops rather than blocking. That is what makes the
+   clear safe from `create_test_app`'s ~900 call sites.
+
+The deadlock hazard is real and is documented at both sites. `create_test_app`
+must **not** take `render_state_test_lock()` explicitly: the mutex is not
+reentrant, and tests that hold the lock and then build an app (the
+pinned-todo-band render test, for one) hung the CI TUI step at its 35-minute
+job timeout.
+
+The sibling env-var problem got the same treatment:
+`ensure_test_jcode_home_if_unset` (`tests/support_failover/part_01.rs`)
+serializes the unset-to-set transition with a `try_lock` on the env lock,
+degrading to unserialized rather than deadlocking when a caller already holds
+it.
+
+## Still open
+
+Test isolation is better, not finished. `JCODE_HOME` is a process-global env
+var, and the older per-PID home in `app/remote_tests.rs:61`
+(`temp_dir()/jcode-test-home-<pid>`) is shared by every test in the process
+while concurrent temp-home tests may delete it. Tests that mutate the
+environment should hold `lock_test_env()` across the whole
+save-mutate-restore window, not just part of it; fixes have landed along
+exactly those lines (`a34162559`, `f0edf6294`, `6e961bf6b`, `6d8633503`).
+
+Two caveats for anyone chasing a residual flake here:
+
+- **Do not assume `JCODE_HOME` is the cause.** Pinning one stable `JCODE_HOME`
+  for a whole run was measured and made failures *worse* (1-3 per run,
+  spreading into unrelated suites): a shared home introduces its own cross-test
+  contamination.
+- **Confirm the reproduction first.** Some tests named in passing failure
+  output do not reproduce over repeated full parallel runs, and wrapping those
+  in a temp-home helper fixes nothing.
 
 ## Scope note
 
