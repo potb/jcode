@@ -42,17 +42,30 @@ fn shell_single_quote(value: &str) -> String {
 /// Route ordinary `cargo` invocations (including those inside child scripts)
 /// through the repository wrapper. Besides applying the project's build policy,
 /// that wrapper appends real action timings to rust-actions.jsonl.
+///
+/// The repo is resolved from the session working directory when there is one.
+/// Sessions without a working directory (notably ambient cycles) still need to
+/// build: they `cd` into a repo inside the command itself, so fall back to a
+/// shim that looks for the wrapper from `$PWD` at call time. On a machine whose
+/// toolchain lives in a Nix dev shell there is no `cargo` on PATH at all, so
+/// without this such a session cannot compile or test anything it writes.
 #[cfg(unix)]
 fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option<String> {
-    let working_dir = working_dir?;
-    let repo = crate::build::find_repo_in_ancestors(working_dir)?;
-    let wrapper = repo.join("scripts").join("dev_cargo.sh");
-    if !wrapper.is_file() {
+    // Only rewrite commands that actually mention cargo: prepending a shell
+    // function to every command would be noise, and would change the shape of
+    // unrelated command output.
+    if !command.contains("cargo") {
         return None;
     }
 
-    Some(format!(
-        r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
+    let static_wrapper = working_dir
+        .and_then(crate::build::find_repo_in_ancestors)
+        .map(|repo| repo.join("scripts").join("dev_cargo.sh"))
+        .filter(|wrapper| wrapper.is_file());
+
+    if let Some(wrapper) = static_wrapper {
+        return Some(format!(
+            r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
 cargo() {{
   if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
     command cargo "$@"
@@ -62,7 +75,30 @@ cargo() {{
 }}
 export -f cargo
 {command}"#,
-        wrapper = shell_single_quote(&wrapper.to_string_lossy()),
+            wrapper = shell_single_quote(&wrapper.to_string_lossy()),
+        ));
+    }
+
+    // No repo known up front. Resolve per call from wherever the command has
+    // cd'd to, and fall back to the real cargo outside any jcode-style repo.
+    Some(format!(
+        r#"cargo() {{
+  if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
+    command cargo "$@"
+    return
+  fi
+  local __jcode_dir="$PWD"
+  while [[ -n "$__jcode_dir" && "$__jcode_dir" != "/" ]]; do
+    if [[ -x "$__jcode_dir/scripts/dev_cargo.sh" ]]; then
+      JCODE_IN_DEV_CARGO=1 "$__jcode_dir/scripts/dev_cargo.sh" "$@"
+      return
+    fi
+    __jcode_dir="$(dirname "$__jcode_dir")"
+  done
+  command cargo "$@"
+}}
+export -f cargo
+{command}"#
     ))
 }
 
