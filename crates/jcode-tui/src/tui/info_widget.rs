@@ -6,6 +6,8 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 use super::color_support::rgb;
+#[path = "info_widget_bg_gallery.rs"]
+pub(crate) mod bg_gallery;
 #[path = "info_widget_git.rs"]
 mod git;
 #[path = "info_widget_graph.rs"]
@@ -282,6 +284,11 @@ pub struct BackgroundInfo {
     pub running_count: usize,
     /// Names of running tasks (e.g., "bash", "task")
     pub running_tasks: Vec<String>,
+    /// Task ids parallel to `running_tasks`, so the widget can tell the user
+    /// which task to look for in the background panel. May be shorter than
+    /// `running_tasks` when a
+    /// producer does not have ids available.
+    pub running_task_ids: Vec<String>,
     /// Compact summary of the most recent task progress
     pub progress_summary: Option<String>,
     /// Detailed display for the most recent task progress
@@ -886,6 +893,7 @@ struct WidgetsState {
     /// of popping back for a few frames (which resizes the bottom chrome and
     /// bounces the transcript).
     swarm_dock_last_engaged: Option<Instant>,
+    bg_dock_last_engaged: Option<Instant>,
 }
 
 impl Default for WidgetsState {
@@ -898,6 +906,7 @@ impl Default for WidgetsState {
             settlement: super::info_widget_settle::SettlementTracker::default(),
             anchors_area_width: 0,
             swarm_dock_last_engaged: None,
+            bg_dock_last_engaged: None,
         }
     }
 }
@@ -990,6 +999,9 @@ pub fn calculate_placements(
     if swarm_dock_engaged(state) {
         state.swarm_dock_last_engaged = Some(Instant::now());
     }
+    if bg_dock_engaged(state) {
+        state.bg_dock_last_engaged = Some(Instant::now());
+    }
     outcome.visible
 }
 
@@ -1016,6 +1028,41 @@ fn swarm_dock_engaged(state: &WidgetsState) -> bool {
                 .anchors
                 .iter()
                 .any(|a| a.placement.kind == WidgetKind::SwarmStatus))
+}
+
+/// Whether the BackgroundTasks dock widget is engaged: either actually placed,
+/// or hidden-in-place behind a live anchor. Mirrors [`swarm_dock_engaged`].
+fn bg_dock_engaged(state: &WidgetsState) -> bool {
+    state.enabled
+        && (state
+            .placements
+            .iter()
+            .any(|p| p.kind == WidgetKind::BackgroundTasks)
+            || state
+                .anchors
+                .iter()
+                .any(|a| a.placement.kind == WidgetKind::BackgroundTasks))
+}
+
+/// Whether the inline background-task strip should stand down because the
+/// BackgroundTasks dock widget (margin HUD) is showing - or was very recently
+/// showing - the same tasks.
+///
+/// Same reasoning as [`swarm_strip_stands_down_for_dock`]: each strip
+/// appearance adds rows to the bottom chrome and shoves the transcript up, so
+/// reacting to the dock's frame-to-frame placement churn would turn it into
+/// visible flicker. The linger debounces disengagement.
+pub(crate) fn bg_strip_stands_down_for_dock() -> bool {
+    let guard = get_or_init_state();
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+    if bg_dock_engaged(state) {
+        return true;
+    }
+    state
+        .bg_dock_last_engaged
+        .is_some_and(|at| at.elapsed() < SWARM_STRIP_STAND_DOWN_LINGER)
 }
 
 /// Whether the inline swarm strip (above the status line) should stand down
@@ -1053,6 +1100,7 @@ pub(crate) fn note_widget_pass_skipped() {
         state.placements.clear();
         state.anchors.clear();
         state.swarm_dock_last_engaged = None;
+        state.bg_dock_last_engaged = None;
     }
 }
 
@@ -1060,6 +1108,26 @@ pub(crate) fn note_widget_pass_skipped() {
 /// assert on placement-dependent behavior (e.g. the swarm strip standing down
 /// while the dock is visible) call this so state from earlier tests in the
 /// same process cannot leak into their frame.
+/// Pretend the BackgroundTasks dock engaged `age` ago, to drive the
+/// stand-down linger without waiting out real time.
+#[cfg(test)]
+pub(crate) fn set_bg_dock_engaged_age_for_tests(age: Option<Duration>) {
+    let mut guard = get_or_init_state();
+    if let Some(state) = guard.as_mut() {
+        state.bg_dock_last_engaged = age.map(|age| {
+            Instant::now()
+                .checked_sub(age)
+                .expect("test age within Instant range")
+        });
+    }
+}
+
+/// The stand-down linger, exposed so tests can bracket it precisely.
+#[cfg(test)]
+pub(crate) const fn bg_dock_stand_down_linger() -> Duration {
+    SWARM_STRIP_STAND_DOWN_LINGER
+}
+
 #[cfg(test)]
 pub(crate) fn clear_widget_placements_for_tests() {
     let mut guard = get_or_init_state();
@@ -1067,6 +1135,7 @@ pub(crate) fn clear_widget_placements_for_tests() {
         state.placements.clear();
         state.anchors.clear();
         state.swarm_dock_last_engaged = None;
+        state.bg_dock_last_engaged = None;
     }
 }
 

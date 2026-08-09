@@ -297,6 +297,24 @@ async fn execute_tester_subcommand(
             Some(raw) => format!("mermaid:ui-bench:{}", raw),
             None => "mermaid:ui-bench".to_string(),
         },
+        // Escape hatch: forward an arbitrary client debug command verbatim.
+        //
+        // Every other arm here is an explicit alias, so any client command not
+        // on this list is simply unreachable from a tester, even though the
+        // TUI understands it. That gap is invisible until you need one: the
+        // background-panel work could not drive `swarm-gallery:<n>` (the
+        // synthetic swarm-member injector) to test how the background strip
+        // and the swarm strip share their layout slot, purely because no alias
+        // existed. `raw` keeps the curated names for common operations while
+        // making the rest reachable.
+        "raw" => match arg {
+            Some(raw) if !raw.trim().is_empty() => raw.to_string(),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "tester:<id>:raw needs a command, e.g. tester:<id>:raw:swarm-gallery:2"
+                ));
+            }
+        },
         "stop" => {
             if let Some(pid) = tester.get("pid").and_then(|v| v.as_u64()) {
                 let _ = std::process::Command::new("kill")

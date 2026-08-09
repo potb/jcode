@@ -1550,8 +1550,50 @@ fn background_widget_handles_empty_and_large_task_lists() {
     let _ = super::render_background_widget(&data, Rect::new(0, 0, 0, 0));
 }
 
+/// The widget used to render bare tool labels ("bash", "bash"), which told a
+/// user that something was running but gave them no handle to look it up.
+/// Rows lead with the task id so it can be matched against the background
+/// panel (Alt+B), which shows the same ids.
+#[test]
+fn background_widget_rows_lead_with_task_ids() {
+    let info = BackgroundInfo {
+        running_count: 2,
+        running_tasks: vec!["cargo test".to_string(), "train.py".to_string()],
+        running_task_ids: vec!["123456abcd".to_string(), "654321dcba".to_string()],
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        background_info: Some(info),
+        ..Default::default()
+    };
+    let text = lines_text(&super::render_background_widget(
+        &data,
+        Rect::new(0, 0, 60, 6),
+    ));
+    assert!(text.contains("123456abcd"), "got: {text}");
+    assert!(text.contains("654321dcba"), "got: {text}");
+
+    // Missing ids (older producers) must not panic or shift labels.
+    let info = BackgroundInfo {
+        running_count: 1,
+        running_tasks: vec!["cargo test".to_string()],
+        running_task_ids: Vec::new(),
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        background_info: Some(info),
+        ..Default::default()
+    };
+    let text = lines_text(&super::render_background_widget(
+        &data,
+        Rect::new(0, 0, 60, 6),
+    ));
+    assert!(text.contains("cargo test"), "got: {text}");
+}
+
 #[test]
 fn background_widget_and_compact_share_summary_format() {
+    // (see also `background_widget_rows_lead_with_task_ids` below)
     let info = BackgroundInfo {
         running_count: 4,
         running_tasks: vec![
@@ -1560,6 +1602,7 @@ fn background_widget_and_compact_share_summary_format() {
             "cargo test".to_string(),
             "download".to_string(),
         ],
+        running_task_ids: Vec::new(),
         progress_summary: Some("selfdev build".to_string()),
         progress_detail: Some("[#####-------] 42% · Building (parsed)".to_string()),
         memory_agent_active: false,

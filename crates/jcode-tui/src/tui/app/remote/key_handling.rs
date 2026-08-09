@@ -418,6 +418,45 @@ async fn handle_remote_key_internal(
             return Ok(());
         }
     }
+
+    // Background tasks: Alt+B cycles chat → inline controls → full page → chat.
+    //
+    // Alt+B is shared with "move the running tool to the background" (handled
+    // below). That action wins while a tool is actually running: it is the
+    // thing that CREATES background tasks, so shadowing it would break the
+    // feature that fills this panel. The panel therefore only claims Alt+B
+    // when no tool is running, which is exactly when the other action is a
+    // no-op anyway.
+    // Mirrors the local path so a remote client behaves identically.
+    if app
+        .toggle_keys
+        .background_panel_focus
+        .matches(code, modifiers)
+        && !app_mod::bg_panel_state::background_tool_action_owns_key(app, code, modifiers)
+    {
+        match app.cycle_bg_panel_view() {
+            app_mod::bg_panel_state::BgPanelCycle::NothingToShow => {
+                app.set_status_notice("No background tasks");
+            }
+            app_mod::bg_panel_state::BgPanelCycle::Closed => {
+                app.set_status_notice("Background view closed");
+            }
+            app_mod::bg_panel_state::BgPanelCycle::Opened(
+                app_mod::bg_panel_state::BgPanelView::Controls,
+            ) => {
+                app.set_status_notice(crate::tui::keybind::bg_view_hint("full page"));
+            }
+            app_mod::bg_panel_state::BgPanelCycle::Opened(_) => {
+                app.set_status_notice(crate::tui::keybind::bg_page_hint());
+            }
+        }
+        return Ok(());
+    }
+    {
+        if app.bg_panel_focused() && app.handle_bg_panel_key(code, modifiers) {
+            return Ok(());
+        }
+    }
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
     if app.toggle_keys.diagram_pane.matches(code, modifiers) {
@@ -500,6 +539,17 @@ async fn handle_remote_key_internal(
             }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
+                return Ok(());
+            }
+            // Alt+A: copy the chat viewport with an empty composer, otherwise
+            // consume silently. Mirrors the local chain; without this an
+            // unclaimed Alt+A falls through to text input and types a literal
+            // "a". The background panel binds Alt+A while focused, so the
+            // chord must never leak here either.
+            KeyCode::Char('a') => {
+                if app.input.is_empty() {
+                    app.copy_chat_viewport_context_to_clipboard();
+                }
                 return Ok(());
             }
             _ => {}

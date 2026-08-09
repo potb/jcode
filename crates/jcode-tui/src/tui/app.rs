@@ -51,6 +51,12 @@ pub enum AppRuntimeMode {
 
 mod auth;
 mod auth_account_picker_saved_accounts;
+mod bg_panel;
+mod bg_panel_state;
+/// Tail of a background task's captured stdout/stderr, for the panel renderer.
+pub(crate) fn bg_panel_output_tail(task_id: &str, max_lines: usize) -> Vec<String> {
+    bg_panel::output_tail(task_id, max_lines)
+}
 mod catchup;
 mod commands;
 mod commands_colors;
@@ -1276,6 +1282,17 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
+    // Currently selected task index in the inline background-task panel.
+    bg_panel_selected: usize,
+    // Whether the background-task panel has keyboard focus.
+    bg_panel_focused: bool,
+    // Whether the focused background panel owns the main transcript viewport.
+    bg_panel_full_page: bool,
+    // Whether the background panel lists every session's tasks rather than
+    // just this session's. Tasks are spawned by the server, so a session-id
+    // mismatch would otherwise leave the panel mysteriously empty; the toggle
+    // is the escape hatch.
+    bg_panel_show_all_sessions: bool,
     // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)

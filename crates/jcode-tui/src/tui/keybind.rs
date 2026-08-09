@@ -336,7 +336,7 @@ impl ToggleBinding {
     }
 
     /// Load a toggle binding from an explicit default chord.
-    fn load_with_default(raw: &str, default: KeyBinding) -> Self {
+    pub(crate) fn load_with_default(raw: &str, default: KeyBinding) -> Self {
         let default_label = format_binding(&default);
         let (binding, _) = parse_optional(raw, default, &default_label);
         let macos_option_letter = binding.as_ref().and_then(|b| {
@@ -384,6 +384,7 @@ pub struct ToggleKeys {
     pub info_widget: ToggleBinding,
     pub todo_card: ToggleBinding,
     pub swarm_panel_focus: ToggleBinding,
+    pub background_panel_focus: ToggleBinding,
 }
 
 pub fn load_toggle_keys() -> ToggleKeys {
@@ -400,6 +401,10 @@ pub fn load_toggle_keys() -> ToggleKeys {
             &cfg.keybindings.swarm_panel_focus,
             swarm_panel_focus_default(),
         ),
+        background_panel_focus: ToggleBinding::load_with_default(
+            &cfg.keybindings.background_panel_focus,
+            background_panel_focus_default(),
+        ),
     }
 }
 
@@ -414,6 +419,63 @@ fn swarm_panel_focus_default() -> KeyBinding {
     KeyBinding {
         code: KeyCode::Char('n'),
         modifiers: KeyModifiers::ALT,
+    }
+}
+
+/// The default background-panel focus chord: Alt+B ("background").
+///
+/// Alt+B previously carried the readline word-back alias in the chat input.
+/// That alias is redundant (Alt+Left does the same thing and is what most
+/// people actually press), so it was removed and the panel takes the mnemonic
+/// chord. Configurable: set `background_panel_focus` to another chord to free
+/// Alt+B, or to "" to disable the panel chord entirely.
+pub(crate) fn background_panel_focus_default() -> KeyBinding {
+    KeyBinding {
+        code: KeyCode::Char('b'),
+        modifiers: KeyModifiers::ALT,
+    }
+}
+
+/// Status-line hint shown when the inline background controls open.
+pub(crate) fn bg_view_hint(next: &str) -> String {
+    use jcode_tui_core::keybind::alt_chord_lower;
+    format!(
+        "Background: {} {next} · {} select · {} all sessions · esc",
+        bg_panel_focus_key_label(),
+        alt_chord_lower("↑/↓"),
+        alt_chord_lower("a"),
+    )
+}
+
+/// Status-line hint shown when the full background page opens.
+pub(crate) fn bg_page_hint() -> String {
+    use jcode_tui_core::keybind::alt_chord_lower;
+    format!(
+        "Background page: {} chat · {} select · {} all sessions · esc",
+        bg_panel_focus_key_label(),
+        alt_chord_lower("↑/↓"),
+        alt_chord_lower("a"),
+    )
+}
+
+/// The chord label shown in the unfocused strip's right tail.
+/// Label for the background-panel focus chord, resolved from config.
+///
+/// Hardcoding "alt+b" here made every hint and tip lie as soon as the user
+/// rebound `background_panel_focus`, which is exactly the configurability the
+/// chord was justified by. Mirrors `swarm_panel_focus_key_label`.
+pub(crate) fn bg_panel_focus_key_label() -> String {
+    let cfg = config();
+    let default = background_panel_focus_default();
+    let default_label = format_binding(&default);
+    let (binding, _) = parse_optional(
+        &cfg.keybindings.background_panel_focus,
+        default,
+        &default_label,
+    );
+    match binding {
+        Some(b) => format_binding(&b),
+        None => default_label,
     }
 }
 

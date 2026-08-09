@@ -151,6 +151,11 @@ struct TestState {
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     swarm_panel_full_page: bool,
+    bg_tasks: Vec<jcode_tui_render::background_gallery::BgTask>,
+    bg_panel_selected: usize,
+    bg_panel_focused: bool,
+    bg_panel_full_page: bool,
+    bg_panel_all_sessions: bool,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -333,6 +338,24 @@ impl crate::tui::TuiState for TestState {
     fn swarm_panel_full_page(&self) -> bool {
         self.swarm_panel_full_page
     }
+    fn bg_panel_tasks(&self) -> Vec<jcode_tui_render::background_gallery::BgTask> {
+        self.bg_tasks.clone()
+    }
+    fn bg_panel_active(&self) -> bool {
+        !self.bg_tasks.is_empty()
+    }
+    fn bg_panel_selected(&self) -> usize {
+        self.bg_panel_selected
+    }
+    fn bg_panel_focused(&self) -> bool {
+        self.bg_panel_focused
+    }
+    fn bg_panel_full_page(&self) -> bool {
+        self.bg_panel_full_page
+    }
+    fn bg_panel_show_all_sessions(&self) -> bool {
+        self.bg_panel_all_sessions
+    }
     fn remote_startup_phase_active(&self) -> bool {
         self.remote_startup_phase_active
     }
@@ -512,6 +535,8 @@ fn reset_prompt_viewport_state_for_test() {
     });
 }
 
+#[path = "background_buffer.rs"]
+mod background_buffer;
 #[path = "basic.rs"]
 mod basic;
 #[path = "diagrams.rs"]

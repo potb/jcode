@@ -156,10 +156,16 @@ fn render_background_lines(info: &BackgroundInfo, width: usize) -> Vec<Line<'sta
         } else {
             None
         };
+        // Lead with the task id when we have one: the id is how the user
+        // finds the task in the background panel (Alt+B) for full output.
+        let labelled = match info.running_task_ids.get(index) {
+            Some(id) => format!("{} {}", id, task),
+            None => task.clone(),
+        };
         let row_text = if let Some(detail) = detail {
-            truncate_smart(&format!("{} · {}", task, detail), row_width)
+            truncate_smart(&format!("{} · {}", labelled, detail), row_width)
         } else {
-            truncate_smart(task, row_width)
+            truncate_smart(&labelled, row_width)
         };
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(rgb(120, 120, 130))),

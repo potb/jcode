@@ -932,7 +932,22 @@ impl App {
                         }
                     }
                     _ = redraw_interval.tick() => {
-                        needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
+                        // Pass the terminal so file-based debug commands that
+                        // read the visual-debug buffer can force a draw first;
+                        // without it `frame`/`screen` return "no frames
+                        // captured" until something else happens to redraw.
+                        //
+                        // Only reachable with a live terminal and a debug
+                        // command file, so no unit test covers this wiring
+                        // (reverting it fails nothing). Verified at runtime
+                        // instead: a headless tester's `frame` returns a
+                        // populated frame, which it could not before.
+                        needs_redraw |= remote::handle_tick_with_terminal(
+                            &mut self,
+                            &mut remote_conn,
+                            Some(&mut terminal),
+                        )
+                        .await;
                     }
                     event = remote_conn.next_event() => {
                         let (outcome, event_redraw) = remote::handle_remote_event(

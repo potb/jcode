@@ -86,7 +86,27 @@ pub(super) enum RemoteEventOutcome {
     Quit,
 }
 
+/// Tick without a terminal. Only tests drive a tick this way; the live loop
+/// always has a terminal and calls `handle_tick_with_terminal` directly, so
+/// this would be dead code in a normal build.
+#[cfg(test)]
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    handle_tick_with_terminal(app, remote, None).await
+}
+
+/// Tick with access to the terminal, so file-based debug commands that read
+/// the frame buffer can force a render first.
+///
+/// Without this, `tester:<id>:frame` always answered "no frames captured": the
+/// tester harness delivers debug commands through a file (not the client debug
+/// socket), and only the socket path pre-rendered. Visual debugging is off
+/// until something asks for a frame, so the buffer was still empty when the
+/// command read it.
+pub(super) async fn handle_tick_with_terminal(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    terminal: Option<&mut DefaultTerminal>,
+) -> bool {
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
         event: Some("tick".to_string()),
         scroll_delta: None,
@@ -137,7 +157,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
-    let _ = check_debug_command(app, remote).await;
+    let _ = check_debug_command_with_terminal(app, remote, terminal).await;
 
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
@@ -735,9 +755,10 @@ fn auth_changed_event_for_login_provider(provider: &str) -> Option<crate::protoc
     Some(auth)
 }
 
-pub(super) async fn check_debug_command(
+pub(super) async fn check_debug_command_with_terminal(
     app: &mut App,
     remote: &mut RemoteConnection,
+    terminal: Option<&mut DefaultTerminal>,
 ) -> Option<String> {
     let cmd_path = super::debug_cmd_path();
     if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
@@ -745,6 +766,16 @@ pub(super) async fn check_debug_command(
         let cmd = cmd.trim();
 
         app.debug_trace.record("cmd", cmd.to_string());
+
+        // Frame-oriented commands read the visual-debug buffer, which is empty
+        // until capture is on AND a draw has happened. Render once first so the
+        // caller sees the current screen instead of "no frames captured".
+        if let Some(terminal) = terminal
+            && debug_command_needs_current_frame(cmd)
+        {
+            crate::tui::visual_debug::enable();
+            let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, app));
+        }
 
         let response = handle_debug_command(app, cmd, remote).await;
         let _ = std::fs::write(super::debug_response_path(), &response);
@@ -1696,6 +1727,27 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
         return "OK: reload triggered".to_string();
     }
     if cmd == "state" {
+        // Panel output, resolved the way the renderer resolves it: display
+        // order, and lazily read for the selected task because snapshot tails
+        // are deliberately empty until render time. Without this a headless
+        // test can see that a task is LISTED but not that its output, the
+        // whole point of the panel, is reachable.
+        let bg_panel_selected_output = {
+            let tasks = crate::tui::TuiState::bg_panel_tasks(app);
+            let ordered = jcode_tui_render::background_gallery::sort_tasks_for_display(&tasks);
+            let selected =
+                crate::tui::TuiState::bg_panel_selected(app).min(ordered.len().saturating_sub(1));
+            ordered
+                .get(selected)
+                .map(|task| {
+                    if task.output_tail.is_empty() {
+                        crate::tui::app::bg_panel_output_tail(&task.id, 64)
+                    } else {
+                        task.output_tail.clone()
+                    }
+                })
+                .unwrap_or_default()
+        };
         return serde_json::json!({
             "processing": app.is_processing,
             "messages": app.messages.len(),
@@ -1718,6 +1770,22 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "diagram_pane_position": format!("{:?}", app.diagram_pane_position),
             "diagram_zoom": app.diagram_zoom,
             "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
+            // Background-task panel: exposed so headless tests can assert on
+            // panel behavior without parsing the rendered frame.
+            "bg_panel_focused": crate::tui::TuiState::bg_panel_focused(app),
+            "bg_panel_full_page": crate::tui::TuiState::bg_panel_full_page(app),
+            "bg_panel_selected": crate::tui::TuiState::bg_panel_selected(app),
+            "bg_panel_all_sessions": crate::tui::TuiState::bg_panel_show_all_sessions(app),
+            "bg_panel_tasks": crate::tui::TuiState::bg_panel_tasks(app)
+                .iter()
+                .map(|task| serde_json::json!({
+                    "id": task.id,
+                    "label": task.label,
+                    "status": task.status.label(),
+                    "output_tail": task.output_tail,
+                }))
+                .collect::<Vec<_>>(),
+            "bg_panel_selected_output": bg_panel_selected_output,
             "remote": true,
             "server_version": app.remote_server_version.clone(),
             "server_has_update": app.remote_server_has_update,

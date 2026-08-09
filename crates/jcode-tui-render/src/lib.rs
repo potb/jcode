@@ -1,4 +1,6 @@
+pub mod background_gallery;
 pub mod chrome;
+pub mod gallery_text;
 pub mod layout;
 pub mod memory_tiles;
 pub mod swarm_gallery;

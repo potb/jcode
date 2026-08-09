@@ -355,6 +355,12 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Open initiatives overview / resume an initiative",
     ));
     lines.push(help_entry("/swarm [on|off]", "Toggle swarm features"));
+    // Resolved from config: this chord is rebindable, and hardcoding it here
+    // would send the reader to a key that does nothing once they change it.
+    lines.push(key_entry(
+        &crate::tui::keybind::bg_panel_focus_key_label(),
+        "Background tasks: send a running tool to the background, or open the task panel",
+    ));
 
     lines.push(Line::from(""));
     lines.push(separator());
