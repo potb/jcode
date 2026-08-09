@@ -645,8 +645,11 @@ pub fn build_ambient_system_prompt(
             ));
         }
         prompt.push_str(
-            "  Project memories only load when the working directory is set to that \
-             project, so garden them from a session in the matching directory.\n",
+            "  You have no working directory, so project-scoped memory actions \
+             default to nothing. To read or garden one of these graphs, pass the \
+             project path explicitly: memory(action=\"list\", scope=\"project\", \
+             project_dir=\"<path above>\"), and likewise for remember/forget/tag. \
+             Without project_dir a project-scoped write is silently dropped.\n",
         );
     }
     prompt.push('\n');

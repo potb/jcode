@@ -45,7 +45,21 @@ impl MemoryTool {
     /// memories resolve to the right `projects/<hash>.json` store. The base
     /// manager is built once in `new()` with `project_dir: None`, which made
     /// project writes silently no-op and reads come back empty (issue #491).
-    fn scoped_manager(&self, ctx: &ToolContext) -> MemoryManager {
+    ///
+    /// An explicit `project_dir` wins over the session's working directory.
+    /// Sessions with no working directory at all (ambient cycles) would
+    /// otherwise be unable to touch project memory for any project: their
+    /// project reads come back empty and their project writes are dropped, so
+    /// they can see per-project graphs listed in their prompt but never
+    /// maintain them.
+    fn scoped_manager(&self, ctx: &ToolContext, project_dir: Option<&str>) -> MemoryManager {
+        let explicit = project_dir
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from);
+        if let Some(dir) = explicit {
+            return self.manager.clone().with_project_dir(dir);
+        }
         match ctx.working_dir.as_deref() {
             Some(dir) if !dir.as_os_str().is_empty() => self.manager.clone().with_project_dir(dir),
             _ => self.manager.clone(),
@@ -86,6 +100,10 @@ struct MemoryInput {
     /// For recall action: retrieval mode
     #[serde(default)]
     mode: Option<String>,
+    /// Target a specific project's memory store by path, instead of the
+    /// session's working directory.
+    #[serde(default)]
+    project_dir: Option<String>,
 }
 
 #[async_trait]
@@ -117,6 +135,10 @@ impl Tool for MemoryTool {
                 "id": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
                 "scope": { "type": "string", "enum": ["project", "global", "all"] },
+                "project_dir": {
+                    "type": "string",
+                    "description": "Project path for project scope. Defaults to the session working directory; required when there is none."
+                },
                 "from_id": { "type": "string" },
                 "to_id": { "type": "string" },
                 "limit": { "type": "integer", "description": "Max results." }
@@ -132,7 +154,7 @@ impl Tool for MemoryTool {
         let input: MemoryInput = serde_json::from_value(input)?;
         let action_label = input.action.clone();
         let session_id = ctx.session_id.clone();
-        let manager = self.scoped_manager(&ctx);
+        let manager = self.scoped_manager(&ctx, input.project_dir.as_deref());
 
         match input.action.as_str() {
             "remember" => {
@@ -495,6 +517,114 @@ mod tests {
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    /// The ambient agent has no working directory, so without an explicit
+    /// target its project-scoped reads come back empty and its project-scoped
+    /// writes are silently dropped. It can therefore see every project graph
+    /// listed in its prompt but never garden one. Naming the project must let a
+    /// working-dir-less session read and write that project's store, and must
+    /// not leak into a different project.
+    #[tokio::test]
+    async fn a_session_without_a_working_directory_can_garden_a_named_project() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let other = tempfile::tempdir().expect("other project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        let no_working_dir = || test_ctx(None);
+
+        // Without naming a project the write goes nowhere: that is the bug.
+        tool.execute(
+            json!({
+                "action": "remember",
+                "content": "unaddressed-project-note",
+                "scope": "project"
+            }),
+            no_working_dir(),
+        )
+        .await
+        .expect("remember should not error");
+
+        // Naming the project makes the same write land.
+        tool.execute(
+            json!({
+                "action": "remember",
+                "content": "ambient-gardened-note",
+                "scope": "project",
+                "project_dir": project.path().to_string_lossy(),
+            }),
+            no_working_dir(),
+        )
+        .await
+        .expect("targeted remember should succeed");
+
+        let listed = tool
+            .execute(
+                json!({
+                    "action": "list",
+                    "scope": "project",
+                    "project_dir": project.path().to_string_lossy(),
+                }),
+                no_working_dir(),
+            )
+            .await
+            .expect("targeted list should succeed");
+        assert!(
+            listed.output.contains("ambient-gardened-note"),
+            "a named project's memory must be readable without a working dir, got: {}",
+            listed.output
+        );
+        assert!(
+            !listed.output.contains("unaddressed-project-note"),
+            "an unaddressed write must not silently land in this project"
+        );
+
+        // And it must not bleed into a different project's store.
+        let other_listed = tool
+            .execute(
+                json!({
+                    "action": "list",
+                    "scope": "project",
+                    "project_dir": other.path().to_string_lossy(),
+                }),
+                no_working_dir(),
+            )
+            .await
+            .expect("other list should succeed");
+        assert!(
+            !other_listed.output.contains("ambient-gardened-note"),
+            "memory must stay in the project it was addressed to, got: {}",
+            other_listed.output
+        );
+
+        // Gardening means removing too, not only adding.
+        let forgotten = tool
+            .execute(
+                json!({
+                    "action": "search",
+                    "query": "ambient-gardened-note",
+                    "scope": "project",
+                    "project_dir": project.path().to_string_lossy(),
+                }),
+                no_working_dir(),
+            )
+            .await
+            .expect("targeted search should succeed");
+        assert!(
+            forgotten.output.contains("ambient-gardened-note"),
+            "search must reach the named project too, got: {}",
+            forgotten.output
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
         }
     }
 
