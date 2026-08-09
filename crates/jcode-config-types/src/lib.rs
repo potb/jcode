@@ -918,7 +918,7 @@ pub struct AutoJudgeConfig {
 }
 
 /// Keybinding configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     /// Scroll up key (default: "ctrl+k")

@@ -64,3 +64,61 @@ fn keybinding_edit_applies_to_the_next_key_press() {
     }
     crate::config::Config::invalidate_cache();
 }
+
+// A config reload that leaves `[keybindings]` untouched must not claim the
+// config was reloaded.
+//
+// The reload generation is bumped by *any* config invalidation, so keying the
+// notice on it alone announced "Config reloaded from disk" for edits to
+// unrelated settings, and for invalidations the user never made at all. The
+// notice is the user's only signal that a keybinding edit landed, so a false
+// one directly undermines it.
+#[test]
+fn an_unrelated_config_reload_does_not_claim_a_keybinding_reload() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::invalidate_cache();
+
+    let config_path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        "[keybindings]\nscroll_bookmark = \"ctrl+g\"\n",
+    )
+    .expect("write initial config");
+
+    let mut app = create_test_app();
+
+    // Rewrite the file with the same bindings but a different unrelated
+    // setting, then invalidate so the generation moves without the bindings
+    // changing. This is what a concurrent config write looks like to the app.
+    std::fs::write(
+        &config_path,
+        "[keybindings]\nscroll_bookmark = \"ctrl+g\"\n\n[display]\ncentered = true\n",
+    )
+    .expect("rewrite config");
+    crate::config::Config::invalidate_cache();
+
+    assert!(
+        !app.refresh_keybindings_if_config_reloaded(),
+        "unchanged bindings should report no reload"
+    );
+    assert!(
+        app.status_notice().is_none(),
+        "unchanged bindings must not raise the reload notice: {:?}",
+        app.status_notice()
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        );
+    }
+    crate::config::Config::invalidate_cache();
+}

@@ -101,6 +101,19 @@ impl App {
             return false;
         }
         self.keybindings_config_generation = generation;
+
+        // The generation says *some* config input changed, not that the
+        // keybindings did: it is bumped by any config invalidation, including
+        // ones from unrelated settings. Reloading against an identical binding
+        // set is a no-op, and announcing "Config reloaded from disk" for it is
+        // a false positive the user cannot act on. Compare the binding config
+        // itself and return early when it is unchanged.
+        let keybindings = crate::config::config().keybindings.clone();
+        if self.keybindings_snapshot == keybindings {
+            return false;
+        }
+        self.keybindings_snapshot = keybindings;
+
         self.model_switch_keys = keybind::load_model_switch_keys();
         self.effort_switch_keys = keybind::load_effort_switch_keys();
         self.centered_toggle_keys = keybind::load_centered_toggle_key();
@@ -666,6 +679,7 @@ impl App {
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
+            keybindings_snapshot: crate::config::config().keybindings.clone(),
             dictation_session: None,
             dictation_in_flight: false,
             dictation_request_id: None,
@@ -1112,6 +1126,7 @@ impl App {
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
+            keybindings_snapshot: crate::config::config().keybindings.clone(),
             dictation_session: None,
             dictation_in_flight: false,
             dictation_request_id: None,
