@@ -48,24 +48,32 @@ over-credited in the coverage ledger.
 
 ## Checkpoints
 
-Every run reports these strict checkpoints in order. A pair is fully ready only
-when all of them pass on the `full` tier.
+A pair is fully ready only when every stage of the strict pipeline passes on the
+`full` tier. The pipeline is exactly 11 stages (`STRICT_PIPELINE_STAGES` in
+`crates/jcode-base/src/live_tests.rs`), which is why coverage statuses read
+`N/11`:
 
-1. `auth_credential_loaded` - a credential was found for the provider
-2. `model_catalog_live_endpoint` - the live `/models` endpoint returned models
-3. `catalog_hot_reload_current_session` - the catalog reloaded into the session
-4. `picker_live_models` - the picker shows the live models, including the selected one
-5. `picker_fallback_labeling` - routes are live-catalog backed, not static fallback
-6. `model_switch_route` - switching models produces a provider-explicit route
-7. `non_streaming_chat_completion` - a basic chat reply came back (full tier)
-8. `streaming_chat_completion` - a streamed reply came back (full tier)
-9. `tool_call_parse` - the model emitted a parseable tool call (full tier)
-10. `tool_execution_loop` - the tool-call loop ran (full tier)
-11. `tool_result_followup` - the tool result was fed back (full tier)
-12. `real_jcode_tool_smoke` - an end-to-end tool smoke passed (full tier)
+1. `model_catalog_live_endpoint` - the live `/models` endpoint returned models
+2. `catalog_hot_reload_current_session` - the catalog reloaded into the session
+3. `picker_live_models` - the picker shows the live models, including the selected one
+4. `picker_fallback_labeling` - routes are live-catalog backed, not static fallback
+5. `model_switch_route` - switching models produces a provider-explicit route
+6. `non_streaming_chat_completion` - a basic chat reply came back (full tier)
+7. `streaming_chat_completion` - a streamed reply came back (full tier)
+8. `tool_call_parse` - the model emitted a parseable tool call (full tier)
+9. `tool_execution_loop` - the tool-call loop ran (full tier)
+10. `tool_result_followup` - the tool result was fed back (full tier)
+11. `real_jcode_tool_smoke` - an end-to-end tool smoke passed (full tier)
 
-(Checkpoints 1-2 plus the auth-lifecycle stages are pre-flight; 7-12 are the
-API-dependent ones gated behind `--tier full`.)
+`auth_credential_loaded` is reported first in the doctor output but is **not** a
+pipeline stage - it, together with the rest of the auth lifecycle
+(`auth_ux_key_entry`, `credential_persistence`), is pre-flight. Stages 6-11 are
+the API-dependent ones gated behind `--tier full`.
+
+The broader checkpoint taxonomy in `live_tests.rs` also carries observe-only and
+lifecycle checkpoints (for example `reasoning_capability`, `restart_persistence`,
+`negative_error_ux`, `model_capability_matrix`, `cost_quota_safety`) that the
+doctor does not render as pipeline stages.
 
 ## Reading the output
 
@@ -144,7 +152,7 @@ strict checkpoints flips the pair to strict ("READY") in
 `jcode provider-test-coverage`. Lighter tiers record the API-dependent
 checkpoints as skipped, so they never over-credit a pair.
 
-`jcode provider-test-coverage` renders the same 11 checkpoints as an 11-stage
+`jcode provider-test-coverage` renders these same 11 stages as an 11-stage
 pipeline. Each observed pair gets one compact line: a status token (`READY`, or
 `N/11` = how many stages it cleared) followed by `provider / model`, and then,
 for any pair that is not yet READY, the first blocker plus the exact
