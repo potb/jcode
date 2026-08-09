@@ -1279,3 +1279,43 @@ fn ignoring_active_windows_also_unblocks_window_gated_cron_jobs() {
         "a window-gated cron job must see an open window when windows are ignored"
     );
 }
+
+/// Stopping ambient persists `Disabled`, but the runner loop deliberately stays
+/// alive to service cron and scheduled deliveries. `start()` used to return
+/// early on "already running" and never clear that status, so ambient could not
+/// be restarted at all without restarting the daemon: `ambient:start` reported
+/// "already running" while every cycle stayed blocked.
+#[tokio::test]
+async fn starting_ambient_clears_a_persisted_stop_even_with_the_loop_alive() {
+    use crate::ambient::AmbientStatus;
+    use crate::safety::SafetySystem;
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let runner = AmbientRunnerHandle::new(Arc::new(SafetySystem::new()));
+    let task = tokio::spawn(runner.clone().run_loop(provider.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runner.is_running().await, "loop should be alive");
+
+    runner.stop().await;
+    assert!(
+        matches!(runner.state().await.status, AmbientStatus::Disabled),
+        "stop must persist Disabled"
+    );
+
+    let started = runner.start(provider).await;
+    assert!(
+        started,
+        "starting from a stopped state must report success, not 'already running'"
+    );
+    assert!(
+        !matches!(runner.state().await.status, AmbientStatus::Disabled),
+        "start must clear the persisted Disabled status, or ambient stays blocked forever"
+    );
+
+    task.abort();
+    let _ = task.await;
+}

@@ -345,15 +345,28 @@ impl AmbientRunnerHandle {
 
     /// Start (or restart) the ambient loop. If the loop exited due to Disabled
     /// status, this resets the state to Idle and spawns a new loop task.
+    ///
+    /// The loop stays alive to service `[[cron]]` and scheduled deliveries even
+    /// while ambient itself is stopped, so "already running" must NOT short
+    /// circuit the status reset: doing so left `stop()`'s persisted `Disabled`
+    /// in place forever and made ambient unstartable without a daemon restart.
     pub async fn start(&self, provider: Arc<dyn Provider>) -> bool {
         let already_running = *self.inner.running.read().await;
-        if already_running {
-            return false;
-        }
+        let was_disabled;
         {
             let mut state = self.inner.state.write().await;
+            was_disabled = matches!(state.status, AmbientStatus::Disabled);
+            if !was_disabled && already_running {
+                return false;
+            }
             state.status = AmbientStatus::Idle;
             let _ = state.save();
+        }
+        if already_running {
+            // A live loop only needs waking; spawning a second one would run
+            // two ambient loops against a single-instance design.
+            self.inner.wake_notify.notify_one();
+            return true;
         }
         let handle = self.clone();
         tokio::spawn(async move {
