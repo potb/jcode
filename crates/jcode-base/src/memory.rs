@@ -1722,6 +1722,11 @@ impl MemoryManager {
         let Some(path) = self.project_memory_path()? else {
             return Ok(MemoryGraph::new());
         };
+        // Register on read, not only on write. The reverse mapping is what lets
+        // anything outside a project (the ambient agent) name a hash-named
+        // graph; recording it only on save meant a project the user reads from
+        // but has not written to since the registry existed stays anonymous.
+        self.record_project_in_registry();
 
         if !self.test_mode
             && let Some(mut graph) = cached_graph(&path)

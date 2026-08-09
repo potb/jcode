@@ -673,6 +673,56 @@ mod tests {
         }
     }
 
+    /// Reading a project's memory must register its path too. The registry is
+    /// the only way something outside a project (ambient) can name a hash-named
+    /// graph, and a project the user only reads from would otherwise stay an
+    /// unreadable hash in ambient's report forever.
+    #[tokio::test]
+    async fn reading_a_project_registers_its_path_for_naming() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        // A read-only interaction: list, never remember.
+        let tool = MemoryTool::new();
+        tool.execute(
+            json!({
+                "action": "list",
+                "scope": "project",
+                "project_dir": project.path().to_string_lossy(),
+            }),
+            test_ctx(None),
+        )
+        .await
+        .expect("list should succeed");
+
+        let graph_id = MemoryManager::new()
+            .with_project_dir(project.path())
+            .project_graph_path()
+            .expect("path")
+            .expect("project dir set")
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("stem")
+            .to_string();
+
+        assert_eq!(
+            MemoryManager::load_projects_registry()
+                .get(&graph_id)
+                .map(String::as_str),
+            Some(project.path().to_string_lossy().as_ref()),
+            "a read must be enough to name the project later"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// Project graphs are named by a path hash, so anything surveying them from
     /// outside a project (the ambient agent) can only name them if writing a
     /// project memory also records the reverse mapping.
