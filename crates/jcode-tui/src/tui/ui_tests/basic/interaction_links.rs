@@ -63,6 +63,11 @@ fn test_prompt_entry_animation_expires_after_window() {
 
 #[test]
 fn test_prompt_entry_bg_color_pulses_then_fades() {
+    // These assert that two *distinct* RGB blends stay distinct. On a host
+    // without truecolor every color quantizes to the 256-color cube, where
+    // neighbouring blends collapse onto the same index and the assertions
+    // fail for a reason that has nothing to do with the animation.
+    jcode_tui_style::color::pin_truecolor_for_tests();
     let base = user_bg();
     let early = prompt_entry_bg_color(base, 0.15);
     let peak = prompt_entry_bg_color(base, 0.45);
@@ -75,6 +80,9 @@ fn test_prompt_entry_bg_color_pulses_then_fades() {
 
 #[test]
 fn test_prompt_entry_shimmer_color_moves_across_positions() {
+    // See the note in `test_prompt_entry_bg_color_pulses_then_fades`: without
+    // truecolor the shimmer positions quantize onto one palette index.
+    jcode_tui_style::color::pin_truecolor_for_tests();
     let base = user_text();
     let left_early = prompt_entry_shimmer_color(base, 0.1, 0.1);
     let right_early = prompt_entry_shimmer_color(base, 0.9, 0.1);
