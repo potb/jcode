@@ -50,6 +50,33 @@ pub(super) async fn maybe_handle_ambient_command(
         return Ok(Some(output));
     }
 
+    // Dump the context an ambient cycle would actually see. `cargo build`
+    // proves nothing about the prompt; this makes it inspectable at runtime.
+    if cmd == "ambient:prompt" {
+        let state = crate::ambient::AmbientState::load().unwrap_or_default();
+        let manager = crate::memory::MemoryManager::new();
+        let queue = match crate::ambient::AmbientManager::new() {
+            Ok(mgr) => mgr.queue().items().to_vec(),
+            Err(_) => Vec::new(),
+        };
+        let prompt = crate::ambient::build_ambient_system_prompt(
+            &state,
+            &queue,
+            &crate::ambient::gather_memory_graph_health(&manager),
+            &crate::ambient::gather_recent_sessions(state.last_run),
+            &crate::ambient::gather_feedback_memories(&manager),
+            &crate::ambient::ResourceBudget {
+                provider: provider.name().to_string(),
+                tokens_remaining_desc: "unknown (debug dump)".to_string(),
+                window_resets_desc: "unknown".to_string(),
+                user_usage_rate_desc: "unknown".to_string(),
+                cycle_budget_desc: "unknown".to_string(),
+            },
+            0,
+        );
+        return Ok(Some(prompt));
+    }
+
     if cmd == "ambient:permissions" {
         let output = if let Some(runner) = ambient_runner {
             let _ = runner

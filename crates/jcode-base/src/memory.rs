@@ -274,6 +274,69 @@ impl MemoryManager {
         Ok(Some(memory_dir.join(format!("{}.json", project_hash))))
     }
 
+    /// Public accessor for the project graph file this manager resolves to.
+    ///
+    /// Callers that need to reason about *which* project store is in play (for
+    /// example the ambient agent, which surveys every known project) need the
+    /// resolved path, not just the loaded graph.
+    pub fn project_graph_path(&self) -> Result<Option<PathBuf>> {
+        self.project_memory_path()
+    }
+
+    /// Directory holding all per-project memory graphs.
+    pub fn projects_memory_dir() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("memory").join("projects"))
+    }
+
+    /// Path of the registry mapping project graph ids to project directories.
+    ///
+    /// Project graphs are named by a hash of the project path, which makes a
+    /// bare directory listing unreadable. The registry keeps the reverse
+    /// mapping so tooling (notably ambient mode) can name the projects it is
+    /// looking at.
+    pub fn projects_registry_path() -> Result<PathBuf> {
+        Ok(Self::projects_memory_dir()?.join("index.json"))
+    }
+
+    /// Read the graph id -> project directory registry.
+    pub fn load_projects_registry() -> std::collections::HashMap<String, String> {
+        let Ok(path) = Self::projects_registry_path() else {
+            return std::collections::HashMap::new();
+        };
+        storage::read_json(&path).unwrap_or_default()
+    }
+
+    /// Record this manager's project directory in the registry if it is new.
+    ///
+    /// Cheap on the common path: a hit in the existing registry writes nothing.
+    fn record_project_in_registry(&self) {
+        if self.test_mode {
+            return;
+        }
+        let Some(project_dir) = self.get_project_dir() else {
+            return;
+        };
+        let Ok(Some(path)) = self.project_memory_path() else {
+            return;
+        };
+        let Some(graph_id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(ToOwned::to_owned)
+        else {
+            return;
+        };
+        let dir_str = project_dir.to_string_lossy().to_string();
+        let mut registry = Self::load_projects_registry();
+        if registry.get(&graph_id).map(String::as_str) == Some(dir_str.as_str()) {
+            return;
+        }
+        registry.insert(graph_id, dir_str);
+        if let Ok(registry_path) = Self::projects_registry_path() {
+            let _ = storage::write_json(&registry_path, &registry);
+        }
+    }
+
     fn legacy_notes_path(&self) -> Result<Option<PathBuf>> {
         if self.test_mode {
             let test_dir = storage::jcode_dir()?.join("notes").join("test");
@@ -1778,6 +1841,7 @@ impl MemoryManager {
     pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
         if let Some(path) = self.project_memory_path()? {
             storage::write_json(&path, graph)?;
+            self.record_project_in_registry();
             if !self.test_mode {
                 cache_graph(path, graph);
             }

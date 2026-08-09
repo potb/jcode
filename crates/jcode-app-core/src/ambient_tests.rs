@@ -384,6 +384,7 @@ fn test_build_ambient_system_prompt_with_data() {
         missing_embeddings: 5,
         duplicate_candidates: 0,
         last_consolidation: Some(Utc::now() - Duration::hours(2)),
+        projects: Vec::new(),
     };
 
     let sessions = vec![RecentSessionInfo {
@@ -392,6 +393,7 @@ fn test_build_ambient_system_prompt_with_data() {
         topic: Some("Fix auth bug".into()),
         duration_secs: 900,
         extraction_status: "extracted".into(),
+        working_dir: Some("/home/potb/projects/potb/config".into()),
     }];
 
     let feedback = vec![
@@ -430,6 +432,173 @@ fn test_build_ambient_system_prompt_with_data() {
     assert!(prompt.contains("Files: src/main.rs"));
     assert!(prompt.contains("Branch: main"));
     assert!(prompt.contains("Tests were flaky yesterday"));
+}
+
+#[test]
+fn ambient_prompt_names_the_project_each_recent_session_ran_in() {
+    // Ambient has no working directory of its own, so without the project
+    // recorded per session it cannot tell jcode work from beakon work.
+    let state = AmbientState::default();
+    let queue = vec![];
+    let health = MemoryGraphHealth::default();
+    let sessions = vec![
+        RecentSessionInfo {
+            id: "session_a".into(),
+            status: "closed".into(),
+            topic: Some("Fix ambient scope".into()),
+            duration_secs: 600,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/home/potb/jcode".into()),
+        },
+        RecentSessionInfo {
+            id: "session_b".into(),
+            status: "closed".into(),
+            topic: Some("Beakon deploy".into()),
+            duration_secs: 300,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/home/potb/projects/costo/beakon".into()),
+        },
+        RecentSessionInfo {
+            id: "session_c".into(),
+            status: "closed".into(),
+            topic: Some("Ambient cycle".into()),
+            duration_secs: 60,
+            extraction_status: "extracted".into(),
+            working_dir: None,
+        },
+    ];
+    let feedback: Vec<String> = vec![];
+    let budget = ResourceBudget::default();
+
+    let prompt =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+
+    assert!(
+        prompt.contains("project: /home/potb/jcode"),
+        "each session line must name its project"
+    );
+    assert!(prompt.contains("project: /home/potb/projects/costo/beakon"));
+    assert!(
+        prompt.contains("project: (no project)"),
+        "a session without a working directory must be marked as such, not \
+         silently attributed to another project"
+    );
+    assert!(prompt.contains("## Projects Active Recently"));
+    assert!(prompt.contains("/home/potb/jcode (1 session(s))"));
+}
+
+#[test]
+fn ambient_prompt_lists_per_project_memory_graphs() {
+    let state = AmbientState::default();
+    let queue = vec![];
+    let health = MemoryGraphHealth {
+        total: 20,
+        active: 18,
+        inactive: 2,
+        projects: vec![
+            ProjectGraphHealth {
+                working_dir: Some("/home/potb/projects/potb/config".into()),
+                graph_id: "aaaa".into(),
+                total: 13,
+                active: 12,
+                low_confidence: 1,
+                missing_embeddings: 4,
+            },
+            ProjectGraphHealth {
+                working_dir: None,
+                graph_id: "bbbb".into(),
+                total: 2,
+                active: 2,
+                low_confidence: 0,
+                missing_embeddings: 0,
+            },
+        ],
+        ..MemoryGraphHealth::default()
+    };
+    let sessions = vec![];
+    let feedback: Vec<String> = vec![];
+    let budget = ResourceBudget::default();
+
+    let prompt =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+
+    assert!(prompt.contains("Per-project memory graphs:"));
+    assert!(
+        prompt.contains("/home/potb/projects/potb/config: 13 memories"),
+        "a named project graph must show its path and size"
+    );
+    assert!(
+        prompt.contains("bbbb: 2 memories"),
+        "an unnamed project graph must still be listed by id rather than dropped"
+    );
+}
+
+#[test]
+fn project_graph_health_survey_reads_every_project_store() {
+    // The survey must find project memory without the caller having a project
+    // directory, which is exactly the ambient agent's situation.
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let alpha = tempfile::tempdir().expect("alpha project");
+    let beta = tempfile::tempdir().expect("beta project");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    for project in [alpha.path(), beta.path()] {
+        let manager = crate::memory::MemoryManager::new().with_project_dir(project);
+        let mut graph = manager.load_project_graph().expect("load");
+        let entry = crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            &format!("survey probe for {}", project.display()),
+        );
+        graph.memories.insert(entry.id.clone(), entry);
+        manager.save_project_graph(&graph).expect("save");
+    }
+
+    // A manager with no project directory sees nothing on its own...
+    let blind = crate::memory::MemoryManager::new();
+    assert!(
+        blind
+            .load_project_graph()
+            .expect("load")
+            .memories
+            .is_empty(),
+        "a manager without a project dir must not resolve any project graph"
+    );
+
+    // ...but the survey finds both projects and names them.
+    let health = crate::ambient::gather_project_graph_health();
+    let named: Vec<String> = health.iter().filter_map(|p| p.working_dir.clone()).collect();
+    for project in [alpha.path(), beta.path()] {
+        let want = project.to_string_lossy().to_string();
+        assert!(
+            named.contains(&want),
+            "survey must name project {want}, got {named:?}"
+        );
+    }
+    for p in &health {
+        assert_ne!(
+            p.graph_id, "index",
+            "the id->path registry is not a project graph"
+        );
+        assert_eq!(p.total, 1, "each probe project holds exactly one memory");
+        assert!(p.active <= p.total);
+    }
+
+    // And the aggregate health rolls the project memories up for ambient.
+    let rolled = crate::ambient::gather_memory_graph_health(&blind);
+    assert!(
+        rolled.total >= 2,
+        "ambient's aggregate health must include per-project memories, got {}",
+        rolled.total
+    );
+    assert_eq!(rolled.projects.len(), health.len());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
 }
 
 #[test]

@@ -1065,6 +1065,36 @@ First time ambient runs, there's no usage history, no patterns, no feedback memo
 
 ## Per-Project Configuration
 
+### Multi-project context
+
+A single ambient agent serves every project, one cycle at a time. The cycle
+itself has no working directory, so per-project context does not load
+automatically. Two pieces of project awareness are therefore built into the
+cycle prompt:
+
+- **Recent Sessions** lines carry `project: <working dir>`, and a
+  **Projects Active Recently** section ranks those directories. Without this the
+  agent cannot tell which repo yesterday's work belonged to.
+- **Memory Graph Health** lists every per-project memory graph found under
+  `~/.jcode/memory/projects/`, with each project's path, size, and gardening
+  backlog, and rolls those counts into the totals.
+
+Project graph files are named by a hash of the project path. Saving a project
+memory records the reverse mapping in
+`~/.jcode/memory/projects/index.json`; graphs written before that registry
+existed are named by scanning recent session files for a matching working
+directory, and fall back to showing the hash.
+
+Reading is not the same as writing. `MemoryManager` only resolves a project
+graph when it has a project directory, so a project-scoped `remember` from a
+cycle with no working directory is dropped. To act on a specific project,
+schedule work with that project's `working_dir`: the runner then gives the child
+session the right directory, which restores its `AGENTS.md`, git state, and
+project memory.
+
+`ambient:prompt` on the debug socket dumps the exact context a cycle would see,
+which is the quickest way to confirm what the agent can and cannot observe.
+
 Some projects may need different ambient behavior (e.g. sensitive work projects, personal repos with different preferences):
 
 ```toml
