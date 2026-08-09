@@ -470,7 +470,13 @@ fn test_model_picker_remote_bedrock_model_has_bedrock_route_when_configured() {
 
     match prev_home {
         Some(value) => crate::env::set_var("JCODE_HOME", value),
-        None => crate::env::remove_var("JCODE_HOME"),
+        // Restore to the shared sandbox, not to unset: unset resolves to the
+        // developer's real ~/.config/jcode, and a concurrent test would then
+        // probe real credentials.
+        None => crate::env::set_var(
+            "JCODE_HOME",
+            crate::tui::app::tests::shared_test_jcode_home(),
+        ),
     }
     match prev_key {
         Some(value) => crate::env::set_var(crate::provider::bedrock::API_KEY_ENV, value),
