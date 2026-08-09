@@ -1541,13 +1541,6 @@ impl BackgroundTaskManager {
         matches
     }
 
-    fn finish_running_rows(
-        mut rows: Vec<RunningBackgroundProgress>,
-    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
-        rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
-        rows
-    }
-
     /// Best-effort synchronous lookup of detached tasks that are still running
     /// for a specific session.
     ///

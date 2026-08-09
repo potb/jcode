@@ -32,6 +32,7 @@ fn status_maps_to_panel_states_including_orphans() {
     let mut status = crate::background::TaskStatusFile {
         task_id: "111111aaaa".to_string(),
         tool_name: "bash".to_string(),
+        command: None,
         display_name: Some("cargo test".to_string()),
         session_id: "session-a".to_string(),
         status: crate::bus::BackgroundTaskStatus::Completed,
@@ -105,6 +106,7 @@ fn elapsed_falls_back_to_wall_clock_for_running_tasks() {
     let status = crate::background::TaskStatusFile {
         task_id: "111111aaaa".to_string(),
         tool_name: "bash".to_string(),
+        command: None,
         display_name: None,
         session_id: "s".to_string(),
         status: crate::bus::BackgroundTaskStatus::Running,
@@ -144,6 +146,7 @@ fn old_finished_tasks_are_dropped_from_the_panel() {
         crate::background::TaskStatusFile {
             task_id: id.to_string(),
             tool_name: "bash".to_string(),
+            command: None,
             display_name: None,
             session_id: "s".to_string(),
             status: crate::bus::BackgroundTaskStatus::Completed,
@@ -199,6 +202,7 @@ fn tasks_are_ordered_by_start_time_not_by_id() {
     let mk = |id: &str, started: chrono::DateTime<chrono::Utc>| crate::background::TaskStatusFile {
         task_id: id.to_string(),
         tool_name: "bash".to_string(),
+        command: None,
         display_name: None,
         session_id: "s".to_string(),
         status: crate::bus::BackgroundTaskStatus::Running,
@@ -460,6 +464,7 @@ fn list_sync_reads_status_files_from_the_task_directory() {
         let status = crate::background::TaskStatusFile {
             task_id: id.to_string(),
             tool_name: "bash".to_string(),
+            command: None,
             display_name: Some("cargo test".to_string()),
             session_id: session.to_string(),
             status: crate::bus::BackgroundTaskStatus::Completed,
