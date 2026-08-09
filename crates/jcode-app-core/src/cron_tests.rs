@@ -56,7 +56,11 @@ command = "touch {}"
     // brand new JCODE_HOME is guaranteed to differ, but flushing here avoids
     // depending on that timing coincidence.
     crate::config::invalidate_config_cache();
-    assert_eq!(crate::config::config().cron.len(), 1, "cron job should load");
+    assert_eq!(
+        crate::config::config().cron.len(),
+        1,
+        "cron job should load"
+    );
 
     let due = tick(true);
     // A first-ever run with catch_up (default true) fires immediately, so
@@ -68,7 +72,10 @@ command = "touch {}"
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(marker_file.exists(), "exec job should have run and touched the marker file");
+    assert!(
+        marker_file.exists(),
+        "exec job should have run and touched the marker file"
+    );
     // The job just fired, so its own next occurrence is necessarily in the
     // future (or absent while state hasn't caught up yet); either way `tick`
     // must not still report it as overdue in the same pass.
@@ -113,7 +120,10 @@ enabled = false
     assert!(a.valid);
     assert!(a.enabled);
     assert_eq!(a.schedule_description, "every 6h");
-    assert!(a.next_run.is_some(), "enabled valid job should have a next_run");
+    assert!(
+        a.next_run.is_some(),
+        "enabled valid job should have a next_run"
+    );
 
     let b = snapshot.iter().find(|j| j.id == "job-b").unwrap();
     assert!(b.valid);
@@ -166,7 +176,9 @@ catch_up = false
     // With catch_up disabled the schedule alone would not fire "now" in most
     // test runs, so a run happening at all demonstrates the manual path
     // bypasses the schedule rather than merely being lucky timing.
-    run_job_now("manual-job").await.expect("manual run should start");
+    run_job_now("manual-job")
+        .await
+        .expect("manual run should start");
 
     for _ in 0..100 {
         if marker_file.exists() {
@@ -283,7 +295,6 @@ respect_windows = true
         "quiet-hours-job (respect_windows=true) must report a windowed deadline"
     );
 }
-
 
 #[tokio::test]
 async fn a_job_that_just_fired_still_reports_its_following_deadline() {

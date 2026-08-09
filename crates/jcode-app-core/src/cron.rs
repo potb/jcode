@@ -192,13 +192,7 @@ pub async fn run_exec_job(job: CronJobConfig) {
         LastStatus::Failure
     };
 
-    record_run(
-        &job.id,
-        Utc::now(),
-        status,
-        outcome.exit_code,
-        duration_ms,
-    );
+    record_run(&job.id, Utc::now(), status, outcome.exit_code, duration_ms);
     clear_running(&job.id);
 }
 

@@ -58,13 +58,7 @@ async fn long_running_command_is_killed_at_the_timeout() {
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
-    let outcome = run_job_command(
-        "hang-job",
-        "sleep 30",
-        None,
-        Duration::from_millis(200),
-    )
-    .await;
+    let outcome = run_job_command("hang-job", "sleep 30", None, Duration::from_millis(200)).await;
 
     match prev {
         Some(v) => crate::env::set_var("JCODE_HOME", v),
@@ -73,7 +67,10 @@ async fn long_running_command_is_killed_at_the_timeout() {
 
     assert!(outcome.timed_out);
     assert!(!outcome.succeeded());
-    assert!(outcome.duration < Duration::from_secs(5), "should not wait out the full sleep");
+    assert!(
+        outcome.duration < Duration::from_secs(5),
+        "should not wait out the full sleep"
+    );
 }
 
 #[tokio::test]

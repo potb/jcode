@@ -135,8 +135,7 @@ pub async fn run_job_command(
     };
 
     let run = async {
-        let (status, stdout_buf, stderr_buf) =
-            tokio::join!(child.wait(), read_stdout, read_stderr);
+        let (status, stdout_buf, stderr_buf) = tokio::join!(child.wait(), read_stdout, read_stderr);
         (status, stdout_buf, stderr_buf)
     };
 

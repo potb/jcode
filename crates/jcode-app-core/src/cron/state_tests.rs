@@ -32,11 +32,20 @@ fn round_trips_through_disk_keyed_by_job_id() {
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let mut state = CronState::load();
-    assert!(state.get("upstream-merge").is_none(), "fresh state is empty");
+    assert!(
+        state.get("upstream-merge").is_none(),
+        "fresh state is empty"
+    );
 
     let ended_at = chrono::Utc::now();
     state
-        .record_run("upstream-merge", ended_at, LastStatus::Success, Some(0), 1200)
+        .record_run(
+            "upstream-merge",
+            ended_at,
+            LastStatus::Success,
+            Some(0),
+            1200,
+        )
         .expect("record run");
 
     let reloaded = CronState::load();
