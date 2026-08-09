@@ -10,6 +10,7 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 ```toml
 # ~/.jcode/config.toml
 [hooks]
+turn_start    = ""                            # observer
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
 session_end   = ""                            # observer
@@ -19,8 +20,27 @@ pre_tool_timeout_ms = 5000
 ```
 
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`,
+`JCODE_HOOK_SESSION_END`, `JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`,
+`JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+
+### Several commands per event
+
+Every hook key accepts either a single command string or an **array** of
+commands, so you do not have to write a fan-out dispatcher script just to run
+two unrelated integrations:
+
+```toml
+[hooks]
+turn_end = ["~/bin/jcode-event-log", "~/bin/jcode-turn-notify"]
+pre_tool = ["~/bin/policy-secrets", "~/bin/policy-paths"]
+```
+
+Commands run in declaration order; blank entries are skipped. For observers
+all of them are dispatched. For the `pre_tool` gate **every** command runs and
+the call is blocked if *any* of them blocks — the first block decides the error
+message shown to the model. An env override replaces the whole list with the
+single command it names.
 
 ## Common contract
 
@@ -32,7 +52,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -40,9 +60,20 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
 **observers**: spawned detached, fire-and-forget. They can never block or slow
 the agent; failures are only logged.
+
+### `turn_start`
+
+Fires when a turn begins — before the model starts generating, and before the
+first `pre_tool`. This covers the otherwise-invisible window between prompt
+submission and the first tool call, which is what status bars and terminal
+multiplexers need in order to show that the agent is busy.
+
+Extra fields: `JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (the streaming chat
+turn path is the only dispatch site today, so `SOURCE` is currently always
+`chat`).
 
 ### `turn_end`
 
@@ -141,7 +172,7 @@ post_tool     = "~/bin/jcode-event-log"
 
 - Hook lookups are config-driven and re-read on config reload; you can add or
   change hooks without restarting jcode.
-- Hot paths (`pre_tool`/`post_tool`) check whether a hook is configured before
+- Hot paths (`turn_start`/`pre_tool`/`post_tool`) check whether a hook is configured before
   building any payload, so unconfigured hooks cost ~nothing.
 - The recursion guard (`JCODE_HOOKS_DISABLED=1`) means a hook may safely call
   `jcode` CLI commands without re-triggering hooks in that nested process.
