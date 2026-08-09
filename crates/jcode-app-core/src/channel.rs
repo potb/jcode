@@ -27,11 +27,32 @@ pub trait MessageChannel: Send + Sync {
 #[derive(Clone)]
 pub struct ChannelRegistry {
     channels: Vec<Arc<dyn MessageChannel>>,
+    /// Channels the user switched ON but which could not be built because
+    /// credentials were missing. Kept so a failed send can say what is
+    /// actually wrong instead of claiming nothing was configured at all.
+    skipped: Vec<String>,
 }
 
 impl ChannelRegistry {
     pub fn from_config(config: &SafetyConfig) -> Self {
         let mut channels: Vec<Arc<dyn MessageChannel>> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+
+        if config.telegram_enabled
+            && (config.telegram_bot_token.is_none() || config.telegram_chat_id.is_none())
+        {
+            skipped.push(
+                "telegram: enabled but telegram_bot_token/telegram_chat_id incomplete".to_string(),
+            );
+        }
+
+        if config.discord_enabled
+            && (config.discord_bot_token.is_none() || config.discord_channel_id.is_none())
+        {
+            skipped.push(
+                "discord: enabled but discord_bot_token/discord_channel_id incomplete".to_string(),
+            );
+        }
 
         if config.telegram_enabled
             && let (Some(token), Some(chat_id)) = (
@@ -93,6 +114,11 @@ impl ChannelRegistry {
                         repo.is_some(),
                         token.is_some()
                     ));
+                    skipped.push(format!(
+                        "github: enabled but incomplete (github_repo {}, token {})",
+                        if repo.is_some() { "set" } else { "missing" },
+                        if token.is_some() { "set" } else { "missing" }
+                    ));
                 }
             }
         }
@@ -127,6 +153,9 @@ impl ChannelRegistry {
                     logging::warn(
                         "jade_relay_enabled but api_base/token/session_id incomplete; skipping",
                     );
+                    skipped.push(
+                        "jade_relay: enabled but api_base/token/session_id incomplete".to_string(),
+                    );
                 }
             }
         }
@@ -135,7 +164,7 @@ impl ChannelRegistry {
             "channel registry initialized channel_count={}",
             channels.len()
         ));
-        Self { channels }
+        Self { channels, skipped }
     }
 
     pub fn send_all(&self, text: &str) {
@@ -184,6 +213,12 @@ impl ChannelRegistry {
             .filter(|c| c.is_send_enabled())
             .cloned()
             .collect()
+    }
+
+    /// Human-readable reasons for channels that were switched on but could not
+    /// be registered. Empty when every enabled channel built successfully.
+    pub fn skipped_reasons(&self) -> &[String] {
+        &self.skipped
     }
 }
 
@@ -786,7 +821,6 @@ impl MessageChannel for JadeRelayChannel {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // GitHub issue channel
 // ---------------------------------------------------------------------------
@@ -1250,6 +1284,45 @@ mod tests {
         assert_eq!(urlencoding_encode("sess-relay-test"), "sess-relay-test");
         assert_eq!(urlencoding_encode("a/b c"), "a%2Fb%20c");
         assert_eq!(urlencoding_encode("user.name~1_2"), "user.name~1_2");
+    }
+
+    #[test]
+    fn test_skipped_reasons_name_the_half_configured_channel() {
+        // Nothing enabled: nothing to explain.
+        let cfg = SafetyConfig::default();
+        assert!(
+            ChannelRegistry::from_config(&cfg)
+                .skipped_reasons()
+                .is_empty(),
+            "a default config has no enabled channels to skip"
+        );
+
+        // Enabled but missing credentials: each one must be named, so the
+        // caller can say what is actually wrong instead of reporting that no
+        // channel was configured at all.
+        let cfg = SafetyConfig {
+            github_enabled: true,
+            telegram_enabled: true,
+            jade_relay_enabled: true,
+            ..SafetyConfig::default()
+        };
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(reg.channel_names().is_empty());
+        let joined = reg.skipped_reasons().join("; ");
+        assert!(joined.contains("github"), "got: {joined}");
+        assert!(joined.contains("telegram"), "got: {joined}");
+        assert!(joined.contains("jade_relay"), "got: {joined}");
+
+        // Fully configured: registered, and nothing reported as skipped.
+        let cfg = SafetyConfig {
+            telegram_enabled: true,
+            telegram_bot_token: Some("tok".to_string()),
+            telegram_chat_id: Some("42".to_string()),
+            ..SafetyConfig::default()
+        };
+        let reg = ChannelRegistry::from_config(&cfg);
+        assert!(reg.channel_names().iter().any(|n| n == "telegram"));
+        assert!(reg.skipped_reasons().is_empty());
     }
 
     #[test]
