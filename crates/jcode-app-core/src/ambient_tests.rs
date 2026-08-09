@@ -434,6 +434,58 @@ fn test_build_ambient_system_prompt_with_data() {
     assert!(prompt.contains("Tests were flaky yesterday"));
 }
 
+/// A pushed branch with no PR is invisible to the user: they see no work at
+/// all. When a PR target is configured the prompt must name that exact repo,
+/// because `gh pr create` otherwise defaults to a fork's UPSTREAM and fails.
+#[test]
+fn ambient_prompt_names_the_configured_pull_request_repo() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let render = |extra: &str| {
+        std::fs::write(
+            temp.path().join("config.toml"),
+            format!("[ambient]\nenabled = true\n{extra}"),
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let configured = render("pr_repo = \"potb/jcode\"\n");
+    assert!(
+        configured.contains("gh pr create --repo potb/jcode"),
+        "the prompt must spell out the exact PR command for the fork"
+    );
+    assert!(
+        configured.contains("Never open a PR against the upstream"),
+        "the upstream default is the failure mode, so it must be called out"
+    );
+
+    let unset = render("");
+    assert!(
+        !unset.contains("## Pull Requests"),
+        "with no target configured the prompt must not invent one"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
 #[test]
 fn ambient_prompt_names_the_project_each_recent_session_ran_in() {
     // Ambient has no working directory of its own, so without the project

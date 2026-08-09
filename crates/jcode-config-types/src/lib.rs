@@ -1275,6 +1275,23 @@ pub struct AmbientConfig {
     pub proactive_work: bool,
     /// Proactive work branch prefix (default: "ambient/")
     pub work_branch_prefix: String,
+
+    /// Where ambient must open pull requests for code work, as `owner/repo`.
+    ///
+    /// A pushed branch with no PR is invisible: the user sees no work at all.
+    /// On a fork, `gh pr create` also defaults to the UPSTREAM repo and fails
+    /// with a permissions error, which historically left ambient's work
+    /// stranded on unreviewed branches. Naming the fork here makes the review
+    /// target explicit.
+    ///
+    /// ```toml
+    /// pr_repo = "potb/jcode"
+    /// ```
+    ///
+    /// Empty (the default) means ambient infers the target from the repo's
+    /// `origin` remote.
+    #[serde(default)]
+    pub pr_repo: String,
     /// Show ambient cycle in a terminal window (default: true)
     pub visible: bool,
     /// Auto-approve `request_permission` calls made by ambient cycles instead of
@@ -1339,6 +1356,7 @@ impl Default for AmbientConfig {
             pause_on_active_session: true,
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
+            pr_repo: String::new(),
             visible: true,
             auto_approve_permissions: false,
             active_windows: Vec::new(),

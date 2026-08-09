@@ -1085,6 +1085,30 @@ First time ambient runs, there's no usage history, no patterns, no feedback memo
 
 ## Per-Project Configuration
 
+### Pull requests: where the work shows up
+
+Ambient's code work is only visible to you as a pull request. A pushed branch
+with no PR looks identical to having done nothing.
+
+```toml
+[ambient]
+pr_repo = "you/your-fork"   # every PR opens here
+```
+
+With this set, the cycle prompt names the exact `gh pr create` command for that
+fork and tells the agent never to target the upstream repository.
+
+Two traps this closes, both observed in real cycles:
+
+- On a fork, `gh pr create` defaults to the UPSTREAM repo and fails with a
+  permissions error even when you are an admin of your fork. The agent read
+  that as "cannot open PRs" and left the branch unreviewed. Running
+  `gh repo set-default OWNER/REPO` once per clone fixes the same failure for
+  interactive sessions.
+- Branches cut from a stale local base carry unrelated reverts. The agent must
+  branch from the current remote head, and check that the diff against the
+  default branch touches only files its task is about.
+
 ### Multi-project context
 
 A single ambient agent serves every project, one cycle at a time. The cycle

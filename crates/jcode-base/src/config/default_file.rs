@@ -593,6 +593,11 @@ pause_on_active_session = true
 proactive_work = true
 # Branch prefix for proactive work
 work_branch_prefix = "ambient/"
+# Where ambient opens pull requests for code work, as "owner/repo". A pushed
+# branch with no PR is invisible to you, and on a fork `gh pr create` defaults
+# to the UPSTREAM repo and fails, stranding the work. Naming your fork here
+# makes the review target explicit. Empty = infer from the origin remote.
+# pr_repo = "you/your-fork"
 # Show ambient cycle in a terminal window (default: true)
 # visible = true
 # Auto-approve request_permission calls from ambient cycles instead of queueing
