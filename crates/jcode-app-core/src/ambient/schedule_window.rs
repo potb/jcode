@@ -109,7 +109,10 @@ pub fn parse_window(spec: &str) -> Option<ScheduleWindow> {
     Some(ScheduleWindow { days, start, end })
 }
 
-fn parse_time(s: &str) -> Option<NaiveTime> {
+/// Parse a `HH:MM` (or `HH:MM:SS`) time-of-day. `pub(crate)` so
+/// `cron::schedule` can reuse it for `at` schedules instead of duplicating
+/// the grammar.
+pub(crate) fn parse_time(s: &str) -> Option<NaiveTime> {
     let s = s.trim();
     let (h, m) = s.split_once(':')?;
     let h: u32 = h.trim().parse().ok()?;
@@ -135,8 +138,10 @@ fn parse_day(s: &str) -> Option<Weekday> {
     }
 }
 
-/// Parse a day spec: `mon`, `mon-fri`, `mon,wed,fri`, `weekdays`, `weekends`, `daily`.
-fn parse_days(s: &str) -> Option<Vec<Weekday>> {
+/// Parse a day spec: `mon`, `mon-fri`, `mon,wed,fri`, `weekdays`, `weekends`,
+/// `daily`. `pub(crate)` so `cron::schedule` reuses the same grammar for `at`
+/// schedules rather than a second, subtly different parser.
+pub(crate) fn parse_days(s: &str) -> Option<Vec<Weekday>> {
     let s = s.trim();
     match s {
         "daily" | "everyday" | "all" => {
