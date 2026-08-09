@@ -7,6 +7,7 @@ use super::debug_ambient::maybe_handle_ambient_command;
 use super::debug_command_exec::{
     DebugInterruptContext, execute_debug_command, resolve_debug_session,
 };
+use super::debug_cron::maybe_handle_cron_command;
 use super::debug_events::{
     maybe_handle_event_query_command, maybe_handle_event_subscription_command,
 };
@@ -502,6 +503,8 @@ pub(super) async fn handle_debug_client(
                         } else if let Some(output) =
                             maybe_handle_ambient_command(cmd, &ambient_runner, &provider).await?
                         {
+                            Ok(output)
+                        } else if let Some(output) = maybe_handle_cron_command(cmd).await? {
                             Ok(output)
                         } else if maybe_handle_event_subscription_command(
                             id,

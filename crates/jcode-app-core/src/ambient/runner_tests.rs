@@ -121,6 +121,46 @@ async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
     let _ = task.await;
 }
 
+/// The user's actual ask: a `[[cron]]` job must fire from the runner loop
+/// even with ambient mode off entirely, since the loop is the only thing
+/// keeping `crate::cron::tick` on a live clock (see `server.rs`'s comment
+/// on spawning this loop unconditionally).
+#[tokio::test]
+async fn runner_loop_fires_a_cron_job_with_ambient_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let marker = temp.path().join("cron-ran.txt");
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        format!(
+            "[[cron]]\nid = \"loop-test-job\"\nevery = \"1m\"\ncommand = \"touch {}\"\n",
+            marker.display()
+        ),
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let task = tokio::spawn(runner.clone().run_loop(provider));
+
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        marker.exists(),
+        "cron job should have fired from the runner loop despite ambient being disabled"
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
 #[tokio::test]
 async fn spawn_target_creates_one_child_session_and_runs_task() {
     let _guard = crate::storage::lock_test_env();
@@ -926,6 +966,55 @@ fn a_corrupt_inflight_record_is_survivable_and_self_clearing() {
     crate::config::invalidate_config_cache();
 }
 
+/// A manual trigger must survive the trip to disk.
+///
+/// `should_run` is evaluated on a freshly loaded `AmbientManager`, so an
+/// in-memory-only status change is invisible to it. Observed live: `jcode
+/// ambient trigger` printed "Ambient cycle triggered", the loop woke, re-read
+/// the old `Scheduled` status from disk, logged "not time to run" and slept
+/// again. The command reported success and did nothing.
+#[tokio::test]
+async fn a_manual_trigger_is_persisted_so_the_loop_can_see_it() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    // `should_run` short-circuits on `is_enabled()`, which the temp JCODE_HOME
+    // isolates away, so the assertion below would pass vacuously without this.
+    let _enabled = EnvVarGuard::set_path("JCODE_AMBIENT_ENABLED", std::path::Path::new("true"));
+    crate::config::invalidate_config_cache();
+
+    let mut state = crate::ambient::AmbientState::load().expect("load state");
+    state.status = crate::ambient::AmbientStatus::Scheduled {
+        next_wake: chrono::Utc::now() + chrono::Duration::hours(3),
+    };
+    state.save().expect("persist a distant scheduled wake");
+
+    assert!(
+        !crate::ambient::AmbientManager::new()
+            .expect("manager")
+            .should_run(),
+        "a distant scheduled wake must not run on its own"
+    );
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    runner.trigger().await;
+
+    let reloaded = crate::ambient::AmbientState::load().expect("reload state");
+    assert!(
+        matches!(reloaded.status, crate::ambient::AmbientStatus::Idle),
+        "trigger must persist Idle, got {:?}",
+        reloaded.status
+    );
+    assert!(
+        crate::ambient::AmbientManager::new()
+            .expect("manager")
+            .should_run(),
+        "a triggered cycle must be runnable from a freshly loaded manager"
+    );
+
+    crate::config::invalidate_config_cache();
+}
+
 /// A cycle's own `schedule_ambient` request is a preference, not an override.
 ///
 /// `record_cycle` writes the agent's requested wake as a `Scheduled` status
@@ -999,55 +1088,6 @@ fn a_disabled_or_paused_runner_is_not_rescheduled() {
         ),
         None
     );
-}
-
-/// A manual trigger must survive the trip to disk.
-///
-/// `should_run` is evaluated on a freshly loaded `AmbientManager`, so an
-/// in-memory-only status change is invisible to it. Observed live: `jcode
-/// ambient trigger` printed "Ambient cycle triggered", the loop woke, re-read
-/// the old `Scheduled` status from disk, logged "not time to run" and slept
-/// again. The command reported success and did nothing.
-#[tokio::test]
-async fn a_manual_trigger_is_persisted_so_the_loop_can_see_it() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    // `should_run` short-circuits on `is_enabled()`, which the temp JCODE_HOME
-    // isolates away, so the assertion below would pass vacuously without this.
-    let _enabled = EnvVarGuard::set_path("JCODE_AMBIENT_ENABLED", std::path::Path::new("true"));
-    crate::config::invalidate_config_cache();
-
-    let mut state = crate::ambient::AmbientState::load().expect("load state");
-    state.status = crate::ambient::AmbientStatus::Scheduled {
-        next_wake: chrono::Utc::now() + chrono::Duration::hours(3),
-    };
-    state.save().expect("persist a distant scheduled wake");
-
-    assert!(
-        !crate::ambient::AmbientManager::new()
-            .expect("manager")
-            .should_run(),
-        "a distant scheduled wake must not run on its own"
-    );
-
-    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
-    runner.trigger().await;
-
-    let reloaded = crate::ambient::AmbientState::load().expect("reload state");
-    assert!(
-        matches!(reloaded.status, crate::ambient::AmbientStatus::Idle),
-        "trigger must persist Idle, got {:?}",
-        reloaded.status
-    );
-    assert!(
-        crate::ambient::AmbientManager::new()
-            .expect("manager")
-            .should_run(),
-        "a triggered cycle must be runnable from a freshly loaded manager"
-    );
-
-    crate::config::invalidate_config_cache();
 }
 
 // ---------------------------------------------------------------------------

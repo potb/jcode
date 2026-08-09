@@ -436,6 +436,16 @@ impl AmbientRunnerHandle {
         let windows = configured_windows();
         let window_state = schedule_window::evaluate(&windows, &Local::now());
 
+        // Fold in the nearest upcoming `[[cron]]` fire too: cron rides this
+        // same runner loop (see `run_loop`'s call to `crate::cron::tick`), so
+        // "when does anything next happen" belongs in the one status call
+        // rather than requiring a separate `cron:list` round trip.
+        let next_cron_due = crate::cron::next_due();
+        let next_cron_due_in = next_cron_due.map(|next| {
+            let mins = (next - Utc::now()).num_minutes().max(0) as u32;
+            crate::ambient::format_minutes_human(mins)
+        });
+
         serde_json::json!({
             "enabled": config().ambient.enabled,
             "status": status_str,
@@ -461,6 +471,8 @@ impl AmbientRunnerHandle {
             "next_scheduled_task_due": next_reminder_due,
             "overdue_scheduled_task_count": overdue_reminder_count,
             "active_user_sessions": active_sessions,
+            "next_cron_due": next_cron_due.map(|t| t.to_rfc3339()),
+            "next_cron_due_in": next_cron_due_in,
         })
         .to_string()
     }
@@ -843,6 +855,14 @@ impl AmbientRunnerHandle {
                 ));
             }
 
+            // Config-declared cron jobs. Run unconditionally, every pass,
+            // regardless of `ambient_enabled`/`ambient_allowed`: cron is
+            // user-declared clock work ("merge upstream every 6 hours"), not
+            // agent self-wake, so it must not depend on ambient being turned
+            // on at all. `window_open` still applies to the (opt-in) subset
+            // of jobs that set `respect_windows = true`.
+            let cron_deadlines = crate::cron::tick(window_open);
+
             if ambient_allowed {
                 // Update scheduler's user-active state
                 let active_sessions = *self.inner.active_user_sessions.read().await;
@@ -943,6 +963,16 @@ impl AmbientRunnerHandle {
                 // something else (a cycle already running, ambient paused)
                 // blocks the run. Re-arming a ~1s timer for it would spin the
                 // loop until that condition clears.
+                //
+                // Cron's `unblocked` deadline (jobs with `respect_windows =
+                // false`, the default) is folded in alongside the
+                // direct-delivery deadline in every branch below: both bypass
+                // wall-clock windows and both must be able to wake the loop
+                // even while ambient itself is disabled. Cron's `windowed`
+                // deadline instead rides with the ambient deadline, since an
+                // opt-in `respect_windows = true` job shares ambient's
+                // window-closed "do not shorten" rule for exactly the same
+                // spin-avoidance reason.
                 let sleep_secs = if ambient_allowed && !window_open {
                     // Closed window: sleep until it opens rather than polling.
                     // An ambient deadline falling inside the closed period must
@@ -957,7 +987,7 @@ impl AmbientRunnerHandle {
                         Utc::now(),
                         Local::now(),
                         window_state.next_open_at(),
-                        next_direct_due,
+                        earliest_deadline(next_direct_due, cron_deadlines.unblocked),
                     )
                 } else if ambient_allowed {
                     let interval = scheduler
@@ -967,13 +997,21 @@ impl AmbientRunnerHandle {
                     idle_sleep_secs(
                         Utc::now(),
                         interval,
-                        earliest_deadline(next_direct_due, next_ambient_due),
+                        earliest_deadline(
+                            earliest_deadline(next_direct_due, next_ambient_due),
+                            earliest_deadline(cron_deadlines.unblocked, cron_deadlines.windowed),
+                        ),
                     )
                 } else {
-                    // With ambient disabled only direct deliveries still need
-                    // servicing, so an ambient-only deadline must not shorten
+                    // With ambient disabled only direct deliveries and
+                    // unblocked cron jobs still need servicing; an
+                    // ambient-only or window-gated deadline must not shorten
                     // the idle poll.
-                    idle_sleep_secs(Utc::now(), MAX_IDLE_POLL_SECS, next_direct_due)
+                    idle_sleep_secs(
+                        Utc::now(),
+                        MAX_IDLE_POLL_SECS,
+                        earliest_deadline(next_direct_due, cron_deadlines.unblocked),
+                    )
                 };
 
                 logging::info(&format!(
@@ -1148,6 +1186,14 @@ impl AmbientRunnerHandle {
             // otherwise leave it waiting a full interval, and this is the more
             // likely path of the two, since scheduling an item is exactly the
             // kind of thing a cycle does on its way out.
+            //
+            // Cron deadlines are recomputed here too (not reused from before
+            // the cycle) for the same reason `next_item_due` is: a job can
+            // have come due, or `run_job_now` fired one, while the cycle was
+            // running. `window_open` is reused as-is rather than re-evaluated
+            // against the clock again; a cycle is short relative to a window
+            // boundary, and the idle branch above re-evaluates it fresh on
+            // every subsequent pass regardless.
             let interval = scheduler.calculate_interval(None);
             let next_due = match AmbientManager::new() {
                 Ok(mgr) => mgr.next_item_due(),
@@ -1159,6 +1205,14 @@ impl AmbientRunnerHandle {
                     None
                 }
             };
+            let post_cycle_cron_deadlines = crate::cron::peek_next_due(window_open);
+            let next_due = earliest_deadline(
+                next_due,
+                earliest_deadline(
+                    post_cycle_cron_deadlines.unblocked,
+                    post_cycle_cron_deadlines.windowed,
+                ),
+            );
             let sleep_secs = idle_sleep_secs(Utc::now(), interval.as_secs().max(30), next_due);
 
             // Update state with scheduled wake.

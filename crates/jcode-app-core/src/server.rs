@@ -23,6 +23,7 @@ mod comm_sync;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
+mod debug_cron;
 mod debug_events;
 mod debug_help;
 mod debug_jobs;

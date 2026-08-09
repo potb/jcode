@@ -45,6 +45,10 @@ pub async fn run() -> Result<()> {
     crate::config::on_config_reloaded(sync_output_style_from_config);
     crate::config::on_config_reloaded(crate::auth::AuthStatus::invalidate_cache);
     crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
+    // Cron warns once per malformed [[cron]] job rather than once per runner
+    // pass; a reload is the point at which a previously-broken job may have
+    // been fixed, so let it be reported again.
+    crate::config::on_config_reloaded(crate::cron::forget_invalid_warnings);
 
     // Invert the legacy provider_catalog -> auth dependency: provider_catalog
     // consults registered fallback resolvers, and auth (the higher layer)

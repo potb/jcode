@@ -1,9 +1,9 @@
 {
-  "total": 3270,
+  "total": 3276,
   "totals_by_pattern": {
-    "dot_ok": 1230,
-    "let_underscore": 1210,
-    "unwrap_or_default": 830
+    "dot_ok": 1231,
+    "let_underscore": 1214,
+    "unwrap_or_default": 831
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -90,6 +90,21 @@
       "dot_ok": 0,
       "let_underscore": 5,
       "unwrap_or_default": 5
+    },
+    "crates/jcode-app-core/src/cron/exec.rs": {
+      "dot_ok": 0,
+      "let_underscore": 4,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-app-core/src/cron/schedule.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-app-core/src/cron/state.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/external_auth.rs": {
       "dot_ok": 0,
