@@ -659,6 +659,26 @@ Semantics worth knowing:
 - **`jcode ambient trigger` overrides the window.** An explicit human request
   is not the scheduled work the constraint exists to hold back.
 
+#### Suspending the windows without losing them
+
+To run around the clock for a while, do not delete the schedule: set the flag.
+
+```toml
+[ambient]
+active_windows = ["weekdays 09:00-23:00"]   # kept, just not enforced
+ignore_active_windows = true
+```
+
+A tuned schedule is worth keeping, and deleting it is the only other way to
+escape it. With the flag set every window decision sees an unrestricted clock:
+cycle gating, sleep length, and `[[cron]]` jobs with `respect_windows = true`.
+Clear the flag and the original quiet hours come back with nothing to retype.
+
+`ambient:status` reports both views, so the suspension is never mistaken for
+lost config: `active_windows` is what you configured,
+`active_windows_enforced` is what is actually in force (`unrestricted` while
+ignored), and `active_windows_ignored` says which mode you are in.
+
 ### Notifications (what reaches your phone)
 
 Windows decide *when* the agent runs; this decides *when it interrupts you*.

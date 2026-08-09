@@ -40,8 +40,17 @@ const MAX_CLOSED_WINDOW_SLEEP_SECS: u64 = 3600;
 ///
 /// A typo must not silently widen an allow-list into "always on", so bad
 /// entries are reported rather than dropped in silence.
+///
+/// `ignore_active_windows` is honoured here rather than at each call site so
+/// every window decision (cycle gating, sleep length, status reporting, cron
+/// `respect_windows`) sees the same answer. Returning no windows is exactly the
+/// unconfigured case, which already means "always open".
 fn configured_windows() -> Vec<schedule_window::ScheduleWindow> {
-    let specs = config().ambient.active_windows.clone();
+    let ambient = &config().ambient;
+    if ambient.ignore_active_windows {
+        return Vec::new();
+    }
+    let specs = ambient.active_windows.clone();
     let (windows, bad) = schedule_window::parse_windows(&specs);
     if !bad.is_empty() {
         logging::warn(&format!(
@@ -446,10 +455,21 @@ impl AmbientRunnerHandle {
             crate::ambient::format_minutes_human(mins)
         });
 
+        // Report the schedule the user configured, not the effective empty one:
+        // with `ignore_active_windows` the point is that the schedule is
+        // preserved, so hiding it here would look like data loss.
+        let ignore_windows = config().ambient.ignore_active_windows;
+        let configured_specs = config().ambient.active_windows.clone();
+        let (configured_parsed, _bad) = schedule_window::parse_windows(&configured_specs);
+        let configured_desc = schedule_window::describe(&configured_parsed);
+        let enforced_desc = schedule_window::describe(&windows);
+
         serde_json::json!({
             "enabled": config().ambient.enabled,
             "status": status_str,
-            "active_windows": schedule_window::describe(&windows),
+            "active_windows": configured_desc,
+            "active_windows_ignored": ignore_windows,
+            "active_windows_enforced": enforced_desc,
             "window_open": window_state.is_open(),
             "window_next_open": window_state.next_open_at().map(|t| t.to_rfc3339()),
             "loop_running": running,

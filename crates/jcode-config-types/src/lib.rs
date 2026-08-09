@@ -1309,6 +1309,21 @@ pub struct AmbientConfig {
     /// Scheduled items that come due while closed are not dropped; they run
     /// when the next window opens.
     pub active_windows: Vec<String>,
+
+    /// Temporarily ignore `active_windows` without deleting the schedule.
+    ///
+    /// A user who wants ambient running around the clock for a while should not
+    /// have to delete a schedule they spent time tuning and will want back.
+    /// With this set, the configured windows are kept but not enforced.
+    ///
+    /// ```toml
+    /// active_windows = ["weekdays 09:00-23:00"]
+    /// ignore_active_windows = true   # run anytime; schedule preserved
+    /// ```
+    ///
+    /// Cron jobs with `respect_windows = true` follow the same override.
+    #[serde(default)]
+    pub ignore_active_windows: bool,
 }
 
 impl Default for AmbientConfig {
@@ -1327,6 +1342,7 @@ impl Default for AmbientConfig {
             visible: true,
             auto_approve_permissions: false,
             active_windows: Vec::new(),
+            ignore_active_windows: false,
         }
     }
 }

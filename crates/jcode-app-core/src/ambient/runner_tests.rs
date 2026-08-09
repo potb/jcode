@@ -1199,3 +1199,83 @@ async fn manual_trigger_overrides_closed_window() {
         "a triggered cycle must start despite the window being closed"
     );
 }
+
+/// A schedule that can only be escaped by deleting it is a schedule the user
+/// will not get back. `ignore_active_windows` must suspend enforcement while
+/// leaving the configured windows in place.
+#[test]
+fn ignore_active_windows_opens_the_window_but_keeps_the_schedule() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    // A window that is closed right now, whenever "now" happens to be: two
+    // one-minute windows on opposite sides of the clock cannot both be open.
+    let write_config = |extra: &str| {
+        std::fs::write(
+            temp.path().join("config.toml"),
+            format!(
+                "[ambient]\nenabled = true\nactive_windows = [\"daily 00:00-00:01\", \
+                 \"daily 12:00-12:01\"]\n{extra}"
+            ),
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+    };
+
+    write_config("");
+    let enforced = super::configured_windows();
+    assert_eq!(
+        enforced.len(),
+        2,
+        "without the flag the configured windows must be enforced"
+    );
+
+    write_config("ignore_active_windows = true\n");
+    assert!(
+        super::configured_windows().is_empty(),
+        "with the flag set no window may gate a cycle"
+    );
+    assert!(
+        super::current_window_state().is_open(),
+        "ignoring the windows must leave ambient permanently runnable"
+    );
+    assert_eq!(
+        crate::config::config().ambient.active_windows.len(),
+        2,
+        "the flag must not consume or rewrite the user's schedule"
+    );
+
+    // Flipping the flag back restores enforcement with no retyping.
+    write_config("ignore_active_windows = false\n");
+    assert_eq!(
+        super::configured_windows().len(),
+        2,
+        "clearing the flag must restore the preserved schedule"
+    );
+}
+
+/// Cron jobs that opted into ambient's quiet hours must follow the same
+/// override, otherwise "run around the clock" would still stall those jobs.
+#[test]
+fn ignoring_active_windows_also_unblocks_window_gated_cron_jobs() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nactive_windows = [\"daily 00:00-00:01\", \
+         \"daily 12:00-12:01\"]\nignore_active_windows = true\n\n[[cron]]\n\
+         id = \"gated\"\nevery = \"1m\"\nrespect_windows = true\ncommand = \"true\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    // This is the value the runner loop feeds cron::tick.
+    let window_open = super::current_window_state().is_open();
+    assert!(
+        window_open,
+        "a window-gated cron job must see an open window when windows are ignored"
+    );
+}
