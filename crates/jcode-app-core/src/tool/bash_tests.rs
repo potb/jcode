@@ -137,6 +137,40 @@ fn the_dynamic_cargo_shim_finds_the_wrapper_after_a_cd() {
     );
 }
 
+/// A background task must record and display the command the caller wrote, not
+/// the internal cargo shim prepended to it. Recording the rewritten command
+/// stored ~20 lines of shell boilerplate as the "full command" and made the
+/// task card read `cargo() {`, which is worse than the truncated name it
+/// replaced.
+#[test]
+fn a_background_task_records_the_users_command_not_the_cargo_shim() {
+    let user_command = "cd /home/potb/jcode && cargo test -p demo";
+    let wrapped = wrap_repo_cargo_commands(user_command, None)
+        .expect("a cargo command is wrapped");
+
+    // Precondition: the rewritten command really does start with the shim, so
+    // this test fails loudly if the wrapper stops being the risk.
+    assert!(
+        wrapped.starts_with("cargo() {"),
+        "expected the shim to lead the rewritten command, got: {wrapped}"
+    );
+
+    assert_eq!(
+        summarize_background_command(None, user_command),
+        summarize_background_command(None, "cd /home/potb/jcode && cargo test -p demo"),
+        "the display name must be derived from the user's command"
+    );
+    assert_ne!(
+        summarize_background_command(None, user_command),
+        summarize_background_command(None, &wrapped),
+        "deriving the display name from the wrapped command is the bug"
+    );
+    assert!(
+        !summarize_background_command(None, user_command).contains("cargo() {"),
+        "the task card must never show the shim"
+    );
+}
+
 #[test]
 fn cargo_wrapper_path_is_shell_quoted() {
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");

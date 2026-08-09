@@ -14,6 +14,7 @@ async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
         .spawn_with_notify(
             "bash",
             Some("checks".to_string()),
+            None,
             "session-started",
             true,
             false,
@@ -59,6 +60,7 @@ async fn update_delivery_applies_to_running_task_completion() -> Result<()> {
         .spawn_with_notify(
             "bash",
             None,
+            None,
             "session-test",
             false,
             false,
@@ -103,6 +105,7 @@ async fn update_progress_persists_status_and_emits_bus_event() -> Result<()> {
     let info = manager
         .spawn_with_notify(
             "bash",
+            None,
             None,
             "session-progress",
             false,
@@ -164,6 +167,7 @@ async fn wait_returns_when_task_finishes() -> Result<()> {
         .spawn_with_notify(
             "bash",
             None,
+            None,
             "session-wait-finish",
             false,
             false,
@@ -194,6 +198,7 @@ async fn wait_returns_on_progress_checkpoint() -> Result<()> {
     let info = manager
         .spawn_with_notify(
             "bash",
+            None,
             None,
             "session-wait-progress",
             false,
@@ -247,6 +252,7 @@ async fn wait_returns_on_timeout() -> Result<()> {
         .spawn_with_notify(
             "bash",
             None,
+            None,
             "session-wait-timeout",
             false,
             false,
@@ -272,6 +278,7 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
         task_id: task_id.to_string(),
         tool_name: "swarm".to_string(),
         display_name: None,
+        command: None,
         session_id: session_id.to_string(),
         status: BackgroundTaskStatus::Running,
         exit_code: None,
@@ -304,6 +311,7 @@ async fn tasks_map_prunes_entry_after_natural_completion() -> Result<()> {
     let info = manager
         .spawn_with_notify(
             "bash",
+            None,
             None,
             "session-prune",
             false,
@@ -482,6 +490,7 @@ async fn abort_live_tasks_for_reload_finalizes_running_tasks() -> Result<()> {
         .spawn_with_notify(
             "selfdev-build",
             Some("selfdev build".to_string()),
+            None,
             "session-reload-abort",
             false,
             false,
@@ -526,6 +535,7 @@ async fn abort_live_tasks_for_reload_keeps_naturally_finished_status() -> Result
         .spawn_with_notify(
             "bash",
             None,
+            None,
             "session-reload-finished",
             false,
             false,
@@ -560,5 +570,116 @@ async fn abort_live_tasks_for_reload_keeps_naturally_finished_status() -> Result
         BackgroundTaskStatus::Completed,
         "a task that finished before the sweep must keep its real status"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_with_notify_persists_the_full_command_in_the_status_file() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let full_command =
+        "cargo test -p jcode-base --all-features -- --nocapture --test-threads=1".to_string();
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            Some("cargo test".to_string()),
+            Some(full_command.clone()),
+            "session-command",
+            false,
+            false,
+            |_output_path| async move { Ok(TaskResult::completed(Some(0))) },
+        )
+        .await;
+
+    // The initial status file carries the verbatim command alongside the short
+    // display name, so a reader never has to reconstruct it from the summary.
+    let initial = manager
+        .status(&info.task_id)
+        .await
+        .expect("status file should exist right after spawn");
+    assert_eq!(initial.command.as_deref(), Some(full_command.as_str()));
+    assert_eq!(initial.display_name.as_deref(), Some("cargo test"));
+
+    // And it survives the terminal rewrite, so completed tasks stay inspectable.
+    for _ in 0..50 {
+        let status = manager
+            .status(&info.task_id)
+            .await
+            .expect("status file should remain readable");
+        if status.status != BackgroundTaskStatus::Running {
+            assert_eq!(status.command.as_deref(), Some(full_command.as_str()));
+            return Ok(());
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    Err(anyhow!("task {} never reached a terminal status", info.task_id))
+}
+
+#[test]
+fn task_status_file_without_a_command_field_still_deserializes() {
+    // Status files written by older builds have no `command` key at all;
+    // reading one must not fail, it must just report an unknown command.
+    let json = serde_json::json!({
+        "task_id": "legacy1",
+        "tool_name": "bash",
+        "display_name": "old task",
+        "session_id": "s1",
+        "status": "running",
+        "exit_code": null,
+        "error": null,
+        "started_at": Utc::now().to_rfc3339(),
+        "completed_at": null,
+        "duration_secs": null,
+    });
+
+    let status: TaskStatusFile =
+        serde_json::from_value(json).expect("legacy status files must stay readable");
+    assert_eq!(status.command, None);
+    assert_eq!(status.display_name.as_deref(), Some("old task"));
+}
+
+/// The TUI client renders in a different process from the server that actually
+/// runs tools, so the background widget must see running tasks it does not own.
+/// Simulate that split with two managers over one shared task directory.
+#[tokio::test]
+async fn running_snapshot_for_session_sees_tasks_owned_by_another_process() -> Result<()> {
+    let tmp = tempdir()?;
+    let server = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let client = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let info = server
+        .spawn_with_notify(
+            "bash",
+            Some("long build".to_string()),
+            None,
+            "session-split",
+            true,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_millis(400)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    // The client owns no task futures, so the process-local snapshot is blind.
+    let (local_count, _, _) = client.running_snapshot();
+    assert_eq!(local_count, 0, "client process owns no tasks");
+
+    let (count, labels, _) = client.running_snapshot_for_session("session-split");
+    assert_eq!(count, 1, "client should see the server's running task");
+    assert_eq!(labels, vec!["long build".to_string()]);
+
+    // Tasks for other sessions must not leak into this session's widget.
+    let (other_count, _, _) = client.running_snapshot_for_session("session-other");
+    assert_eq!(other_count, 0);
+
+    // The owning process must not double count its own task.
+    let (server_count, _, _) = server.running_snapshot_for_session("session-split");
+    assert_eq!(server_count, 1, "task should be counted exactly once");
+
+    drop(info);
     Ok(())
 }

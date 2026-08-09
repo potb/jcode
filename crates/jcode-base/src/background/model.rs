@@ -48,6 +48,13 @@ pub struct TaskStatusFile {
     pub tool_name: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// The full, untruncated command line this task is running, when the task
+    /// came from a command-shaped tool. `display_name` is a short summary meant
+    /// for a one-line card; this is the verbatim text, so the TUI and the `bg`
+    /// tool can show exactly what was run. `None` for tasks written by older
+    /// builds or for tools that are not command-shaped.
+    #[serde(default)]
+    pub command: Option<String>,
     pub session_id: String,
     pub status: BackgroundTaskStatus,
     pub exit_code: Option<i32>,
@@ -226,6 +233,7 @@ pub(super) struct RunningTask {
     pub(super) task_id: String,
     pub(super) tool_name: String,
     pub(super) display_name: Option<String>,
+    pub(super) command: Option<String>,
     pub(super) session_id: String,
     pub(super) status_path: PathBuf,
     pub(super) started_at: Instant,

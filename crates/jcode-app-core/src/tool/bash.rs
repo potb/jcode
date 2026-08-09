@@ -755,6 +755,14 @@ impl Tool for BashTool {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
 
+        // What the caller actually asked for, captured BEFORE any rewriting.
+        // The cargo shim below prepends a shell function to the command, so
+        // recording `params.command` afterwards stores that boilerplate instead
+        // of the user's command, and the derived display name becomes the
+        // useless "cargo() {". Background task cards and `bg` output must show
+        // the command as written.
+        let original_command = params.command.clone();
+
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
             &params.command,
@@ -771,7 +779,9 @@ impl Tool for BashTool {
         }
 
         if run_in_background {
-            return self.execute_background(params, ctx).await;
+            return self
+                .execute_background(params, ctx, original_command)
+                .await;
         }
 
         // Auto-detect browser bridge commands and rewrite them to the installed
@@ -968,6 +978,7 @@ impl BashTool {
                     .adopt_with_options(
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         params.notify,
                         params.wake,
@@ -1071,6 +1082,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1128,6 +1140,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
+                        Some(params.command.clone()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1164,10 +1177,20 @@ impl BashTool {
     }
 
     /// Execute a command in the background
-    async fn execute_background(&self, params: BashInput, ctx: ToolContext) -> Result<ToolOutput> {
+    ///
+    /// `original_command` is what the caller wrote, before internal rewriting
+    /// such as the repo cargo shim. It is what gets displayed and recorded;
+    /// `params.command` is what actually runs.
+    async fn execute_background(
+        &self,
+        params: BashInput,
+        ctx: ToolContext,
+        original_command: String,
+    ) -> Result<ToolOutput> {
         let command = params.command.clone();
         let description = params.intent.clone();
-        let display_name = summarize_background_command(description.as_deref(), &command);
+        let display_name =
+            summarize_background_command(description.as_deref(), &original_command);
         let working_dir = ctx.working_dir.clone();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
@@ -1178,6 +1201,7 @@ impl BashTool {
             .spawn_with_notify(
                 "bash",
                 Some(display_name.clone()),
+                Some(original_command.clone()),
                 &ctx.session_id,
                 notify,
                 wake,

@@ -873,6 +873,7 @@ async fn run_swarm_plan_in_background(
         .spawn_with_notify(
             "swarm",
             Some(display_name.clone()),
+            None,
             &ctx.session_id,
             notify,
             wake,

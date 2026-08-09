@@ -36,6 +36,10 @@ use model::{
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     output_dir: PathBuf,
+    /// Cached result of the status-file scan used by
+    /// [`BackgroundTaskManager::running_snapshot_for_session`], keyed by
+    /// session id and stamped with the time it was taken.
+    foreign_running_cache: std::sync::Mutex<Option<(String, Instant, Vec<TaskStatusFile>)>>,
 }
 
 impl BackgroundTaskManager {
@@ -47,6 +51,7 @@ impl BackgroundTaskManager {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
+            foreign_running_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -359,6 +364,7 @@ impl BackgroundTaskManager {
         info: &BackgroundTaskInfo,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         pid: u32,
         started_at: &str,
@@ -370,6 +376,7 @@ impl BackgroundTaskManager {
             task_id: info.task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name,
+            command,
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -412,7 +419,7 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
-        self.spawn_with_notify(tool_name, None, session_id, true, false, execute_fn)
+        self.spawn_with_notify(tool_name, None, None, session_id, true, false, execute_fn)
             .await
     }
 
@@ -421,6 +428,7 @@ impl BackgroundTaskManager {
         &self,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         notify: bool,
         wake: bool,
@@ -441,6 +449,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: display_name.clone(),
+            command: command.clone(),
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -473,6 +482,7 @@ impl BackgroundTaskManager {
         let task_id_clone = task_id.clone();
         let tool_name_owned = tool_name.to_string();
         let display_name_owned = display_name.clone();
+        let command_owned = command.clone();
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
@@ -516,6 +526,7 @@ impl BackgroundTaskManager {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
                 display_name: display_name_owned.clone(),
+                command: command_owned.clone(),
                 session_id: session_id_owned.clone(),
                 status: status.clone(),
                 exit_code,
@@ -586,6 +597,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name,
+            command,
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
@@ -617,7 +629,7 @@ impl BackgroundTaskManager {
         session_id: &str,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
-        self.adopt_with_options(tool_name, None, session_id, true, false, handle)
+        self.adopt_with_options(tool_name, None, None, session_id, true, false, handle)
             .await
     }
 
@@ -629,6 +641,7 @@ impl BackgroundTaskManager {
         &self,
         tool_name: &str,
         display_name: Option<String>,
+        command: Option<String>,
         session_id: &str,
         notify: bool,
         wake: bool,
@@ -643,6 +656,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: display_name.clone(),
+            command: command.clone(),
             session_id: session_id.to_string(),
             status: BackgroundTaskStatus::Running,
             exit_code: None,
@@ -678,6 +692,7 @@ impl BackgroundTaskManager {
         let started_at = Instant::now();
         let started_at_rfc3339 = initial_status.started_at.clone();
         let display_name_owned = initial_status.display_name.clone();
+        let command_owned = initial_status.command.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
@@ -727,6 +742,7 @@ impl BackgroundTaskManager {
                 task_id: task_id_clone.clone(),
                 tool_name: tool_name_owned.clone(),
                 display_name: display_name_owned.clone(),
+                command: command_owned.clone(),
                 session_id: session_id_owned.clone(),
                 status: status.clone(),
                 exit_code,
@@ -788,6 +804,7 @@ impl BackgroundTaskManager {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
             display_name: None,
+            command: initial_status.command.clone(),
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
@@ -1131,6 +1148,7 @@ impl BackgroundTaskManager {
                 task_id: task.task_id,
                 tool_name: task.tool_name,
                 display_name: task.display_name,
+                command: task.command,
                 session_id: task.session_id,
                 status: BackgroundTaskStatus::Failed,
                 exit_code: None,
@@ -1251,6 +1269,10 @@ impl BackgroundTaskManager {
                     .as_ref()
                     .and_then(|status| status.display_name.clone())
                     .or(task.display_name),
+                command: prior_status
+                    .as_ref()
+                    .and_then(|status| status.command.clone())
+                    .or(task.command),
                 session_id: task.session_id,
                 status: BackgroundTaskStatus::Failed,
                 exit_code: None,
@@ -1364,8 +1386,13 @@ impl BackgroundTaskManager {
     /// Best-effort synchronous snapshot of currently running tasks.
     /// This avoids async calls in render paths.
     pub fn running_snapshot(&self) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
+        Self::finish_running_rows(self.local_running_rows())
+    }
+
+    /// Rows for tasks whose futures are owned by this process.
+    fn local_running_rows(&self) -> Vec<RunningBackgroundProgress> {
         let Ok(tasks) = self.tasks.try_read() else {
-            return (0, Vec::new(), None);
+            return Vec::new();
         };
 
         let mut rows: Vec<RunningBackgroundProgress> = Vec::new();
@@ -1387,15 +1414,116 @@ impl BackgroundTaskManager {
                 detail: progress.map(|progress| format_progress_display(&progress, 10)),
             });
         }
+        rows
+    }
 
+    fn finish_running_rows(
+        mut rows: Vec<RunningBackgroundProgress>,
+    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
         rows.sort_by(|a, b| b.task_id.cmp(&a.task_id));
         let latest = rows.iter().find(|row| row.detail.is_some()).cloned();
 
         (
-            tasks.len(),
+            rows.len(),
             rows.iter().map(|row| row.label.clone()).collect(),
             latest,
         )
+    }
+
+    /// Best-effort synchronous snapshot of running tasks for `session_id`,
+    /// including tasks owned by *another* live process.
+    ///
+    /// Tools normally execute inside the long-lived server/daemon process while
+    /// the TUI renders in a separate client process, so
+    /// [`Self::running_snapshot`] (which only sees this process's in-memory
+    /// task map) reports zero in the client and the background widget never
+    /// appears. Status files are written to a shared directory, so the client
+    /// can recover the same view by scanning them. The scan result is cached
+    /// briefly because this runs on the render path.
+    pub fn running_snapshot_for_session(
+        &self,
+        session_id: &str,
+    ) -> (usize, Vec<String>, Option<RunningBackgroundProgress>) {
+        let mut rows = self.local_running_rows();
+        let mut seen: std::collections::HashSet<String> =
+            rows.iter().map(|row| row.task_id.clone()).collect();
+
+        for status in self.cached_foreign_running_statuses(session_id) {
+            if !seen.insert(status.task_id.clone()) {
+                continue;
+            }
+            let label = status
+                .display_name
+                .clone()
+                .unwrap_or_else(|| status.tool_name.clone());
+            rows.push(RunningBackgroundProgress {
+                task_id: status.task_id.clone(),
+                tool_name: status.tool_name.clone(),
+                label,
+                detail: status
+                    .progress
+                    .as_ref()
+                    .map(|progress| format_progress_display(progress, 10)),
+            });
+        }
+
+        Self::finish_running_rows(rows)
+    }
+
+    /// Cached scan of status files for tasks that belong to `session_id` and
+    /// are running in a different live process.
+    fn cached_foreign_running_statuses(&self, session_id: &str) -> Vec<TaskStatusFile> {
+        const CACHE_TTL: Duration = Duration::from_millis(500);
+
+        if let Ok(cache) = self.foreign_running_cache.lock()
+            && let Some((session, fetched_at, statuses)) = cache.as_ref()
+            && session == session_id
+            && fetched_at.elapsed() < CACHE_TTL
+        {
+            return statuses.clone();
+        }
+
+        let statuses = self.scan_foreign_running_statuses(session_id);
+        if let Ok(mut cache) = self.foreign_running_cache.lock() {
+            *cache = Some((session_id.to_string(), Instant::now(), statuses.clone()));
+        }
+        statuses
+    }
+
+    fn scan_foreign_running_statuses(&self, session_id: &str) -> Vec<TaskStatusFile> {
+        let mut matches = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
+            return matches;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
+                continue;
+            };
+            if status.session_id != session_id || status.status != BackgroundTaskStatus::Running {
+                continue;
+            }
+            // Only trust a `Running` file when some live process still owns it,
+            // otherwise a crashed server leaves phantom rows in the widget.
+            let owner_alive = match (status.owner_pid, status.pid) {
+                (Some(owner_pid), _) => crate::platform::is_process_running(owner_pid),
+                (None, Some(pid)) => crate::platform::is_process_running(pid),
+                (None, None) => false,
+            };
+            if !owner_alive {
+                continue;
+            }
+            matches.push(status);
+        }
+
+        matches
     }
 
     /// Best-effort synchronous lookup of detached tasks that are still running
