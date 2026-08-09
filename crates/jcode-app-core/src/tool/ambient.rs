@@ -1051,6 +1051,20 @@ fn nudge_schedule_runner() {
 // SendChannelMessageTool — send messages via any configured channel
 // ---------------------------------------------------------------------------
 
+/// Explain any channel the user switched on that could not be registered.
+///
+/// Without this, a half-configured channel (say `github_enabled = true` with
+/// no token) is indistinguishable from having configured nothing at all, so
+/// the caller is told to "enable telegram or discord" when the real problem is
+/// a missing credential on a channel they already enabled.
+fn skipped_suffix(registry: &crate::channel::ChannelRegistry) -> String {
+    let reasons = registry.skipped_reasons();
+    if reasons.is_empty() {
+        return String::new();
+    }
+    format!(" Skipped: {}.", reasons.join("; "))
+}
+
 pub struct SendChannelMessageTool;
 
 impl Default for SendChannelMessageTool {
@@ -1134,22 +1148,25 @@ impl Tool for SendChannelMessageTool {
                 None => {
                     let available = registry.channel_names();
                     Ok(ToolOutput::new(format!(
-                        "Channel '{}' not found. Available: {}",
+                        "Channel '{}' not found. Available: {}{}",
                         name,
                         if available.is_empty() {
                             "none configured".to_string()
                         } else {
                             available.join(", ")
-                        }
+                        },
+                        skipped_suffix(&registry)
                     )))
                 }
             }
         } else {
             let channels = registry.send_enabled();
             if channels.is_empty() {
-                return Ok(ToolOutput::new(
-                    "No messaging channels configured. Enable telegram or discord in config.",
-                ));
+                return Ok(ToolOutput::new(format!(
+                    "No messaging channels configured. Enable telegram, discord, or github \
+                     under [safety] in config.{}",
+                    skipped_suffix(&registry)
+                )));
             }
             let mut results = Vec::new();
             for ch in &channels {
@@ -1275,10 +1292,8 @@ impl Tool for GitHubIssueTool {
                     Ok(ToolOutput::new("No open topic issues.".to_string()))
                 }
                 Ok(items) => {
-                    let lines: Vec<String> = items
-                        .iter()
-                        .map(|(n, t)| format!("#{} {}", n, t))
-                        .collect();
+                    let lines: Vec<String> =
+                        items.iter().map(|(n, t)| format!("#{} {}", n, t)).collect();
                     Ok(ToolOutput::new(format!(
                         "Open topics:\n{}",
                         lines.join("\n")
@@ -1326,7 +1341,10 @@ impl Tool for GitHubIssueTool {
                     .filter(|c| !c.trim().is_empty())
                     && let Err(e) = channel.comment(n, c).await
                 {
-                    return Ok(ToolOutput::new(format!("Failed to post closing comment: {}", e)));
+                    return Ok(ToolOutput::new(format!(
+                        "Failed to post closing comment: {}",
+                        e
+                    )));
                 }
                 match channel.close_issue(n).await {
                     Ok(()) => Ok(ToolOutput::new(format!("Closed #{}.", n))),
