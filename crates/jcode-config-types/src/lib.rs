@@ -1350,6 +1350,22 @@ pub struct AmbientConfig {
     /// Cron jobs with `respect_windows = true` follow the same override.
     #[serde(default)]
     pub ignore_active_windows: bool,
+
+    /// Projects the ambient agent should prefer, most important first.
+    ///
+    /// Ambient otherwise ranks projects by how many recent sessions touched
+    /// them, which is a popularity signal, not an importance one: a repo the
+    /// user happens to be sitting in all day crowds out the one that actually
+    /// matters. Listing paths here states the intended order directly.
+    ///
+    /// ```toml
+    /// project_priority = ["/home/you/projects/work-app", "/home/you/src/jcode"]
+    /// ```
+    ///
+    /// Entries are absolute paths (a leading `~` is expanded). Projects not
+    /// listed still appear, ranked by recent activity, after the listed ones.
+    #[serde(default)]
+    pub project_priority: Vec<String>,
 }
 
 impl Default for AmbientConfig {
@@ -1370,6 +1386,7 @@ impl Default for AmbientConfig {
             auto_approve_permissions: false,
             active_windows: Vec::new(),
             ignore_active_windows: false,
+            project_priority: Vec::new(),
         }
     }
 }
