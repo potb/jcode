@@ -617,7 +617,9 @@ work_branch_prefix = "ambient/"
 # working_dir = "~/jcode"
 # # target = "ambient"           # prompt mode only: ambient | spawn | session:<id>
 # enabled = true
-# catch_up = true                # fire once shortly after startup if a fire was missed
+# catch_up = true                # rerun a fire missed while the daemon was down.
+#                                # An `at` job with no history still waits for its
+#                                # next real occurrence rather than firing on sight.
 # respect_windows = false        # true shares [ambient] active_windows' quiet hours
 # timeout_secs = 3600             # exec mode kill deadline
 

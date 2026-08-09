@@ -88,6 +88,15 @@ pub struct CronJobConfig {
     /// slot (default: true). Off is for jobs where a missed run should just
     /// be skipped, e.g. a periodic reminder that is only useful at its exact
     /// time of day.
+    ///
+    /// This governs fires that were genuinely *missed*, which requires a
+    /// recorded `last_run` to be missed relative to. A job with no history at
+    /// all is not overdue: an `at` job waits for its next real occurrence
+    /// regardless of this flag, because naming a time of day is a statement
+    /// about when, and "daily 03:00" must not mean "and also right now, the
+    /// first time you see it". An `every` job with no history does start
+    /// immediately under `catch_up`, since an interval names a spacing rather
+    /// than a moment and has no first occurrence to wait for.
     #[serde(default = "default_true")]
     pub catch_up: bool,
 
