@@ -214,8 +214,8 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         let Some(first) = tokens.first() else {
             // Ran off the end while unwrapping: the payload is invisible.
             if let Some(wrapper) =
-            wrapped_by.filter(|w| w != "env" || wrapper_carried_assignment)
-        {
+                wrapped_by.filter(|w| w != "env" || wrapper_carried_assignment)
+            {
                 findings.push(RiskFinding {
                     level: RiskLevel::Confirm,
                     reason: format!(

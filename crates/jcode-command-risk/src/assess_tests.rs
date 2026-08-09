@@ -473,9 +473,8 @@ fn redirection_into_real_files_is_still_assessed() {
 /// vanished payload still is suspicious.
 #[test]
 fn bare_env_is_not_a_hidden_command() {
-    let ctx = ctx();
-    assert_eq!(level("env", &ctx), RiskLevel::Safe);
-    assert_eq!(level("env | grep PATH", &ctx), RiskLevel::Safe);
-    assert_eq!(level("env FOO=bar", &ctx), RiskLevel::Confirm);
-    assert_eq!(level("env rm -rf ~", &ctx), RiskLevel::Catastrophic);
+    assert_eq!(level("env"), RiskLevel::Safe);
+    assert_eq!(level("env | grep PATH"), RiskLevel::Safe);
+    assert_eq!(level("env FOO=bar"), RiskLevel::Confirm);
+    assert_eq!(level("env rm -rf ~"), RiskLevel::Catastrophic);
 }
