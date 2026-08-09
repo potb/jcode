@@ -533,6 +533,58 @@ fn ambient_prompt_lists_per_project_memory_graphs() {
     );
 }
 
+/// A registry entry whose store has been deleted must not appear as a phantom
+/// project. Ambient reports these to the user as real memory to garden.
+#[test]
+fn a_project_whose_store_is_gone_is_not_reported() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let manager = crate::memory::MemoryManager::new().with_project_dir(project.path());
+    let mut graph = manager.load_project_graph().expect("load");
+    let entry = crate::memory::MemoryEntry::new(
+        crate::memory::MemoryCategory::Fact,
+        "phantom probe",
+    );
+    graph.memories.insert(entry.id.clone(), entry);
+    manager.save_project_graph(&graph).expect("save");
+
+    let path = manager
+        .project_graph_path()
+        .expect("path")
+        .expect("project dir set");
+    assert!(
+        crate::ambient::gather_project_graph_health()
+            .iter()
+            .any(|p| p.working_dir.as_deref() == Some(project.path().to_string_lossy().as_ref())),
+        "the project must be reported while its store exists"
+    );
+
+    // The store is deleted but the registry entry remains.
+    std::fs::remove_file(&path).expect("remove store");
+    assert!(
+        crate::memory::MemoryManager::load_projects_registry()
+            .values()
+            .any(|dir| dir == project.path().to_string_lossy().as_ref()),
+        "the registry entry is expected to survive; that is what makes this a real risk"
+    );
+    assert!(
+        !crate::ambient::gather_project_graph_health()
+            .iter()
+            .any(|p| p.working_dir.as_deref() == Some(project.path().to_string_lossy().as_ref())),
+        "a project with no store must not be reported as memory to garden"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 #[test]
 fn project_graph_health_survey_reads_every_project_store() {
     // The survey must find project memory without the caller having a project
