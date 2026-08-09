@@ -1463,11 +1463,22 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info
+        // Gather background task info.
+        //
+        // Tools usually run in the server/daemon process, not this client, so
+        // ask for a session-scoped snapshot: it merges this process's tasks
+        // with running status files owned by the server for the same session.
         let background_info = {
-            // Get running background tasks count
             let bg_manager = crate::background::global();
-            let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
+            let background_session_id = if self.is_remote {
+                self.remote_session_id.as_deref()
+            } else {
+                Some(self.session.id.as_str())
+            };
+            let (running_count, running_tasks, progress) = match background_session_id {
+                Some(session_id) => bg_manager.running_snapshot_for_session(session_id),
+                None => bg_manager.running_snapshot(),
+            };
 
             if running_count > 0 {
                 Some(crate::tui::info_widget::BackgroundInfo {

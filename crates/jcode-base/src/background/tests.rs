@@ -639,3 +639,47 @@ fn task_status_file_without_a_command_field_still_deserializes() {
     assert_eq!(status.command, None);
     assert_eq!(status.display_name.as_deref(), Some("old task"));
 }
+
+/// The TUI client renders in a different process from the server that actually
+/// runs tools, so the background widget must see running tasks it does not own.
+/// Simulate that split with two managers over one shared task directory.
+#[tokio::test]
+async fn running_snapshot_for_session_sees_tasks_owned_by_another_process() -> Result<()> {
+    let tmp = tempdir()?;
+    let server = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let client = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let info = server
+        .spawn_with_notify(
+            "bash",
+            Some("long build".to_string()),
+            None,
+            "session-split",
+            true,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_millis(400)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    // The client owns no task futures, so the process-local snapshot is blind.
+    let (local_count, _, _) = client.running_snapshot();
+    assert_eq!(local_count, 0, "client process owns no tasks");
+
+    let (count, labels, _) = client.running_snapshot_for_session("session-split");
+    assert_eq!(count, 1, "client should see the server's running task");
+    assert_eq!(labels, vec!["long build".to_string()]);
+
+    // Tasks for other sessions must not leak into this session's widget.
+    let (other_count, _, _) = client.running_snapshot_for_session("session-other");
+    assert_eq!(other_count, 0);
+
+    // The owning process must not double count its own task.
+    let (server_count, _, _) = server.running_snapshot_for_session("session-split");
+    assert_eq!(server_count, 1, "task should be counted exactly once");
+
+    drop(info);
+    Ok(())
+}
