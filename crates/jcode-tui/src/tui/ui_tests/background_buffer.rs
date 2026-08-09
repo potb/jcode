@@ -17,6 +17,7 @@ fn bg_task(id: &str, label: &str, status: BgStatus) -> BgTask {
     BgTask {
         id: id.to_string(),
         label: label.to_string(),
+        command: None,
         tool: "bash".to_string(),
         status,
         exit_code: None,
