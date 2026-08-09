@@ -1,9 +1,15 @@
 # Memory Architecture Design
 
-> **Status:** Implemented (Core), Planned (Graph-Based Hybrid)
-> **Updated:** 2026-01-27
+> **Status:** Implemented (Core + Graph-Based Hybrid); Deep consolidation is agent-driven, not automated
+> **Updated:** 2026-08-09
 
-Local embeddings + lightweight sidecar (GPT-5.3 Codex Spark) are implemented and running in production. This document describes both the current implementation and the planned graph-based hybrid architecture.
+Local embeddings + lightweight sidecar (GPT-5.3 Codex Spark) are implemented and
+running in production. The graph-based hybrid model described below is **also
+implemented** — see `crates/jcode-memory-types/src/graph.rs` for the node/edge
+model, `cascade_retrieve`, `link_memories` and cluster entries, and
+`crates/jcode-base/src/memory.rs` for the manager that drives them. The one part
+that remains unbuilt is *automatic* graph-wide consolidation; see
+[Deep Memory Consolidation](#future-memory-consolidation-sleep-like-processing).
 
 ## Overview
 
@@ -669,19 +675,23 @@ sequenceDiagram
 
 ## Storage Layout
 
+The layout below is the **actual** on-disk shape. There is no `graph.json`, and
+embeddings, clusters and tags are not separate files: each graph is a single
+self-contained JSON document holding `memories`, `tags`, `clusters`, `edges`,
+`reverse_edges` and `metadata`, with every memory's `embedding` stored inline on
+the entry (alongside `embedding_model`, so a model change can be detected).
+
 ```
 ~/.jcode/memory/
-├── graph.json                    # Serialized petgraph
-├── projects/
-│   └── <project_hash>.json       # Per-directory memories
-├── global.json                   # User-wide memories
-├── embeddings/
-│   └── <memory_id>.vec           # Embedding vectors
-├── clusters/
-│   └── cluster_metadata.json     # Cluster centroids and metadata
-└── tags/
-    └── tag_index.json            # Tag → memory mappings
+├── global.json                   # User-wide graph (memories + tags + clusters + edges)
+└── projects/
+    ├── index.json                # project_hash -> working directory
+    └── <project_hash>.json       # Per-directory graph, same shape as global.json
 ```
+
+Paths come from `MemoryManager` in `crates/jcode-base/src/memory.rs`
+(`storage::jcode_dir()/memory/global.json` and `.../memory/projects/`).
+`.bak` siblings are rotating backups written on save.
 
 ---
 
@@ -758,20 +768,32 @@ Lightweight consolidation that runs in the memory sidecar after returning result
 - [x] **Contradiction detection on write** — contradictory memories are superseded during incremental extraction.
 - [x] **Reinforcement provenance** — `MemoryEntry` tracks `Vec<Reinforcement>` breadcrumbs (`session_id`, `message_index`, `timestamp`).
 
-### Phase 8: Deep Memory Consolidation (Ambient Garden) 📋
+### Phase 8: Deep Memory Consolidation (Ambient Garden) — partially shipped, agent-driven
 
-Full graph-wide consolidation that runs during ambient mode background cycles. See [AMBIENT_MODE.md](./AMBIENT_MODE.md) for the ambient mode design.
+Full graph-wide consolidation during ambient cycles. Today this is performed by
+the ambient **agent** using the ordinary memory tools, not by an automatic
+algorithm: `crates/jcode-app-core/src/ambient/prompt.rs` renders a
+"Memory Graph Health" block (totals, low-confidence count, unresolved
+contradictions, missing embeddings, duplicate candidates, last consolidation,
+and a per-project breakdown) and instructs the agent to garden. So merging,
+contradiction resolution and pruning happen with a model in the loop each cycle,
+and their quality depends on the agent rather than on a scheduled job.
 
-- [ ] Graph-wide similarity-based memory merging
-- [ ] Redundancy detection and deduplication (beyond sidecar's local scope)
-- [ ] Contradiction resolution (across full graph, not just retrieved set)
-- [ ] Fact verification against codebase (check if factual memories are still true)
-- [ ] Retroactive session extraction (crashed/missed sessions)
-- [ ] Cluster reorganization
-- [ ] Weak memory pruning (confidence < 0.05 AND strength <= 1)
-- [ ] Relationship discovery across sessions
-- [ ] Embedding backfill for memories missing embeddings
-- [ ] Knowledge graph optimization
+- [x] Embedding backfill for memories missing embeddings — automatic and
+      fire-and-forget: `MemoryManager::backfill_embeddings()`
+      (`memory.rs:999`) is spawned after every ambient cycle
+      (`ambient/runner.rs`).
+- [x] Health surfacing that makes drift visible to the gardening agent
+      (counts above, plus a per-project graph list).
+- [x] Retroactive session extraction, contradiction resolution, redundancy
+      detection and weak pruning — performed by the agent per cycle, not
+      automated.
+- [ ] Automatic graph-wide similarity-based merging (no unattended job exists).
+- [ ] Automatic fact verification against the codebase.
+- [ ] Cluster reorganization. Note clusters are modelled and serialized but the
+      discovery pass is not run in practice: a live `global.json` here has 48
+      tags and 0 clusters.
+- [ ] Knowledge graph optimization.
 
 ---
 
@@ -799,7 +821,9 @@ Before storing any memory, scan for:
 
 ## Future: Memory Consolidation (Sleep-Like Processing)
 
-> **Status:** TODO - Design pending
+> **Status:** Design pending for the *automated* form. The agent-driven form
+> already runs every ambient cycle — see Phase 8 above before assuming none of
+> this exists.
 
 Similar to how humans consolidate memories during sleep, jcode can run background consolidation to optimize the memory graph:
 
@@ -849,6 +873,10 @@ graph LR
 
 ### Architecture Options (TBD)
 
+Option 2 is in effect today in its agent-driven form: ambient cycles wake on a
+schedule and garden the graph. What is undecided is whether an unattended,
+algorithmic pass should also run.
+
 1. **Periodic daemon** - Run consolidation every N hours
 2. **On-idle trigger** - Run when no active sessions for M minutes
 3. **Capacity-based** - Run when memory count exceeds threshold
@@ -869,7 +897,8 @@ graph LR
 2. **Team sharing:** Should some memories be shareable across a team?
 3. **Cluster algorithm:** HDBSCAN vs k-means vs hierarchical clustering?
 4. **Graph persistence:** JSON serialization vs SQLite for larger graphs?
+   (Currently: one JSON document per graph, rewritten on save.)
 
 ---
 
-*Last updated: 2026-01-27*
+*Last updated: 2026-08-09*
