@@ -52,8 +52,8 @@ pub struct DisplayConfig {
     /// Pin read images to side pane (default: true)
     pub pin_images: bool,
     /// Pin the full session todo list to the top of the chat transcript while
-    /// it scrolls, like the sticky previous-prompt preview (default: false)
-    #[serde(default)]
+    /// it scrolls, like the sticky previous-prompt preview (default: true)
+    #[serde(default = "default_true")]
     pub pin_todos: bool,
     /// Whether the info widget shows the session todo list on the side of the
     /// chat (auto/on/off, default: auto). `auto` hides the side widget while
@@ -155,7 +155,7 @@ impl Default for DisplayConfig {
             diff_mode: DiffDisplayMode::default(),
             show_diffs: None,
             pin_images: true,
-            pin_todos: false,
+            pin_todos: true,
             todo_widget: TodoWidgetMode::default(),
             memory_widget: true,
             pin_usage: false,
@@ -410,3 +410,20 @@ mod context_widget_mode_tests {
         assert_eq!(back.context_widget, ContextWidgetMode::Off);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::DisplayConfig;
+
+    #[test]
+    fn todos_are_pinned_by_default_but_can_be_disabled() {
+        assert!(DisplayConfig::default().pin_todos);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(missing.pin_todos);
+
+        let disabled: DisplayConfig =
+            serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
+        assert!(!disabled.pin_todos);
+    }
+}
+

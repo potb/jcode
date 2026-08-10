@@ -1,8 +1,8 @@
-//! jcode-desktop2: greenfield desktop app.
-//!
-//! Milestone 3+4 of docs/HARNESS_API_AND_DESKTOP_REWRITE.md: winit window,
-//! Vello vector rendering, Parley text layout, and a live harness API
-//! connection (via jcode-harness-api-bridge) with a minimal chat loop.
+// jcode-desktop2: greenfield desktop app.
+//
+// Milestone 3+4 of docs/HARNESS_API_AND_DESKTOP_REWRITE.md: winit window,
+// Vello vector rendering, Parley text layout, and a live harness API
+// connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
 mod ack;
 mod activity;
@@ -22,9 +22,12 @@ mod clipboard_image;
 mod donut;
 mod editor;
 mod edits;
+mod file_tree;
 mod frame_meter;
 mod harness;
+mod help;
 mod hints;
+mod hot_worker;
 mod icons;
 mod input;
 mod keymap;
@@ -42,6 +45,8 @@ mod reasoning;
 mod render;
 mod resume;
 mod scene;
+mod scene_file_tree;
+mod scene_help;
 mod scene_overview;
 mod scene_resume;
 mod scene_workspace;
@@ -80,13 +85,21 @@ use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--check-worker") {
+        let path = args
+            .get(1)
+            .ok_or_else(|| anyhow::anyhow!("--check-worker requires a shared-library path"))?;
+        let build = hot_worker::check_artifact(std::path::Path::new(path))?;
+        println!("desktop2 worker {build:016x} ok");
+        return Ok(());
+    }
     // Every entry point that runs *instead of* the window lives in `cli`, so
     // this stays a router rather than accumulating subcommands.
     if let Some(result) = cli::dispatch(&args) {
         return result;
     }
     selfdev_reload::install();
-    let _selfdev_registration = selfdev_reload::register();
+    let _selfdev_registration = selfdev_reload::register(hot_worker::builtin_build());
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
@@ -95,10 +108,15 @@ fn main() -> Result<()> {
 }
 
 struct App {
+    /// Reloadable Scene/Model/App callback generation. The allocation around
+    /// this dispatcher is the stable host and survives every activation.
+    worker: hot_worker::Worker,
+    /// Permanent process-local GPU operations called by every worker generation.
+    host: hot_worker::HostApi,
     state: Option<render::RenderState>,
     painter: paint::Painter,
     model: Model,
-    harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
+    harness: Option<(Receiver<harness::HarnessUpdate>, harness::CommandSender)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     /// When Super went down with nothing else pressed since, or `None` when
@@ -172,6 +190,15 @@ struct App {
     /// When the workspace camera last stepped. Kept separate from the overview
     /// so either animation can run or settle independently.
     workspace_frame: Option<std::time::Instant>,
+    /// A newly created session is not present in the strip until the daemon's
+    /// next session-list update. Defer its niri-style slide until that update,
+    /// otherwise the animation finishes while there is still only one panel.
+    new_session_transition_pending: bool,
+    /// A fresh desktop window starts as a two-panel workspace. The first
+    /// `Attached` event spends this once by asking the worker for the neighboring
+    /// session; reconnects and later attaches already have a session id and do
+    /// not create more panels.
+    startup_panel_pending: bool,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -189,6 +216,8 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            worker: hot_worker::Worker::default(),
+            host: hot_worker::HostApi::default(),
             state: None,
             painter: paint::Painter::default(),
             model: Model::default(),
@@ -212,6 +241,8 @@ impl Default for App {
             last_frame: None,
             overview_frame: None,
             workspace_frame: None,
+            new_session_transition_pending: false,
+            startup_panel_pending: true,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
@@ -371,7 +402,7 @@ pub struct Model {
     /// in `scroll`; this is only how the view catches up to it.
     pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
-    pub strip: strip::Strip,
+    pub strips: strip::Strips,
     /// Horizontal multi-session camera. Session ownership stays in `strip` and
     /// this state only supplies native-scale column positions and easing.
     pub workspace: workspace::Workspace,
@@ -385,10 +416,15 @@ pub struct Model {
     /// The resume-from-disk picker: stored sessions grouped by project, drawn
     /// as an overlay panel over the conversation rather than instead of it.
     pub resume: resume::Picker,
+    /// Desktop-native keyboard and local-command reference. This is deliberately
+    /// local state: help must be available before a daemon session attaches.
+    pub help_open: bool,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
     pub working_dir: Option<String>,
+    /// Expandable project explorer for the attached working directory.
+    pub file_tree: file_tree::FileTree,
     /// Provider and model serving this session, once the harness reports it.
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
@@ -477,12 +513,14 @@ impl Default for Model {
             hint: hints::arbitrary_index(),
             stream: stream::Stream::default(),
             smooth: scroll::Smooth::default(),
-            strip: strip::Strip::default(),
+            strips: strip::Strips::default(),
             workspace: workspace::Workspace::default(),
             overview: overview::Overview::default(),
             peeks: overview::Peeks::default(),
             resume: resume::Picker::default(),
+            help_open: false,
             working_dir: None,
+            file_tree: file_tree::FileTree::default(),
             model: None,
             model_picker: model_picker::Picker::default(),
             boot: boot::Boot::default(),
@@ -653,6 +691,14 @@ impl Model {
 
 impl App {
     fn submit_input(&mut self) {
+        // Help is a Desktop2 command, not a prompt. Recognize it before the
+        // attachment guard so a disconnected or still-starting window can
+        // explain itself, and never let an attached harness see the command.
+        if help::is_alias(self.model.editor.text()) {
+            self.model.editor.take_for_submit();
+            self.model.help_open = true;
+            return;
+        }
         // An attachment is a message: sending a screenshot with no words is a
         // normal thing to do, so the composer is only empty when there is
         // nothing pending either.
@@ -708,6 +754,12 @@ impl App {
         self.model.stream.reveal_all();
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
+        // Give the turn a visible tail immediately. The activity clock already
+        // starts here, but the spinner is painted on the live status card, so
+        // waiting for ToolStart made a reasoning-only or slow first event look
+        // like a dropped submission. The first tool refines this same slot; an
+        // answer removes it when text begins streaming.
+        self.model.transcript.set_live_tool("", "thinking");
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Send { content, images });
         }
@@ -726,6 +778,7 @@ impl App {
         };
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
+        self.model.transcript.set_live_tool("", "thinking");
         // Oldest first, matching the card being promoted: the queue and this
         // deque are pushed in the same order, so the front is this message's.
         let images = self.queued_images.pop_front().unwrap_or_default();
@@ -786,7 +839,7 @@ impl App {
         // than one session to move between (the strip proper), or a working
         // directory to name. With neither it would be a widget saying "1 of 1"
         // about nowhere, so nothing is reserved and the page is unchanged.
-        let strip = model.strip.len() > 1
+        let strip = model.strips.len() > 1
             || model.working_dir.is_some()
             || model.mem.is_some()
             || model.transcript.has_user_message();
@@ -837,6 +890,22 @@ impl App {
     }
 
     fn on_pointer_pressed(&mut self) {
+        // The explorer is in window space and sits above session pages. Folder
+        // presses therefore resolve before the focused-page coordinate bridge.
+        if self.pointer.0 <= file_tree::WIDTH {
+            let height = self
+                .state
+                .as_ref()
+                .map(|state| f64::from(state.size().1) / self.effective_scale())
+                .unwrap_or(self.frame.height);
+            if let Some(entry) = self.model.file_tree.row_at(self.pointer.1, height) {
+                if entry.directory {
+                    self.model.file_tree.toggle(&entry.path);
+                    self.request_redraw();
+                }
+                return;
+            }
+        }
         let (x, y) = self.focused_pointer();
         if self
             .model
@@ -1535,18 +1604,22 @@ impl App {
             }
             Action::Submit => self.submit_input(),
 
+            // F1 is both the discoverable entry point and the close chord.
+            // Escape is resolved to this same action while the modal is open.
+            Action::ToggleHelp => self.model.help_open = !self.model.help_open,
+
             // Strip motion moves the highlight and attaches in one step:
             // a selection you then have to confirm would be a second
             // interaction for something the user already asked for.
             Action::SessionLeft => {
-                if self.model.strip.focus_left() {
+                if self.model.strips.focus_left() {
                     self.begin_workspace_transition(workspace::Direction::Left);
                     self.attach_focused_session();
                     self.request_peek();
                 }
             }
             Action::SessionRight => {
-                if self.model.strip.focus_right() {
+                if self.model.strips.focus_right() {
                     self.begin_workspace_transition(workspace::Direction::Right);
                     self.attach_focused_session();
                     self.request_peek();
@@ -1557,7 +1630,7 @@ impl App {
             // before the strip moves or it could not be drawn leaving.
             Action::SessionUp => {
                 let (prev_row, prev_focused) = self.focused_row_snapshot();
-                if self.model.strip.focus_up() {
+                if self.model.strips.focus_up() {
                     self.begin_row_transition(workspace::Direction::Up, prev_row, prev_focused);
                     self.attach_focused_session();
                     self.request_peek();
@@ -1565,7 +1638,7 @@ impl App {
             }
             Action::SessionDown => {
                 let (prev_row, prev_focused) = self.focused_row_snapshot();
-                if self.model.strip.focus_down() {
+                if self.model.strips.focus_down() {
                     self.begin_row_transition(workspace::Direction::Down, prev_row, prev_focused);
                     self.attach_focused_session();
                     self.request_peek();
@@ -1633,6 +1706,8 @@ impl App {
                 self.model
                     .set_notice(format!("reasoning display: {}", next.label()));
             }
+
+            Action::ManualReload => selfdev_reload::request(),
 
             Action::InsertNewline => self.model.editor.insert_char('\n'),
 
@@ -1892,8 +1967,8 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl hot_worker::ApplicationWorker for App {
+    fn worker_resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
@@ -1920,7 +1995,7 @@ impl ApplicationHandler for App {
         self.model.boot = boot::Boot::start(std::time::Instant::now());
     }
 
-    fn window_event(
+    fn worker_window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
@@ -1935,8 +2010,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(state) = self.state.as_mut() {
-                    state.resize(size.width, size.height);
+                let app = self as *mut App;
+                self.host.resize(app, size.width, size.height);
+                if let Some(state) = self.state.as_ref() {
                     let scale = state.scale_factor();
                     self.geometry.width = f64::from(size.width) / scale;
                     self.geometry.height = f64::from(size.height) / scale;
@@ -2152,13 +2228,10 @@ impl ApplicationHandler for App {
                 // (the frame was just measured through it), so this is a
                 // lookup rather than a relayout.
                 self.observe_stream_growth();
-                if let Some(state) = self.state.as_mut() {
-                    let size = state.size();
+                if let Some(size) = self.state.as_ref().map(render::RenderState::size) {
                     build_workspace_scene(&mut scene, &mut self.painter, &self.model, size, scale);
-                    self.frame_meter.end_build();
-                    if let Err(error) = state.render(&scene, &mut self.frame_meter) {
-                        eprintln!("render error: {error:#}");
-                    }
+                    let app = self as *mut App;
+                    self.host.present(app, &scene);
                 }
                 // A continuous animation is paced by the display, not by the
                 // timer: ask for the next frame now and let the compositor's
@@ -2185,7 +2258,11 @@ impl ApplicationHandler for App {
     /// An animation deadline expired, so the window has to be repainted.
     /// Setting a `WaitUntil` deadline only wakes the loop, it does not draw
     /// anything, which is why the caret used to sit static and never blink.
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+    fn worker_new_events(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        cause: winit::event::StartCause,
+    ) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             self.request_redraw();
         }
@@ -2196,14 +2273,7 @@ impl ApplicationHandler for App {
     /// Done here rather than in the redraw handler so the deadline is refreshed
     /// after *any* event, and so an idle window sleeps indefinitely instead of
     /// waking forever.
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if selfdev_reload::requested() {
-            match selfdev_reload::relaunch() {
-                Ok(()) => event_loop.exit(),
-                Err(error) => eprintln!("desktop2 selfdev reload failed: {error:#}"),
-            }
-            return;
-        }
+    fn worker_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let flow = match self.animation_deadline(std::time::Instant::now()) {
             Some(at) => ControlFlow::WaitUntil(
                 at.min(std::time::Instant::now() + std::time::Duration::from_millis(250)),
@@ -2215,5 +2285,56 @@ impl ApplicationHandler for App {
             ),
         };
         event_loop.set_control_flow(flow);
+    }
+}
+
+/// Permanently linked native host. These methods never move into a reloadable
+/// generation: winit therefore keeps the exact EventLoop, Window, Wayland
+/// surface, PID, compositor window ID, geometry, workspace, and focus.
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let app = self as *mut App;
+        self.worker.snapshot().resumed(app, event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let app = self as *mut App;
+        self.worker
+            .snapshot()
+            .window_event(app, event_loop, window_id, event);
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        let app = self as *mut App;
+        self.worker.snapshot().new_events(app, event_loop, cause);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut activated = None;
+        if selfdev_reload::requested() {
+            match selfdev_reload::worker_path()
+                .and_then(|path| self.worker.activate(&path).map(|changed| (path, changed)))
+            {
+                Ok((path, true)) => activated = Some(path),
+                Ok((_path, false)) => {}
+                Err(error) => eprintln!("desktop2 worker activation failed: {error:#}"),
+            }
+        }
+
+        // Invoke the selected generation before recording success. The marker
+        // is therefore evidence that changed callback code actually ran, not
+        // merely that dlopen returned a handle.
+        let app = self as *mut App;
+        self.worker.snapshot().about_to_wait(app, event_loop);
+        if let Some(path) = activated {
+            let build = self.worker.worker_build();
+            selfdev_reload::record_activation(&path, build);
+            self.request_redraw();
+        }
     }
 }

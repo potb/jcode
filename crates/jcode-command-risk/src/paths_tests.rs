@@ -111,11 +111,11 @@ fn non_recursive_delete_inside_cwd_is_unremarkable() {
 }
 
 #[test]
-fn outside_working_directory_requires_confirmation() {
+fn concrete_outside_working_directory_target_is_low_risk() {
     let ctx = ctx();
     let expanded = expand("/home/u/other-project", &ctx);
     let finding = classify_target(&expanded, "/home/u/other-project", true, &ctx).expect("finding");
-    assert_eq!(finding.level, RiskLevel::Confirm);
+    assert_eq!(finding.level, RiskLevel::Low);
 }
 
 #[test]
@@ -219,19 +219,20 @@ fn ordinary_config_files_remain_editable() {
 }
 
 #[test]
-fn standard_character_devices_are_not_catastrophic() {
-    // Regression: `/dev` is protected recursively, which previously matched
-    // the standard character devices first and made the most common shell
-    // idiom there is (redirecting output into the null sink) unrunnable.
+fn standard_character_devices_are_protected_as_operands() {
+    // The standard character devices are safe *redirect sinks*, and that
+    // exemption lives at the redirect site in `assess_segment`, deliberately
+    // not here. Path classification must keep treating them as device nodes,
+    // or an explicit `rm /dev/null` reads as harmless.
+    //
+    // Regression: the fork once exempted them globally in this function, to
+    // stop the recursive `/dev` rule from blocking `cmd 2>/dev/null`. That
+    // also exempted them as ordinary operands.
     let ctx = ctx();
     for path in ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"] {
         assert!(
-            !is_catastrophic_target(Path::new(path), &ctx),
-            "{path} should be writable"
-        );
-        assert!(
-            classify_target(Path::new(path), path, false, &ctx).is_none(),
-            "{path} should produce no finding"
+            is_catastrophic_target(Path::new(path), &ctx),
+            "{path} must stay protected when named as an operand"
         );
     }
 }

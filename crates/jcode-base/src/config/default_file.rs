@@ -132,7 +132,7 @@ pin_images = true
 
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
-# pin_todos = false
+# pin_todos = true
 
 # Whether the info widget shows this session's todo list on the side of the
 # chat (auto/on/off, default: auto). "auto" hides the side widget while

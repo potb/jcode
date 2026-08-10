@@ -3331,7 +3331,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.73.0"
+version = "0.75.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3635,9 +3635,12 @@ dependencies = [
  "jcode-render-core",
  "jcode-sdk",
  "libc",
+ "libloading",
  "parley",
  "pollster",
+ "quote",
  "serde_json",
+ "syn 2.0.117",
  "syntect",
  "unicode-width",
  "vello",
