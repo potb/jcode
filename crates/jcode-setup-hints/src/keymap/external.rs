@@ -42,12 +42,26 @@ impl Mods {
 /// Apply a single modifier token to `mods`, expanding `hyper` via `hyper_mods`.
 /// Returns `true` if the token was a recognized modifier, `false` if it should
 /// be treated as the primary key.
+///
+/// Side-specific spellings matter here. skhd distinguishes left and right
+/// modifiers (`lalt`, `ralt`, `lcmd`, `rcmd`, `lctrl`, `rctrl`, `lshift`,
+/// `rshift`), and a config that uses them is common on layouts where the right
+/// Option key is AltGr (qwerty-fr, US-International, most EU layouts): the WM
+/// binds `lalt` only, precisely so `ralt` stays free for composing accented
+/// characters. Treating `lalt` as an unknown token silently downgraded every
+/// such binding to a bare, unmodified key, so `lalt - h` was recorded as plain
+/// `h` and never matched jcode's `alt+h`. Conflict detection then reported a
+/// clean bill of health on exactly the setups most likely to have conflicts.
+///
+/// jcode's own chords have no notion of sidedness, so both sides collapse onto
+/// the single `alt`/`cmd`/`ctrl`/`shift` flag. That is the correct comparison:
+/// the terminal reports "alt" regardless of which physical key produced it.
 fn apply_modifier(token: &str, mods: &mut Mods, hyper_mods: Mods) -> bool {
     match token.trim().to_ascii_lowercase().as_str() {
-        "cmd" | "command" | "super" | "win" | "windows" => mods.cmd = true,
-        "ctrl" | "control" => mods.ctrl = true,
-        "alt" | "opt" | "option" => mods.alt = true,
-        "shift" => mods.shift = true,
+        "cmd" | "command" | "super" | "win" | "windows" | "lcmd" | "rcmd" => mods.cmd = true,
+        "ctrl" | "control" | "lctrl" | "rctrl" => mods.ctrl = true,
+        "alt" | "opt" | "option" | "lalt" | "ralt" | "lopt" | "ropt" => mods.alt = true,
+        "shift" | "lshift" | "rshift" => mods.shift = true,
         // "hyper" is an app-defined alias for some bundle of real modifiers.
         "hyper" => *mods = mods.or(hyper_mods),
         // "fn" is not representable as a jcode modifier; ignore it so the rest of
@@ -452,6 +466,63 @@ cmd + shift - j : yabai -m window --swap south\n\
         // A bare modifier with no key cannot form a chord.
         let binds = parse_skhd("cmd - : noop\n");
         assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn skhd_side_specific_modifiers_keep_their_modifier() {
+        // Regression: `lalt`/`ralt` (and the other l*/r* spellings) used to fall
+        // through `apply_modifier` as unrecognized tokens. The token was then
+        // treated as the primary key and overwritten by the real key, so
+        // `lalt - h` parsed as a bare `h`. Every binding in a left/right-aware
+        // skhd config lost its modifier and could never match a jcode chord,
+        // which made conflict detection silently report "no conflicts".
+        //
+        // This layout is the norm when the right Option key is AltGr: the WM
+        // binds `lalt` only so `ralt` stays free for accented characters.
+        let cfg = "\
+lalt - h : aerospace split horizontal\n\
+lalt + shift - 1 : aerospace move-node-to-workspace 1\n\
+ralt - e : echo altgr\n\
+lcmd - k : echo left cmd\n\
+rctrl - g : echo right ctrl\n\
+";
+        let binds = parse_skhd(cfg);
+        let chords: Vec<String> = binds.iter().map(|b| b.chord.canonical()).collect();
+        assert_eq!(
+            chords,
+            vec!["alt+h", "alt+shift+1", "alt+e", "cmd+k", "ctrl+g"],
+            "side-specific modifiers must collapse onto jcode's sideless flags"
+        );
+    }
+
+    #[test]
+    fn skhd_lalt_binding_is_detected_as_a_conflict() {
+        // End-to-end guard for the bug above: a jcode `alt+h` binding and an
+        // skhd `lalt - h` binding are the same physical chord, and skhd wins
+        // because it grabs the key before the terminal sees it. Detection must
+        // surface that rather than reporting a clean keymap.
+        use crate::keymap::{KeymapSnapshot, detect_conflicts};
+        use jcode_config_types::KeybindingsConfig;
+
+        let snapshot = KeymapSnapshot {
+            version: 1,
+            captured_at: String::new(),
+            os: "macos".to_string(),
+            terminal: "Alacritty".to_string(),
+            terminal_version: String::new(),
+            bindings: parse_skhd("lalt - h : aerospace split horizontal\n"),
+        };
+        let cfg = KeybindingsConfig {
+            workspace_left: "alt+h".to_string(),
+            ..Default::default()
+        };
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.workspace_left"),
+            "expected skhd's lalt-h to be reported against jcode's alt+h, got {conflicts:?}"
+        );
     }
 
     #[test]

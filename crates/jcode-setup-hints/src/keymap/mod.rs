@@ -98,6 +98,7 @@ pub fn collect_snapshot() -> KeymapSnapshot {
     let mut bindings = Vec::new();
     bindings.extend(macos_hotkeys::read_symbolic_hotkeys());
     bindings.extend(terminal::read_ghostty_keybinds());
+    bindings.extend(terminal::read_alacritty_keybinds());
     bindings.extend(external::read_external_bindings());
 
     KeymapSnapshot {

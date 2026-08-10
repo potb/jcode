@@ -32,6 +32,11 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        // `SetupHintsState::default()` sets `startup_spawn_hint_dismissed:
+        // true`, and `startup_hints_for_launch` suppresses the notice whenever
+        // that flag is set. Spreading the default therefore silenced the very
+        // notice this test asserts on, so it could never pass.
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 

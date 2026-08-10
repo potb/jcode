@@ -182,6 +182,26 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             cfg.info_widget_toggle.as_str(),
         ),
         (
+            "todo_card_toggle",
+            "Toggle todo card",
+            cfg.todo_card_toggle.as_str(),
+        ),
+        (
+            "swarm_panel_focus",
+            "Focus swarm panel",
+            cfg.swarm_panel_focus.as_str(),
+        ),
+        (
+            "fallback_switch",
+            "Accept fallback model offer",
+            cfg.fallback_switch.as_str(),
+        ),
+        (
+            "open_resume",
+            "Open the session picker",
+            cfg.open_resume.as_str(),
+        ),
+        (
             "new_terminal",
             "Spawn new terminal session",
             cfg.new_terminal.as_str(),

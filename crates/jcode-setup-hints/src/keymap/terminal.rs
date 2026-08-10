@@ -5,6 +5,15 @@
 //! `ghostty +list-keybinds`, which merges built-in defaults with the user's
 //! config. The parsing is pure and unit-tested; only [`read_ghostty_keybinds`]
 //! shells out.
+//!
+//! Alacritty has no equivalent "dump my effective keymap" command, so it needs
+//! the opposite approach: its defaults are compiled into the binary and are only
+//! documented in `alacritty-bindings(5)`. [`alacritty_macos_default_bindings`]
+//! encodes the macOS subset of that table, and [`parse_alacritty_bindings`]
+//! layers the user's `[[keyboard.bindings]]` overrides on top. Without this,
+//! every Alacritty default was invisible to conflict detection: a jcode chord
+//! like `cmd+b` (which Alacritty consumes for `SearchBackward`) looked free
+//! while never reaching the TUI.
 
 use super::chord::KeyChord;
 use super::source::{DiscoveredBinding, KeySource};
@@ -166,6 +175,186 @@ pub fn read_ghostty_keybinds() -> Vec<DiscoveredBinding> {
     Vec::new()
 }
 
+// ---------------------------------------------------------------------------
+// Alacritty
+// ---------------------------------------------------------------------------
+
+/// Alacritty's compiled-in macOS key bindings, from `alacritty-bindings(5)`.
+///
+/// These are not discoverable at runtime: Alacritty ships no `+list-keybinds`
+/// equivalent and writes no default config file, so the only way to know that
+/// `Cmd+B` is `SearchBackward` is to encode the documented table. Each entry is
+/// `(chord, action)` using jcode's canonical chord spelling.
+///
+/// Only bindings that can realistically shadow a jcode chord are listed. Vi and
+/// search mode bindings are deliberately excluded: they apply only while
+/// Alacritty is in those modes, which a TUI session is not.
+#[cfg(any(test, target_os = "macos"))]
+const ALACRITTY_MACOS_DEFAULTS: &[(&str, &str)] = &[
+    ("cmd+k", "ClearHistory"),
+    ("cmd+0", "ResetFontSize"),
+    ("cmd+=", "IncreaseFontSize"),
+    ("cmd+-", "DecreaseFontSize"),
+    ("cmd+v", "Paste"),
+    ("cmd+c", "Copy"),
+    ("cmd+h", "Hide"),
+    ("cmd+alt+h", "HideOtherApplications"),
+    ("cmd+m", "Minimize"),
+    ("cmd+q", "Quit"),
+    ("cmd+w", "Quit"),
+    ("cmd+n", "CreateNewWindow"),
+    ("cmd+t", "CreateNewTab"),
+    ("cmd+ctrl+f", "ToggleFullscreen"),
+    ("cmd+f", "SearchForward"),
+    ("cmd+b", "SearchBackward"),
+    ("cmd+shift+]", "SelectNextTab"),
+    ("cmd+shift+[", "SelectPreviousTab"),
+    ("cmd+tab", "SelectNextTab"),
+    ("cmd+shift+tab", "SelectPreviousTab"),
+    ("cmd+1", "SelectTab1"),
+    ("cmd+2", "SelectTab2"),
+    ("cmd+3", "SelectTab3"),
+    ("cmd+4", "SelectTab4"),
+    ("cmd+5", "SelectTab5"),
+    ("cmd+6", "SelectTab6"),
+    ("cmd+7", "SelectTab7"),
+    ("cmd+8", "SelectTab8"),
+    ("cmd+9", "SelectLastTab"),
+];
+
+/// The documented macOS default bindings, as [`DiscoveredBinding`]s.
+#[cfg(any(test, target_os = "macos"))]
+pub fn alacritty_macos_default_bindings() -> Vec<DiscoveredBinding> {
+    ALACRITTY_MACOS_DEFAULTS
+        .iter()
+        .filter_map(|(chord, action)| {
+            Some(DiscoveredBinding {
+                chord: KeyChord::parse(chord)?,
+                source: KeySource::Terminal,
+                action: (*action).to_string(),
+                raw: (*chord).to_string(),
+                tool: "Alacritty".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Parse the `[[keyboard.bindings]]` array of an `alacritty.toml`.
+///
+/// A user binding shadows the default for the same chord, and can also free a
+/// default chord up: Alacritty documents `action = "ReceiveChar"` and
+/// `action = "None"` as the ways to unset a built-in binding, so those entries
+/// are recorded as *removals* rather than bindings. The caller merges this with
+/// [`alacritty_macos_default_bindings`].
+///
+/// Returns `(bindings, unbound_chords)`.
+pub fn parse_alacritty_bindings(text: &str) -> (Vec<DiscoveredBinding>, Vec<KeyChord>) {
+    let mut bindings = Vec::new();
+    let mut unbound = Vec::new();
+
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return (bindings, unbound);
+    };
+    let Some(entries) = value
+        .get("keyboard")
+        .and_then(|k| k.get("bindings"))
+        .and_then(|b| b.as_array())
+    else {
+        return (bindings, unbound);
+    };
+
+    for entry in entries {
+        let Some(key) = entry.get("key").and_then(|k| k.as_str()) else {
+            continue;
+        };
+        // `mods` is a `|`-separated list: "Command|Shift".
+        let mods = entry
+            .get("mods")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        let mut parts: Vec<&str> = mods
+            .split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        parts.push(key);
+        let Some(chord) = KeyChord::parse(&parts.join("+")) else {
+            continue;
+        };
+
+        let action = entry.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if action.eq_ignore_ascii_case("ReceiveChar") || action.eq_ignore_ascii_case("None") {
+            unbound.push(chord);
+            continue;
+        }
+
+        // `chars` entries send a literal string; they still consume the chord.
+        let label = if action.is_empty() {
+            match entry.get("chars").and_then(|c| c.as_str()) {
+                Some(_) => "sends literal text".to_string(),
+                None => continue,
+            }
+        } else {
+            action.to_string()
+        };
+
+        bindings.push(DiscoveredBinding {
+            chord,
+            source: KeySource::Terminal,
+            action: label,
+            raw: format!("{mods}+{key}"),
+            tool: "Alacritty".to_string(),
+        });
+    }
+
+    (bindings, unbound)
+}
+
+/// Effective Alacritty bindings for this machine: documented defaults, with the
+/// user's config layered on top. Returns nothing when Alacritty is not the
+/// active terminal, so an unused terminal never generates conflict noise.
+#[cfg(target_os = "macos")]
+pub fn read_alacritty_keybinds() -> Vec<DiscoveredBinding> {
+    // Only report bindings for the terminal actually in use. Alacritty sets
+    // ALACRITTY_WINDOW_ID in every shell it spawns.
+    if std::env::var_os("ALACRITTY_WINDOW_ID").is_none() {
+        return Vec::new();
+    }
+
+    let mut effective = alacritty_macos_default_bindings();
+
+    let Some(home) = dirs::home_dir() else {
+        return effective;
+    };
+    // Alacritty's documented config search order.
+    const CANDIDATES: [&str; 3] = [
+        ".config/alacritty/alacritty.toml",
+        ".alacritty.toml",
+        ".config/alacritty.toml",
+    ];
+    for rel in CANDIDATES {
+        let path = home.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (user, unbound) = parse_alacritty_bindings(&text);
+        effective.retain(|b| !unbound.contains(&b.chord));
+        for binding in user {
+            effective.retain(|b| b.chord != binding.chord);
+            effective.push(binding);
+        }
+        break;
+    }
+    effective
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_alacritty_keybinds() -> Vec<DiscoveredBinding> {
+    // The default table encoded here is macOS-specific (Cmd-based). Other
+    // platforms use Ctrl+Shift chords that jcode does not bind by default.
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +418,110 @@ keybind = super+enter=new_window
 ";
         let binds = parse_ghostty_keybinds(out);
         assert_eq!(binds.len(), 3);
+    }
+
+    #[test]
+    fn alacritty_defaults_include_the_chords_that_shadow_jcode() {
+        let binds = alacritty_macos_default_bindings();
+        let find = |c: &str| binds.iter().find(|b| b.chord.canonical() == c);
+
+        // cmd+b is the regression that motivated this scanner: Alacritty
+        // consumes it for SearchBackward, so jcode's default `open_resume`
+        // binding never reached the TUI and looked like a jcode bug.
+        assert_eq!(
+            find("cmd+b").map(|b| b.action.as_str()),
+            Some("SearchBackward")
+        );
+        assert_eq!(
+            find("cmd+f").map(|b| b.action.as_str()),
+            Some("SearchForward")
+        );
+        assert_eq!(
+            find("cmd+k").map(|b| b.action.as_str()),
+            Some("ClearHistory")
+        );
+        assert!(binds.iter().all(|b| b.tool == "Alacritty"));
+        assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+    }
+
+    #[test]
+    fn alacritty_user_bindings_are_parsed_from_config() {
+        let cfg = r#"
+[[keyboard.bindings]]
+key = "Return"
+mods = "Shift"
+chars = "\u001B\r"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Command|Shift"
+action = "CreateNewWindow"
+"#;
+        let (binds, unbound) = parse_alacritty_bindings(cfg);
+        assert!(unbound.is_empty());
+        let chords: Vec<String> = binds.iter().map(|b| b.chord.canonical()).collect();
+        assert!(
+            chords.contains(&"shift+enter".to_string()),
+            "got {chords:?}"
+        );
+        assert!(
+            chords.contains(&"cmd+shift+n".to_string()),
+            "got {chords:?}"
+        );
+    }
+
+    #[test]
+    fn alacritty_receivechar_frees_a_default_chord() {
+        // Alacritty documents ReceiveChar/None as the way to unset a built-in
+        // binding. A user who does that has deliberately handed the chord back
+        // to the application, so it must stop being reported as a conflict.
+        let cfg = r#"
+[[keyboard.bindings]]
+key = "B"
+mods = "Command"
+action = "ReceiveChar"
+"#;
+        let (binds, unbound) = parse_alacritty_bindings(cfg);
+        assert!(binds.is_empty());
+        assert_eq!(unbound.len(), 1);
+        assert_eq!(unbound[0].canonical(), "cmd+b");
+    }
+
+    #[test]
+    fn alacritty_malformed_config_is_ignored_not_fatal() {
+        let (binds, unbound) = parse_alacritty_bindings("this is not toml {{{");
+        assert!(binds.is_empty() && unbound.is_empty());
+        // A config with no bindings table is fine too.
+        let (binds, _) = parse_alacritty_bindings("[font]\nsize = 12\n");
+        assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn jcode_default_open_resume_conflicts_with_alacritty_search_backward() {
+        // End-to-end: with the Alacritty table in the snapshot, jcode's own
+        // macOS default for `open_resume` (cmd+b) is now correctly reported
+        // instead of silently doing nothing.
+        use crate::keymap::{KeymapSnapshot, detect_conflicts};
+        use jcode_config_types::KeybindingsConfig;
+
+        let snapshot = KeymapSnapshot {
+            version: 1,
+            captured_at: String::new(),
+            os: "macos".to_string(),
+            terminal: "Alacritty".to_string(),
+            terminal_version: String::new(),
+            bindings: alacritty_macos_default_bindings(),
+        };
+        let cfg = KeybindingsConfig {
+            open_resume: "cmd+b".to_string(),
+            ..Default::default()
+        };
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.open_resume"),
+            "expected cmd+b to conflict with Alacritty SearchBackward, got {conflicts:?}"
+        );
     }
 }
