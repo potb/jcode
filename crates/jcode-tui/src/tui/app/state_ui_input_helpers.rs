@@ -151,6 +151,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/info", "Show session info and tokens"),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
+        "/facts",
+        "Move the session facts beside the input (left/right/off, context)",
+    ),
+    RegisteredCommand::public(
         "/productivity",
         "Generate a shareable usage report + dashboard image",
     ),
@@ -1642,6 +1646,7 @@ impl App {
                 | "/account openai switch"
                 | "/account openai remove"
                 | "/usage"
+                | "/facts"
                 | "/subscription"
                 | "/poke"
                 | "/memory"

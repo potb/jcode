@@ -701,3 +701,329 @@ fn draw_notification_clips_overwide_notice_at_area_width() {
         "expected clipped notice text inside area, got: {inside:?}"
     );
 }
+
+/// Both process-global locks these tests need, always acquired in the same
+/// order: env first, then the viewport snapshot.
+///
+/// Order matters and is the whole point of this helper. The command tests take
+/// the env lock and then touch config; the frame tests here take the viewport
+/// lock. A guard that grabbed the env lock *after* the viewport lock created a
+/// lock-order inversion that deadlocked the suite outright (tests sat at "has
+/// been running for over 60 seconds" forever). Funnelling both through one
+/// helper makes the order impossible to get wrong per-test.
+struct FactsTestLocks {
+    _env: std::sync::MutexGuard<'static, ()>,
+    _viewport: crate::tui::ui::RenderStateTestGuard,
+}
+
+fn facts_test_locks() -> FactsTestLocks {
+    let env = crate::storage::lock_test_env();
+    let viewport = viewport_snapshot_test_lock();
+    FactsTestLocks {
+        _env: env,
+        _viewport: viewport,
+    }
+}
+
+/// Env guard for `display.session_facts` (JCODE_SESSION_FACTS), so a test can
+/// pick an edge without touching the developer's real config. Locking is the
+/// caller's job via [`facts_test_locks`].
+struct SessionFactsEnvGuard;
+
+impl SessionFactsEnvGuard {
+    fn set(mode: &str) -> Self {
+        crate::env::set_var("JCODE_SESSION_FACTS", mode);
+        crate::config::invalidate_config_cache();
+        Self
+    }
+}
+
+impl Drop for SessionFactsEnvGuard {
+    fn drop(&mut self) {
+        crate::env::remove_var("JCODE_SESSION_FACTS");
+        crate::config::invalidate_config_cache();
+    }
+}
+
+/// Column where a fact row's text starts, measured in real buffer cells.
+///
+/// Deliberately not string-width math on a joined row: a wide glyph (the ⏰ on
+/// the scheduled-task row) occupies two cells, and reconstructing columns from
+/// the joined string drifts by one against the buffer. Scanning cells compares
+/// like with like.
+fn fact_cell_start(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+    let buf = terminal.backend().buffer();
+    let width = buf.area.width;
+    let height = buf.area.height;
+    for y in (0..height).rev() {
+        let cells: Vec<String> = (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        for start in 0..width {
+            let mut joined = String::new();
+            let mut end = start;
+            while end < width && joined.chars().count() < needle.chars().count() {
+                joined.push_str(&cells[end as usize]);
+                end += 1;
+            }
+            if joined == needle {
+                return (start, end);
+            }
+        }
+    }
+    panic!("missing {needle:?} in frame");
+}
+
+/// `session_facts = "left"` moves the whole stack to the left edge of the
+/// composer. The rows keep their order and stay contiguous; only the anchor
+/// changes.
+#[test]
+fn session_facts_left_anchors_the_stack_to_the_left_edge() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("left");
+    // A left gutter only exists in centered mode; see the fallback in
+    // `draw_right_fact_stack` for what happens without one.
+    let mut state = fact_test_state(String::new(), true);
+    state.centered_mode = true;
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("left fact stack frame");
+
+    let rows = buffer_rows(&terminal);
+    // Same four rows, same order, still one uninterrupted block.
+    let [oauth_y, model_y, dir_y, context_y] = assert_fact_stack_is_contiguous(&rows);
+    assert!(oauth_y < model_y && model_y < dir_y && dir_y < context_y);
+
+    // Every row starts hard against the left edge (one cell of padding) rather
+    // than being right-aligned at the far side of a 120-column terminal.
+    for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "74k/256k"] {
+        let (x, _) = fact_cell_start(&terminal, needle);
+        assert_eq!(x, 1, "{needle:?} should hug the left edge, got column {x}");
+    }
+}
+
+/// The default keeps the stack right-aligned, which is what every existing
+/// layout expects. Paired with the left test so a regression that ignores the
+/// setting entirely cannot pass both.
+#[test]
+fn session_facts_right_keeps_the_stack_on_the_right_edge() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("right");
+    let state = fact_test_state(String::new(), true);
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("right fact stack frame");
+
+    let rows = buffer_rows(&terminal);
+    assert_fact_stack_is_contiguous(&rows);
+    let terminal_width = terminal.backend().buffer().area.width;
+    // Full row text, not a prefix: the assertion below is about where each row
+    // *ends*, and the context row continues into its gauge.
+    for needle in [
+        "OpenAI · OAuth",
+        "GPT-5.6 Sol high",
+        "74k/256k ▰▰▱▱▱▱ 29%",
+    ] {
+        let (x, end) = fact_cell_start(&terminal, needle);
+        assert!(
+            x > terminal_width / 2,
+            "{needle:?} should sit on the right half, got column {x}"
+        );
+        // One cell of padding is kept against the edge, and the transcript
+        // scrollbar may claim one more column on transcript rows.
+        assert!(
+            end >= terminal_width - 2 && end <= terminal_width - 1,
+            "{needle:?} should end within a cell or two of the right edge, got {end} of {terminal_width}"
+        );
+    }
+}
+
+/// `session_facts = "off"` paints nothing at all. The facts remain available
+/// through the info widgets, so this is a placement preference, not data loss.
+#[test]
+fn session_facts_off_paints_no_stack_at_all() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("off");
+    let state = fact_test_state(String::new(), true);
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("suppressed fact stack frame");
+
+    let rows = buffer_rows(&terminal);
+    for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "74k/256k"] {
+        assert!(
+            !rows.iter().any(|row| row.contains(needle)),
+            "{needle:?} should not be painted when session_facts is off:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+/// The stack must never overwrite composer content on either edge. A left
+/// anchor is the risky one: the prompt marker and the typed text both live at
+/// the left of the input row.
+#[test]
+fn left_session_facts_never_overwrite_the_prompt_or_typed_text() {
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("left");
+    for width in (40_u16..=60).chain([80, 120, 160]) {
+        clear_flicker_frame_history_for_tests();
+        let typed = "typed text that must survive";
+        let state = fact_test_state(typed.to_string(), width % 2 == 0);
+        let backend = TestBackend::new(width, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("left fact stack frame");
+
+        let rows = buffer_rows(&terminal);
+        assert!(
+            rows.iter().any(|row| row.contains(typed)),
+            "typed text must survive at width {width}:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+/// A left anchor needs a free left gutter, and only centered mode has one.
+/// Without it the stack falls back to the right edge rather than vanishing: a
+/// preference the layout cannot honor should degrade, not delete the facts.
+#[test]
+fn left_session_facts_fall_back_to_the_right_edge_without_a_left_gutter() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("left");
+    let mut state = fact_test_state(String::new(), true);
+    // Not centered: every row starts at column 0, so the left edge is busy.
+    state.centered_mode = false;
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("left fallback frame");
+
+    let rows = buffer_rows(&terminal);
+    assert_fact_stack_is_contiguous(&rows);
+    let terminal_width = terminal.backend().buffer().area.width;
+    let (x, _) = fact_cell_start(&terminal, "OpenAI · OAuth");
+    assert!(
+        x > terminal_width / 2,
+        "without a left gutter the stack should fall back to the right edge, got column {x}"
+    );
+}
+
+/// Env guard for `display.context_widget` (JCODE_CONTEXT_WIDGET).
+struct ContextWidgetEnvGuard;
+
+impl ContextWidgetEnvGuard {
+    fn set(mode: &str) -> Self {
+        crate::env::set_var("JCODE_CONTEXT_WIDGET", mode);
+        crate::config::invalidate_config_cache();
+        Self
+    }
+}
+
+impl Drop for ContextWidgetEnvGuard {
+    fn drop(&mut self) {
+        crate::env::remove_var("JCODE_CONTEXT_WIDGET");
+        crate::config::invalidate_config_cache();
+    }
+}
+
+/// The user's actual request: the context reading moves to the input, it does
+/// not appear in both places. Once the fact stack has drawn its context row,
+/// the side card stands down under `auto`.
+#[test]
+fn context_card_stands_down_once_the_fact_stack_draws_context() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("left");
+    let _ctx = ContextWidgetEnvGuard::set("auto");
+    let _drew = crate::tui::info_widget::SessionFactsContextDrawnGuard::set(false);
+
+    let mut state = fact_test_state(String::new(), true);
+    state.centered_mode = true;
+    // Let the info widgets run: this test is about them yielding.
+    state.suppress_info_widgets = false;
+    state.info_widget_data.context_info = Some(crate::prompt::ContextInfo {
+        total_chars: 400_000,
+        ..Default::default()
+    });
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    // First frame primes the flag, second observes the card standing down.
+    for _ in 0..2 {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("context dedupe frame");
+    }
+
+    // Guard against a vacuous pass: the card standing down only means
+    // anything if the stack really painted the context row this frame.
+    let rows = buffer_rows(&terminal);
+    assert!(
+        rows.iter().any(|row| row.contains("74k/256k")),
+        "the fact stack must actually show context for this test to mean anything:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        !crate::tui::info_widget::context_widget_visible(),
+        "once the stack drew context, the side card should stand down"
+    );
+    let data = &state.info_widget_data;
+    assert!(
+        !data.show_context(),
+        "no context render or height path should run while the stack owns it"
+    );
+}
+
+/// The dedupe keys off what the stack actually drew, not what is configured.
+/// With the stack suppressed, the card must keep showing context: hiding it
+/// would take the reading off screen entirely.
+#[test]
+fn context_card_returns_when_the_fact_stack_draws_nothing() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("off");
+    let _ctx = ContextWidgetEnvGuard::set("auto");
+    let _drew = crate::tui::info_widget::SessionFactsContextDrawnGuard::set(true);
+
+    let mut state = fact_test_state(String::new(), true);
+    state.suppress_info_widgets = false;
+    state.info_widget_data.context_info = Some(crate::prompt::ContextInfo {
+        total_chars: 400_000,
+        ..Default::default()
+    });
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    for _ in 0..2 {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("context restore frame");
+    }
+
+    assert!(
+        crate::tui::info_widget::context_widget_visible(),
+        "with the stack off, the side card must keep reporting context"
+    );
+    assert!(state.info_widget_data.show_context());
+}
+
+/// `context_widget = "on"` keeps both, for anyone who wants the card back
+/// alongside the stack.
+#[test]
+fn context_card_can_be_forced_on_alongside_the_stack() {
+    let _locks = facts_test_locks();
+    let _ctx = ContextWidgetEnvGuard::set("on");
+    let _drew = crate::tui::info_widget::SessionFactsContextDrawnGuard::set(true);
+    assert!(crate::tui::info_widget::context_widget_visible());
+}

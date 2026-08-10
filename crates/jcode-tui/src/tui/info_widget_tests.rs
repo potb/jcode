@@ -1243,6 +1243,10 @@ fn context_usage_line_shows_numeric_label_inside_bar() {
 
 #[test]
 fn render_context_compact_prefers_observed_token_usage_for_label() {
+    // These call the renderer directly, so pin the global "stack drew context"
+    // flag off: inheriting a `true` from another test hides every line and
+    // turns the assertions below into an out-of-bounds panic.
+    let _drew = super::SessionFactsContextDrawnGuard::set(false);
     let data = InfoWidgetData {
         context_info: Some(crate::prompt::ContextInfo {
             total_chars: 400_000,
@@ -1272,6 +1276,10 @@ fn render_context_compact_prefers_observed_token_usage_for_label() {
 
 #[test]
 fn render_context_compact_reports_updating_when_snapshot_is_stale() {
+    // These call the renderer directly, so pin the global "stack drew context"
+    // flag off: inheriting a `true` from another test hides every line and
+    // turns the assertions below into an out-of-bounds panic.
+    let _drew = super::SessionFactsContextDrawnGuard::set(false);
     let data = InfoWidgetData {
         context_info_stale: true,
         context_info: Some(crate::prompt::ContextInfo {

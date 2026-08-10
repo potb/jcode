@@ -1,8 +1,9 @@
 //! `[display]` section of the config: TUI/CLI presentation settings.
 
 use crate::{
-    DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode, MarkdownSpacingMode,
-    NativeScrollbarConfig, OverscrollStatusMode, ReasoningDisplayMode, default_true,
+    ContextWidgetMode, DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode,
+    MarkdownSpacingMode, NativeScrollbarConfig, OverscrollStatusMode, ReasoningDisplayMode,
+    SessionFactsMode, TodoWidgetMode, default_true,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,15 @@ pub struct DisplayConfig {
     /// it scrolls, like the sticky previous-prompt preview (default: false)
     #[serde(default)]
     pub pin_todos: bool,
+    /// Whether the info widget shows the session todo list on the side of the
+    /// chat (auto/on/off, default: auto). `auto` hides the side widget while
+    /// `pin_todos` is on so the same list isn't rendered twice.
+    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub todo_widget: TodoWidgetMode,
+    /// Whether the info widget shows the memory activity section (default:
+    /// true). Set to false to hide saved/injected memory chatter from the HUD.
+    #[serde(default = "default_true")]
+    pub memory_widget: bool,
     /// Keep the current provider's usage limits pinned to the last line of the
     /// terminal, below the input (default: false). The line adapts to the
     /// terminal width: full labelled bars when wide, a compact
@@ -126,6 +136,18 @@ pub struct DisplayConfig {
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
     #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub overscroll_status: OverscrollStatusMode,
+    /// Which edge of the composer the session-fact stack (provider/auth, model
+    /// and effort, working directory, context gauge) hugs: right (default),
+    /// left, or off to hide it. The stack only ever paints into cells that are
+    /// already blank, so moving it does not reflow the transcript or input.
+    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub session_facts: SessionFactsMode,
+    /// Whether the info widget shows a context-usage card beside the chat
+    /// (auto/on/off, default: auto). `auto` hides it while the session-fact
+    /// stack is enabled, since that stack already reports context usage with
+    /// its own gauge and the card would be the same number a second time.
+    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub context_widget: ContextWidgetMode,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -134,6 +156,8 @@ impl Default for DisplayConfig {
             show_diffs: None,
             pin_images: true,
             pin_todos: false,
+            todo_widget: TodoWidgetMode::default(),
+            memory_widget: true,
             pin_usage: false,
             queue_mode: false,
             auto_server_reload: true,
@@ -165,6 +189,8 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             overscroll_status: OverscrollStatusMode::default(),
+            session_facts: SessionFactsMode::default(),
+            context_widget: ContextWidgetMode::default(),
         }
     }
 }
@@ -208,5 +234,179 @@ impl DisplayConfig {
     /// Whether reasoning content should be generated/requested at all.
     pub fn reasoning_enabled(&self) -> bool {
         !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
+    }
+}
+
+#[cfg(test)]
+mod todo_widget_mode_tests {
+    use super::DisplayConfig;
+    use crate::TodoWidgetMode;
+
+    #[test]
+    fn defaults_to_auto_and_yields_to_the_pinned_band() {
+        let cfg = DisplayConfig::default();
+        assert_eq!(cfg.todo_widget, TodoWidgetMode::Auto);
+        assert!(cfg.todo_widget.visible(false));
+        assert!(!cfg.todo_widget.visible(true));
+        assert!(TodoWidgetMode::On.visible(true));
+        assert!(!TodoWidgetMode::Off.visible(false));
+    }
+
+    #[test]
+    fn parses_from_config_toml_including_bool_spellings() {
+        for (raw, expected) in [
+            ("auto", TodoWidgetMode::Auto),
+            ("on", TodoWidgetMode::On),
+            ("true", TodoWidgetMode::On),
+            ("always", TodoWidgetMode::On),
+            ("off", TodoWidgetMode::Off),
+            ("never", TodoWidgetMode::Off),
+            ("hidden", TodoWidgetMode::Off),
+        ] {
+            let cfg: DisplayConfig =
+                toml::from_str(&format!("todo_widget = \"{}\"", raw)).expect(raw);
+            assert_eq!(cfg.todo_widget, expected, "toml value {}", raw);
+            assert_eq!(TodoWidgetMode::parse(raw), Some(expected), "parse {}", raw);
+        }
+
+        // Garbage falls back to the default instead of failing the whole config.
+        let cfg: DisplayConfig = toml::from_str("todo_widget = \"nonsense\"").unwrap();
+        assert_eq!(cfg.todo_widget, TodoWidgetMode::Auto);
+        assert_eq!(TodoWidgetMode::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn round_trips_through_serialization() {
+        let mut cfg = DisplayConfig::default();
+        cfg.todo_widget = TodoWidgetMode::Off;
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("todo_widget = \"off\""), "{}", text);
+        let back: DisplayConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.todo_widget, TodoWidgetMode::Off);
+    }
+}
+
+#[cfg(test)]
+mod memory_widget_tests {
+    use super::DisplayConfig;
+
+    #[test]
+    fn memory_widget_defaults_on_and_parses_off() {
+        let cfg: DisplayConfig = toml::from_str("").unwrap();
+        assert!(cfg.memory_widget);
+        let cfg: DisplayConfig = toml::from_str("memory_widget = false").unwrap();
+        assert!(!cfg.memory_widget);
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("memory_widget = false"), "{}", text);
+    }
+}
+#[cfg(test)]
+mod session_facts_mode_tests {
+    use super::DisplayConfig;
+    use crate::SessionFactsMode;
+
+    #[test]
+    fn defaults_to_the_right_edge_so_existing_layouts_are_unchanged() {
+        let cfg = DisplayConfig::default();
+        assert_eq!(cfg.session_facts, SessionFactsMode::Right);
+        assert!(cfg.session_facts.enabled());
+        assert!(SessionFactsMode::Left.enabled());
+        assert!(!SessionFactsMode::Off.enabled());
+    }
+
+    #[test]
+    fn flips_between_edges_but_leaves_off_alone() {
+        assert_eq!(SessionFactsMode::Right.flipped(), SessionFactsMode::Left);
+        assert_eq!(SessionFactsMode::Left.flipped(), SessionFactsMode::Right);
+        // `/facts` with no argument toggles sides; it must not silently
+        // resurrect a stack the user turned off.
+        assert_eq!(SessionFactsMode::Off.flipped(), SessionFactsMode::Off);
+    }
+
+    #[test]
+    fn parses_from_config_toml_including_bool_spellings() {
+        for (raw, expected) in [
+            ("right", SessionFactsMode::Right),
+            ("on", SessionFactsMode::Right),
+            ("true", SessionFactsMode::Right),
+            ("left", SessionFactsMode::Left),
+            ("off", SessionFactsMode::Off),
+            ("never", SessionFactsMode::Off),
+            ("hidden", SessionFactsMode::Off),
+        ] {
+            let cfg: DisplayConfig =
+                toml::from_str(&format!("session_facts = \"{}\"", raw)).expect(raw);
+            assert_eq!(cfg.session_facts, expected, "toml value {}", raw);
+            assert_eq!(
+                SessionFactsMode::parse(raw),
+                Some(expected),
+                "parse {}",
+                raw
+            );
+        }
+
+        // Garbage falls back to the default instead of failing the whole config.
+        let cfg: DisplayConfig = toml::from_str("session_facts = \"sideways\"").unwrap();
+        assert_eq!(cfg.session_facts, SessionFactsMode::Right);
+        assert_eq!(SessionFactsMode::parse("sideways"), None);
+    }
+
+    #[test]
+    fn round_trips_through_serialization() {
+        let mut cfg = DisplayConfig::default();
+        cfg.session_facts = SessionFactsMode::Left;
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("session_facts = \"left\""), "{}", text);
+        let back: DisplayConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.session_facts, SessionFactsMode::Left);
+    }
+}
+
+#[cfg(test)]
+mod context_widget_mode_tests {
+    use super::DisplayConfig;
+    use crate::ContextWidgetMode;
+
+    #[test]
+    fn defaults_to_auto_and_yields_to_the_fact_stack() {
+        let cfg = DisplayConfig::default();
+        assert_eq!(cfg.context_widget, ContextWidgetMode::Auto);
+        // No fact stack drawing context: the card is the only reading, so it shows.
+        assert!(cfg.context_widget.visible(false));
+        // Stack is showing context: the card would be the same number twice.
+        assert!(!cfg.context_widget.visible(true));
+        assert!(ContextWidgetMode::On.visible(true));
+        assert!(!ContextWidgetMode::Off.visible(false));
+    }
+
+    #[test]
+    fn parses_from_config_toml_including_bool_spellings() {
+        for (raw, expected) in [
+            ("auto", ContextWidgetMode::Auto),
+            ("on", ContextWidgetMode::On),
+            ("true", ContextWidgetMode::On),
+            ("off", ContextWidgetMode::Off),
+            ("never", ContextWidgetMode::Off),
+            ("hidden", ContextWidgetMode::Off),
+        ] {
+            let cfg: DisplayConfig =
+                toml::from_str(&format!("context_widget = \"{}\"", raw)).expect(raw);
+            assert_eq!(cfg.context_widget, expected, "toml value {}", raw);
+            assert_eq!(ContextWidgetMode::parse(raw), Some(expected), "parse {}", raw);
+        }
+
+        let cfg: DisplayConfig = toml::from_str("context_widget = \"nonsense\"").unwrap();
+        assert_eq!(cfg.context_widget, ContextWidgetMode::Auto);
+        assert_eq!(ContextWidgetMode::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn round_trips_through_serialization() {
+        let mut cfg = DisplayConfig::default();
+        cfg.context_widget = ContextWidgetMode::Off;
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("context_widget = \"off\""), "{}", text);
+        let back: DisplayConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.context_widget, ContextWidgetMode::Off);
     }
 }

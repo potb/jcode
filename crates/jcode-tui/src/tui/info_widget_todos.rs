@@ -514,7 +514,7 @@ fn todos_widget_label(data: &InfoWidgetData) -> &'static str {
 
 /// Render todos widget content
 pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
-    if data.todos.is_empty() {
+    if !data.show_todos() {
         return Vec::new();
     }
 
@@ -595,7 +595,7 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
 
 pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    if data.todos.is_empty() {
+    if !data.show_todos() {
         return lines;
     }
 
@@ -686,7 +686,7 @@ pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<L
 }
 
 pub(super) fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
-    if data.todos.is_empty() {
+    if !data.show_todos() {
         return Vec::new();
     }
     let total = data.todos.len();

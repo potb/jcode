@@ -258,7 +258,7 @@ impl App {
 
 pub(super) fn todos_view_status_message(app: &App) -> String {
     format!(
-        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo band: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.\n\nWhen the pinned band is enabled (/todos pin), the full todo list stays pinned to the top of the chat transcript while it scrolls, like the previous-prompt preview.",
+        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo band: {}\n\nSide todo widget (display.todo_widget): {} (currently {})\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.\n\nWhen the pinned band is enabled (/todos pin), the full todo list stays pinned to the top of the chat transcript while it scrolls, like the previous-prompt preview.",
         crate::tui::keybind::todo_card_key_label(),
         if app.todos_view_enabled() {
             "enabled"
@@ -269,6 +269,12 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
             "enabled"
         } else {
             "disabled"
+        },
+        crate::config::config().display.todo_widget.label(),
+        if crate::tui::info_widget::todo_widget_visible() {
+            "shown"
+        } else {
+            "hidden"
         }
     )
 }
@@ -347,6 +353,44 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
             }
             app.refresh_pinned_todos_now();
         }
+        // Show/hide the side info-widget copy of the todo list.
+        "widget" | "widget auto" | "widget on" | "widget off" => {
+            let mode = match arg {
+                "widget on" => jcode_config_types::TodoWidgetMode::On,
+                "widget off" => jcode_config_types::TodoWidgetMode::Off,
+                "widget auto" => jcode_config_types::TodoWidgetMode::Auto,
+                // Bare `/todos widget` toggles between showing and hiding,
+                // starting from whatever is currently effective.
+                _ => {
+                    if crate::tui::info_widget::todo_widget_visible() {
+                        jcode_config_types::TodoWidgetMode::Off
+                    } else {
+                        jcode_config_types::TodoWidgetMode::On
+                    }
+                }
+            };
+            app.set_status_notice(match mode {
+                jcode_config_types::TodoWidgetMode::Auto => "Todo widget: AUTO",
+                jcode_config_types::TodoWidgetMode::On => "Todo widget: ON",
+                jcode_config_types::TodoWidgetMode::Off => "Todo widget: OFF",
+            });
+            match crate::config::Config::set_todo_widget(mode) {
+                Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(
+                    match mode {
+                        jcode_config_types::TodoWidgetMode::Auto =>
+                            "Side todo widget set to auto: hidden while the pinned todo band is on, shown otherwise.",
+                        jcode_config_types::TodoWidgetMode::On =>
+                            "Side todo widget enabled. It shows even alongside the pinned todo band.",
+                        jcode_config_types::TodoWidgetMode::Off =>
+                            "Side todo widget disabled.",
+                    }
+                    .to_string(),
+                )),
+                Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(
+                    format!("Failed to save display.todo_widget: {}", error),
+                )),
+            }
+        }
         "status" => {
             app.push_display_message(crate::tui::DisplayMessage::system(
                 todos_view_status_message(app),
@@ -354,7 +398,7 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ => {
             app.push_display_message(crate::tui::DisplayMessage::error(
-                "Usage: /todos [card|panel|pin|on|off|status]".to_string(),
+                "Usage: /todos [card|panel|pin|widget|on|off|status]".to_string(),
             ));
         }
     }

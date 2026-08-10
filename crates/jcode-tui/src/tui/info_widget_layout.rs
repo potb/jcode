@@ -246,7 +246,30 @@ pub(crate) fn calculate_placements_anchored(
         // Screen-anchored (pinned at the bottom / streaming): hold the exact screen
         // row as before, and refresh `content_top` so a later switch into scrolling
         // hands off seamlessly.
-        let height = prev.rect.height as usize;
+        // Height must follow the *current* content, not the height frozen when the
+        // anchor was created. A resident whose content shrank (usage getting
+        // pinned removes its lines from Overview, a background task finishing,
+        // todos clearing) would otherwise keep its old taller box while the
+        // renderer emits fewer lines, and `lines.truncate(inner.height)` leaves
+        // the leftover rows blank - a box with a ragged empty tail.
+        //
+        // Only shrinking is applied here. Growing back is left to a fresh Phase 2
+        // placement, because a resident that expands in place could overrun the
+        // text beneath it, which is exactly what the anchor's fixed slot exists
+        // to prevent.
+        //
+        // Pass the anchor's own height as the ceiling, not `u16::MAX`: the height
+        // is page-based for Overview, and an unbounded ceiling lets
+        // `compute_page_layout` admit taller expanded pages that were never
+        // eligible for this slot, which would report a height larger than the
+        // box and defeat the shrink entirely.
+        let current_height =
+            calculate_widget_height(prev.kind, data, prev.rect.width, prev.rect.height);
+        let height = if current_height > 0 {
+            (prev.rect.height.min(current_height)) as usize
+        } else {
+            prev.rect.height as usize
+        };
         // Resident model: every anchor is bound to a transcript line and rides
         // with it, in both scrolling and pinned-at-bottom (streaming) modes. When
         // new lines append while pinned, `scroll_top` advances and the widget
@@ -331,7 +354,7 @@ pub(crate) fn calculate_placements_anchored(
         };
         let placement = WidgetPlacement {
             kind: prev.kind,
-            rect: Rect::new(kept_x, target_y, kept_width, prev.rect.height),
+            rect: Rect::new(kept_x, target_y, kept_width, height as u16),
             side: prev.side,
         };
         placements.push(placement.clone());

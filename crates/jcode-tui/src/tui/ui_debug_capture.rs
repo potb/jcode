@@ -17,6 +17,7 @@ pub(super) fn capture_widget_placements(
 
 pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> InfoWidgetSummary {
     let todos_total = data.todos.len();
+    let todos_shown = data.show_todos();
     let todos_done = data
         .todos
         .iter()
@@ -50,6 +51,7 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
     InfoWidgetSummary {
         todos_total,
         todos_done,
+        todos_shown,
         context_total_chars,
         context_limit,
         queue_mode: data.queue_mode,

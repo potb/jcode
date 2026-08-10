@@ -181,6 +181,148 @@ pub enum DiagramPanePosition {
     Top,
 }
 
+/// Whether the info widget shows the session todo list on the side of the chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoWidgetMode {
+    /// Hide the side todo widget while `display.pin_todos` pins the list to the
+    /// top of the transcript, otherwise show it. Avoids rendering the same list
+    /// twice.
+    #[default]
+    Auto,
+    /// Always show the side todo widget, even alongside the pinned band.
+    #[serde(alias = "true", alias = "always")]
+    On,
+    /// Never show the side todo widget.
+    #[serde(alias = "false", alias = "never", alias = "hidden")]
+    Off,
+}
+
+impl TodoWidgetMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" | "true" | "always" | "show" => Some(Self::On),
+            "off" | "false" | "never" | "hidden" | "hide" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Resolve to actual visibility given the pinned-band setting.
+    pub fn visible(&self, pin_todos: bool) -> bool {
+        match self {
+            Self::Auto => !pin_todos,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
+/// Which side of the composer the session-fact stack (provider/auth, model,
+/// working directory, context gauge) is anchored to, or `off` to hide it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionFactsMode {
+    /// Anchor the stack to the right edge of the composer (default).
+    #[default]
+    #[serde(alias = "true", alias = "on")]
+    Right,
+    /// Anchor the stack to the left edge of the composer.
+    Left,
+    /// Never draw the stack.
+    #[serde(alias = "false", alias = "never", alias = "hidden")]
+    Off,
+}
+
+impl SessionFactsMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Left => "left",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "right" | "on" | "true" | "show" => Some(Self::Right),
+            "left" => Some(Self::Left),
+            "off" | "false" | "never" | "hidden" | "hide" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Whether the stack draws at all.
+    pub fn enabled(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The opposite side, used by `/facts` with no argument to toggle.
+    pub fn flipped(&self) -> Self {
+        match self {
+            Self::Right => Self::Left,
+            Self::Left => Self::Right,
+            Self::Off => Self::Off,
+        }
+    }
+}
+
+/// Whether the info widget shows a context-usage card beside the chat.
+///
+/// The session-fact stack beside the input already reports context as
+/// `used/limit` plus a gauge, so showing the card as well renders the same
+/// number twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextWidgetMode {
+    /// Hide the side context card while the session-fact stack is showing the
+    /// same gauge, otherwise show it.
+    #[default]
+    Auto,
+    /// Always show the side context card, even alongside the fact stack.
+    #[serde(alias = "true", alias = "always")]
+    On,
+    /// Never show the side context card.
+    #[serde(alias = "false", alias = "never", alias = "hidden")]
+    Off,
+}
+
+impl ContextWidgetMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" | "true" | "always" | "show" => Some(Self::On),
+            "off" | "false" | "never" | "hidden" | "hide" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Resolve to actual visibility given whether the fact stack is enabled.
+    pub fn visible(&self, session_facts_enabled: bool) -> bool {
+        match self {
+            Self::Auto => !session_facts_enabled,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
 /// How much vertical spacing to use when rendering markdown blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1237,9 +1379,16 @@ mod formatter_config_tests {
         assert!(!server.disabled);
         assert_eq!(
             server.command,
-            Some(vec!["prettier".to_string(), "--write".to_string(), "$FILE".to_string()])
+            Some(vec![
+                "prettier".to_string(),
+                "--write".to_string(),
+                "$FILE".to_string()
+            ])
         );
-        assert_eq!(server.extensions, Some(vec!["ts".to_string(), "tsx".to_string()]));
+        assert_eq!(
+            server.extensions,
+            Some(vec!["ts".to_string(), "tsx".to_string()])
+        );
     }
 
     #[test]

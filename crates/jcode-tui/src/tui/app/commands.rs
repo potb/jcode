@@ -3446,6 +3446,127 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+/// `/facts [left|right|off]` moves the session-fact stack (provider and access
+/// method, model and effort, working directory, context gauge) between the
+/// edges of the composer, or hides it. A bare `/facts` flips sides, which is
+/// the whole point of the command: it is a placement preference people want to
+/// try both ways before settling.
+pub(super) fn handle_facts_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/facts") else {
+        return false;
+    };
+    // Reject `/factsomething` while allowing `/facts` and `/facts left`.
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let current = crate::config::config().display.session_facts;
+    let arg = rest.trim().to_ascii_lowercase();
+
+    // `/facts context [auto|on|off]` controls the side context card rather
+    // than the stack's placement. It lives here because "do I see context
+    // twice" is the same question users are asking when they reach for
+    // `/facts` at all.
+    if let Some(context_arg) = arg.strip_prefix("context") {
+        let context_arg = context_arg.trim();
+        let mode = if context_arg.is_empty() {
+            // Bare `/facts context` toggles the card's effective visibility.
+            if crate::tui::info_widget::context_widget_visible() {
+                jcode_config_types::ContextWidgetMode::Off
+            } else {
+                jcode_config_types::ContextWidgetMode::On
+            }
+        } else {
+            match jcode_config_types::ContextWidgetMode::parse(context_arg) {
+                Some(mode) => mode,
+                None => {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: /facts context [auto|on|off]".to_string(),
+                    ));
+                    return true;
+                }
+            }
+        };
+        app.set_status_notice(match mode {
+            jcode_config_types::ContextWidgetMode::Auto => "Context card: AUTO",
+            jcode_config_types::ContextWidgetMode::On => "Context card: ON",
+            jcode_config_types::ContextWidgetMode::Off => "Context card: OFF",
+        });
+        match crate::config::Config::set_context_widget(mode) {
+            Ok(()) => app.push_display_message(DisplayMessage::system(
+                match mode {
+                    jcode_config_types::ContextWidgetMode::Auto =>
+                        "Context card set to auto: hidden while the session facts show a context gauge, shown otherwise.",
+                    jcode_config_types::ContextWidgetMode::On =>
+                        "Context card enabled. It shows even alongside the session facts.",
+                    jcode_config_types::ContextWidgetMode::Off =>
+                        "Context card disabled.",
+                }
+                .to_string(),
+            )),
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Failed to save display.context_widget: {}",
+                error
+            ))),
+        }
+        return true;
+    }
+
+    let mode = if arg.is_empty() {
+        // Bare `/facts` toggles sides. When the stack is off, flipping would be
+        // invisible, so bring it back on the side it last would have used.
+        match current {
+            jcode_config_types::SessionFactsMode::Off => {
+                jcode_config_types::SessionFactsMode::Right
+            }
+            other => other.flipped(),
+        }
+    } else {
+        match jcode_config_types::SessionFactsMode::parse(&arg) {
+            Some(mode) => mode,
+            None => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /facts [left|right|off] or /facts context [auto|on|off]".to_string(),
+                ));
+                return true;
+            }
+        }
+    };
+
+    app.set_status_notice(match mode {
+        jcode_config_types::SessionFactsMode::Right => "Session facts: RIGHT",
+        jcode_config_types::SessionFactsMode::Left => "Session facts: LEFT",
+        jcode_config_types::SessionFactsMode::Off => "Session facts: OFF",
+    });
+    match crate::config::Config::set_session_facts(mode) {
+        Ok(()) => app.push_display_message(DisplayMessage::system(
+            match mode {
+                jcode_config_types::SessionFactsMode::Right => {
+                    "Session facts moved to the right edge of the composer."
+                }
+                jcode_config_types::SessionFactsMode::Left => {
+                    "Session facts moved to the left edge of the composer."
+                }
+                jcode_config_types::SessionFactsMode::Off => {
+                    "Session facts hidden. The same details stay available in the info widgets."
+                }
+            }
+            .to_string(),
+        )),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Failed to save display.session_facts: {}",
+            error
+        ))),
+    }
+    true
+}
+
 pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/usage") else {
         return false;

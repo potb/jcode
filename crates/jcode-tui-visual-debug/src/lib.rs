@@ -90,6 +90,25 @@ pub struct LayoutCapture {
     pub margins: Option<MarginsCapture>,
     /// Info widget placements
     pub widget_placements: Vec<WidgetPlacementCapture>,
+    /// Where the session-fact stack (`display.session_facts`) actually landed
+    /// this frame. Empty when the stack is off or could not be placed.
+    ///
+    /// Captured as real rects rather than a config echo: the stack only paints
+    /// blank cells, so "which side is configured" and "which side it drew on"
+    /// are genuinely different questions, and only the second one is the bug
+    /// people report.
+    #[serde(default)]
+    pub session_fact_placements: Vec<SessionFactPlacementCapture>,
+}
+
+/// One placed row of the session-fact stack.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SessionFactPlacementCapture {
+    /// Which edge the stack was anchored to: "left" or "right".
+    pub side: String,
+    /// The text painted on this row.
+    pub text: String,
+    pub rect: RectCapture,
 }
 
 /// Rect capture (serializable)
@@ -132,6 +151,11 @@ pub struct RenderTimingCapture {
 pub struct InfoWidgetSummary {
     pub todos_total: usize,
     pub todos_done: usize,
+    /// Whether the side todo section actually draws this frame. `todos_total`
+    /// counts the data the widget was handed, which stays populated even when
+    /// `display.todo_widget` hides the section, so visibility needs its own
+    /// field for debug captures and UI tests to be able to see it.
+    pub todos_shown: bool,
     pub context_total_chars: Option<usize>,
     pub context_limit: Option<usize>,
     pub queue_mode: Option<bool>,
@@ -668,6 +692,17 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
             )?;
         }
     }
+    if !frame.layout.session_fact_placements.is_empty() {
+        writeln!(file, "  session_fact_placements:")?;
+        for placement in &frame.layout.session_fact_placements {
+            let r = placement.rect;
+            writeln!(
+                file,
+                "    {} ({}) at ({}, {}) {}x{}",
+                placement.text, placement.side, r.x, r.y, r.width, r.height
+            )?;
+        }
+    }
 
     // Rendered text
     writeln!(file, "Rendered:")?;
@@ -728,9 +763,10 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
         writeln!(file, "InfoWidgets:")?;
         writeln!(
             file,
-            "  todos: {}/{} done, context_chars: {:?}, model: {:?}",
+            "  todos: {}/{} done (shown: {}), context_chars: {:?}, model: {:?}",
             info.summary.todos_done,
             info.summary.todos_total,
+            info.summary.todos_shown,
             info.summary.context_total_chars,
             info.summary.model
         )?;

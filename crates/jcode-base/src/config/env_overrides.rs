@@ -167,6 +167,21 @@ impl Config {
         {
             self.display.pin_todos = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_TODO_WIDGET")
+            && let Some(parsed) = jcode_config_types::TodoWidgetMode::parse(&v)
+        {
+            self.display.todo_widget = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_SESSION_FACTS")
+            && let Some(parsed) = jcode_config_types::SessionFactsMode::parse(&v)
+        {
+            self.display.session_facts = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_CONTEXT_WIDGET")
+            && let Some(parsed) = jcode_config_types::ContextWidgetMode::parse(&v)
+        {
+            self.display.context_widget = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_PIN_USAGE")
             && let Some(parsed) = parse_env_bool(&v)
         {

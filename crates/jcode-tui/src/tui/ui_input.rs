@@ -1174,6 +1174,7 @@ mod tests {
             Rect::new(0, 0, 40, 3),
             false,
             None,
+            FactSide::Right,
         );
         let rows = placements
             .iter()
@@ -1203,6 +1204,7 @@ mod tests {
             Rect::new(0, 0, 40, 5),
             false,
             None,
+            FactSide::Right,
         );
         let rows = placements
             .iter()
@@ -1223,59 +1225,70 @@ mod tests {
         const HEIGHT: u16 = 8;
         const STACK_HEIGHT: u16 = 4;
 
-        for occupied_mask in 0_u16..(1 << HEIGHT) {
-            let area = Rect::new(0, 0, 40, HEIGHT);
-            let mut buffer = ratatui::buffer::Buffer::empty(area);
-            for row in 0..HEIGHT {
-                if occupied_mask & (1 << row) != 0 {
-                    buffer[(39, row)].set_symbol("x");
+        // Both anchor edges must obey the same rule: the stack is placed whole
+        // at the lowest run of free rows, or not at all. The occupied cell is
+        // put on whichever edge the stack is hugging, since that is the one it
+        // has to clear.
+        for side in [FactSide::Right, FactSide::Left] {
+            let blocked_x = match side {
+                FactSide::Right => 39,
+                FactSide::Left => 0,
+            };
+            for occupied_mask in 0_u16..(1 << HEIGHT) {
+                let area = Rect::new(0, 0, 40, HEIGHT);
+                let mut buffer = ratatui::buffer::Buffer::empty(area);
+                for row in 0..HEIGHT {
+                    if occupied_mask & (1 << row) != 0 {
+                        buffer[(blocked_x, row)].set_symbol("x");
+                    }
                 }
-            }
-            let lines = ["oauth", "model", "dir", "context"]
-                .into_iter()
-                .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
-                .collect();
+                let lines = ["oauth", "model", "dir", "context"]
+                    .into_iter()
+                    .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
+                    .collect();
 
-            let placements = right_fact_placements(
-                &buffer,
-                lines,
-                0,
-                HEIGHT,
-                0,
-                40,
-                Rect::new(0, 0, 40, HEIGHT),
-                false,
-                None,
-            );
-            let expected_top = (0..=HEIGHT - STACK_HEIGHT).rev().find(|&start| {
-                (start..start + STACK_HEIGHT).all(|row| occupied_mask & (1 << row) == 0)
-            });
+                let placements = right_fact_placements(
+                    &buffer,
+                    lines,
+                    0,
+                    HEIGHT,
+                    0,
+                    40,
+                    Rect::new(0, 0, 40, HEIGHT),
+                    false,
+                    None,
+                    side,
+                );
+                let expected_top = (0..=HEIGHT - STACK_HEIGHT).rev().find(|&start| {
+                    (start..start + STACK_HEIGHT).all(|row| occupied_mask & (1 << row) == 0)
+                });
 
-            match expected_top {
-                Some(start) => {
-                    assert_eq!(
-                        placements.len(),
-                        STACK_HEIGHT as usize,
-                        "mask {occupied_mask:08b}"
-                    );
-                    assert_eq!(
-                        placements
-                            .iter()
-                            .map(|placement| placement.area.y)
-                            .collect::<Vec<_>>(),
-                        (start..start + STACK_HEIGHT).collect::<Vec<_>>(),
-                        "mask {occupied_mask:08b}"
-                    );
-                    assert_eq!(
-                        placements
-                            .iter()
-                            .map(|placement| placement.line.spans[0].content.as_ref())
-                            .collect::<Vec<_>>(),
-                        vec!["oauth", "model", "dir", "context"],
-                        "mask {occupied_mask:08b}"
-                    );
+                match expected_top {
+                    Some(start) => {
+                        assert_eq!(
+                            placements.len(),
+                            STACK_HEIGHT as usize,
+                            "{side:?} mask {occupied_mask:08b}"
+                        );
+                        assert_eq!(
+                            placements
+                                .iter()
+                                .map(|placement| placement.area.y)
+                                .collect::<Vec<_>>(),
+                            (start..start + STACK_HEIGHT).collect::<Vec<_>>(),
+                            "{side:?} mask {occupied_mask:08b}"
+                        );
+                        assert_eq!(
+                            placements
+                                .iter()
+                                .map(|placement| placement.line.spans[0].content.as_ref())
+                                .collect::<Vec<_>>(),
+                            vec!["oauth", "model", "dir", "context"],
+                            "{side:?} mask {occupied_mask:08b}"
+                        );
+                    }
+                    None => assert!(placements.is_empty(), "{side:?} mask {occupied_mask:08b}"),
                 }
-                None => assert!(placements.is_empty(), "mask {occupied_mask:08b}"),
             }
         }
     }
@@ -1298,6 +1311,7 @@ mod tests {
             Rect::new(0, 0, 32, 1),
             false,
             None,
+            FactSide::Right,
         );
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].area.y, 0);
@@ -1318,6 +1332,7 @@ mod tests {
             Rect::new(0, 0, 32, 1),
             false,
             Some(Position::new(28, 1)),
+            FactSide::Right,
         );
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].area.y, 0);
@@ -2277,7 +2292,10 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
 }
 
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
+/// Blank cells required between the facts and whatever content shares the row,
+/// so the stack reads as a separate object instead of running into the text.
 const RIGHT_FACT_GAP: u16 = 2;
+/// Blank cells kept between the facts and the edge of the composer.
 const RIGHT_FACT_PAD: u16 = 1;
 const RIGHT_FACT_TRANSCRIPT_ROWS: u16 = 4;
 
@@ -2285,18 +2303,53 @@ fn right_fact_neutral_style() -> Style {
     Style::default().fg(rgb(140, 140, 150))
 }
 
+/// Which edge of the composer the fact stack hugs this frame, resolved from
+/// `display.session_facts`. `Off` is handled before this point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum FactSide {
+    Left,
+    Right,
+}
+
+impl FactSide {
+    fn from_config() -> Option<Self> {
+        match crate::config::config().display.session_facts {
+            jcode_config_types::SessionFactsMode::Right => Some(Self::Right),
+            jcode_config_types::SessionFactsMode::Left => Some(Self::Left),
+            jcode_config_types::SessionFactsMode::Off => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RightFactLine {
     spans: Vec<Span<'static>>,
     width: u16,
+    /// Whether this row is the context reading. Tagged at construction rather
+    /// than sniffed from the text later: the directory row also contains
+    /// slashes and digits, so any content heuristic would eventually
+    /// misidentify it and stand the side context card down for the wrong row.
+    is_context: bool,
 }
 
 impl RightFactLine {
     fn new(spans: Vec<Span<'static>>) -> Option<Self> {
+        Self::build(spans, false)
+    }
+
+    fn context(spans: Vec<Span<'static>>) -> Option<Self> {
+        Self::build(spans, true)
+    }
+
+    fn build(spans: Vec<Span<'static>>, is_context: bool) -> Option<Self> {
         use unicode_width::UnicodeWidthStr;
         let width: usize = spans.iter().map(|span| span.content.width()).sum();
         let width = u16::try_from(width).ok()?;
-        (width > 0).then_some(Self { spans, width })
+        (width > 0).then_some(Self {
+            spans,
+            width,
+            is_context,
+        })
     }
 }
 
@@ -2306,11 +2359,12 @@ struct RightFactPlacement {
     area: Rect,
 }
 
-/// Draw session facts as a bottom-anchored stack in otherwise unused cells on
-/// the right side of the composer chrome. When chrome rows are occupied, the
-/// stack may climb into at most the last few transcript rows, but only where
-/// the final rendered buffer has a genuinely blank suffix. It never reflows or
-/// overwrites transcript, status, notification, inline UI, or input content.
+/// Draw session facts as a bottom-anchored stack in otherwise unused cells at
+/// one edge of the composer chrome (`display.session_facts`). When chrome rows
+/// are occupied, the stack may climb into at most the last few transcript rows,
+/// but only where the final rendered buffer has a genuinely blank run at that
+/// edge. It never reflows or overwrites transcript, status, notification,
+/// inline UI, or input content.
 pub(super) fn draw_right_fact_stack(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -2318,7 +2372,42 @@ pub(super) fn draw_right_fact_stack(
     input_area: Rect,
     transcript_scrollbar_visible: bool,
     input_cursor: Option<Position>,
+    debug_capture: &mut Option<FrameCaptureBuilder>,
 ) {
+    // Every exit reports whether a context row reached the screen, so the side
+    // context card can never stand down for a stack that then drew nothing.
+    // An early return that forgot to report would leave the flag stale from a
+    // previous frame, which is exactly the state where context disappears from
+    // both places at once.
+    let mut context_drawn = false;
+    draw_fact_stack_inner(
+        frame,
+        app,
+        messages_area,
+        input_area,
+        transcript_scrollbar_visible,
+        input_cursor,
+        debug_capture,
+        &mut context_drawn,
+    );
+    crate::tui::info_widget::note_session_facts_context_drawn(context_drawn);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_fact_stack_inner(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    messages_area: Rect,
+    input_area: Rect,
+    transcript_scrollbar_visible: bool,
+    input_cursor: Option<Position>,
+    debug_capture: &mut Option<FrameCaptureBuilder>,
+    context_drawn: &mut bool,
+) {
+    // `session_facts = "off"` suppresses the stack entirely.
+    let Some(side) = FactSide::from_config() else {
+        return;
+    };
     // The legacy overscroll row owns these same facts while it is visible.
     // Standing down here avoids duplicates and keeps its elastic reveal from
     // changing transcript-tail overlays mid-gesture. Users with overscroll off
@@ -2346,11 +2435,23 @@ pub(super) fn draw_right_fact_stack(
         return;
     }
 
+    // The side actually used, which differs from the configured side when the
+    // left fallback below fires. The debug capture reports this one: "where it
+    // drew" is the question, and echoing the config there would hide the
+    // fallback entirely.
+    let mut effective_side = side;
     let placements = {
         let buffer = frame.buffer_mut();
-        right_fact_placements(
+        // A left anchor needs a free left gutter, which only exists in
+        // centered mode: otherwise every row's text starts at column 0 and the
+        // stack would find no home at all. Falling back to the right edge
+        // keeps the facts on screen instead of silently dropping them, which
+        // reads as a broken setting rather than a layout that cannot honor a
+        // preference. The right edge never needs the mirrored fallback: it is
+        // where content *ends*, so short rows always leave a suffix.
+        let mut placements = right_fact_placements(
             buffer,
-            lines,
+            lines.clone(),
             top,
             bottom,
             input_area.x,
@@ -2358,10 +2459,45 @@ pub(super) fn draw_right_fact_stack(
             messages_area,
             transcript_scrollbar_visible,
             input_cursor,
-        )
+            side,
+        );
+        if placements.is_empty() && side == FactSide::Left {
+            effective_side = FactSide::Right;
+            placements = right_fact_placements(
+                buffer,
+                lines,
+                top,
+                bottom,
+                input_area.x,
+                input_area.right(),
+                messages_area,
+                transcript_scrollbar_visible,
+                input_cursor,
+                FactSide::Right,
+            );
+        }
+        placements
     };
 
+    *context_drawn = placements.iter().any(|placement| placement.line.is_context);
     for placement in placements {
+        if let Some(capture) = debug_capture.as_mut() {
+            capture.layout.session_fact_placements.push(
+                jcode_tui_visual_debug::SessionFactPlacementCapture {
+                    side: match effective_side {
+                        FactSide::Left => "left".to_string(),
+                        FactSide::Right => "right".to_string(),
+                    },
+                    text: placement
+                        .line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>(),
+                    rect: placement.area.into(),
+                },
+            );
+        }
         frame.render_widget(
             Paragraph::new(Line::from(placement.line.spans)),
             placement.area,
@@ -2454,7 +2590,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
             limit,
             RIGHT_FACT_CONTEXT_CELLS,
         ));
-        if let Some(line) = RightFactLine::new(spans) {
+        if let Some(line) = RightFactLine::context(spans) {
             lines.push(line);
         }
     }
@@ -2473,6 +2609,7 @@ fn right_fact_placements(
     messages_area: Rect,
     transcript_scrollbar_visible: bool,
     protected_position: Option<Position>,
+    side: FactSide,
 ) -> Vec<RightFactPlacement> {
     if top >= bottom || left >= right || lines.is_empty() {
         return Vec::new();
@@ -2511,6 +2648,7 @@ fn right_fact_placements(
                     messages_area,
                     transcript_scrollbar_visible,
                     protected_position,
+                    side,
                 )
             })
             .collect::<Option<Vec<_>>>();
@@ -2539,7 +2677,11 @@ fn right_fact_area_on_row(
     messages_area: Rect,
     transcript_scrollbar_visible: bool,
     protected_position: Option<Position>,
+    side: FactSide,
 ) -> Option<Rect> {
+    // The transcript's scrollbar lives in the last column of the messages area,
+    // so it only ever shortens the right edge. A left-anchored stack is
+    // unaffected by it.
     let row_right =
         if transcript_scrollbar_visible && row >= messages_area.y && row < messages_area.bottom() {
             right.saturating_sub(1)
@@ -2555,11 +2697,31 @@ fn right_fact_area_on_row(
         return None;
     }
 
-    let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
-    let fact_left = fact_right.saturating_sub(line.width);
-    let probe_left = fact_left.saturating_sub(RIGHT_FACT_GAP);
-    if probe_left < left
-        || !(probe_left..row_right).all(|x| {
+    // The probe span always covers the facts, the edge padding, and the gap
+    // separating them from whatever shares the row. Only the anchoring edge
+    // differs: hugging the right means padding on the right and the gap on the
+    // left, and hugging the left is the mirror image.
+    let (fact_left, probe_start, probe_end) = match side {
+        FactSide::Right => {
+            let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
+            let fact_left = fact_right.saturating_sub(line.width);
+            (
+                fact_left,
+                fact_left.saturating_sub(RIGHT_FACT_GAP),
+                row_right,
+            )
+        }
+        FactSide::Left => {
+            let fact_left = left.saturating_add(RIGHT_FACT_PAD);
+            let probe_end = fact_left
+                .saturating_add(line.width)
+                .saturating_add(RIGHT_FACT_GAP);
+            (fact_left, left, probe_end)
+        }
+    };
+    if probe_start < left
+        || probe_end > row_right
+        || !(probe_start..probe_end).all(|x| {
             protected_position != Some(Position::new(x, row))
                 && right_fact_cell_is_blank(&buffer[(x, row)])
         })

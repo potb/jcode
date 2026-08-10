@@ -134,6 +134,28 @@ pin_images = true
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = false
 
+# Whether the info widget shows this session's todo list on the side of the
+# chat (auto/on/off, default: auto). "auto" hides the side widget while
+# pin_todos is on, so the same list is not rendered twice.
+# todo_widget = "auto"
+
+# Show the memory activity section in the info widget (default: true). Set to
+# false to keep saved/injected memory chatter out of the HUD.
+# memory_widget = true
+
+# Which edge of the composer the session-fact stack hugs: provider and access
+# method, model and reasoning effort, working directory and git branch, then
+# the context gauge (right/left/off, default: right). The stack only paints
+# cells that are already blank, so switching sides never reflows the
+# transcript or the input. Also settable with /facts.
+# session_facts = "right"
+
+# Whether the info widget also shows a context-usage card beside the chat
+# (auto/on/off, default: auto). "auto" hides the card while the session-fact
+# stack above is drawing its own context gauge, so the same number is not
+# reported twice. Set "on" to keep both.
+# context_widget = "auto"
+
 # Keep the current provider's usage limits pinned to the last line of the
 # terminal, below the input (default: false). The line adapts to the terminal
 # width: labelled bars when wide, a compact "5h 62% · wk 81%" summary when
@@ -797,6 +819,94 @@ mod tests {
         // Unreadable settings are undiscoverable settings.
         assert!(
             Config::default_config_file_contents().contains("auto_approve_permissions"),
+            "the shipped template should document the setting"
+        );
+    }
+
+    /// End-to-end config wiring for `display.todo_widget`: the documented
+    /// snippet has to parse, the uncommented default has to stay `auto`, and
+    /// the template has to mention the key or nobody will find it.
+    #[test]
+    fn todo_widget_round_trips_through_toml_and_is_documented() {
+        use jcode_config_types::TodoWidgetMode;
+
+        let cfg: Config = toml::from_str("[display]\ntodo_widget = \"off\"\n")
+            .expect("the documented snippet must parse");
+        assert_eq!(cfg.display.todo_widget, TodoWidgetMode::Off);
+
+        let bare: Config =
+            toml::from_str("[display]\npin_todos = true\n").expect("parse without the key");
+        assert_eq!(
+            bare.display.todo_widget,
+            TodoWidgetMode::Auto,
+            "omitting the key must mean auto"
+        );
+        assert!(
+            !bare.display.todo_widget.visible(bare.display.pin_todos),
+            "auto + pin_todos must hide the side widget"
+        );
+
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("todo_widget"),
+            "the shipped template should document the setting"
+        );
+    }
+
+    /// End-to-end config wiring for `display.session_facts`: the documented
+    /// snippet parses, omitting the key keeps today's right-edge stack, and
+    /// the template mentions it.
+    #[test]
+    fn session_facts_round_trips_through_toml_and_is_documented() {
+        use jcode_config_types::SessionFactsMode;
+
+        let cfg: Config = toml::from_str("[display]\nsession_facts = \"left\"\n")
+            .expect("the documented snippet must parse");
+        assert_eq!(cfg.display.session_facts, SessionFactsMode::Left);
+
+        let bare: Config =
+            toml::from_str("[display]\npin_todos = true\n").expect("parse without the key");
+        assert_eq!(
+            bare.display.session_facts,
+            SessionFactsMode::Right,
+            "omitting the key must leave the stack where it has always been"
+        );
+        assert!(bare.display.session_facts.enabled());
+
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("session_facts"),
+            "the shipped template should document the setting"
+        );
+    }
+
+    /// End-to-end config wiring for `display.context_widget`. Paired with the
+    /// `session_facts` test above because the two settings only make sense
+    /// together: the card yields to the stack, so a user who finds one needs to
+    /// be able to find the other.
+    #[test]
+    fn context_widget_round_trips_through_toml_and_is_documented() {
+        use jcode_config_types::ContextWidgetMode;
+
+        let cfg: Config = toml::from_str("[display]\ncontext_widget = \"on\"\n")
+            .expect("the documented snippet must parse");
+        assert_eq!(cfg.display.context_widget, ContextWidgetMode::On);
+
+        let bare: Config =
+            toml::from_str("[display]\npin_todos = true\n").expect("parse without the key");
+        assert_eq!(
+            bare.display.context_widget,
+            ContextWidgetMode::Auto,
+            "omitting the key must mean auto"
+        );
+        // Auto yields to a fact stack that is drawing context, and shows the
+        // card when nothing else reports it.
+        assert!(!bare.display.context_widget.visible(true));
+        assert!(bare.display.context_widget.visible(false));
+
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("context_widget"),
             "the shipped template should document the setting"
         );
     }

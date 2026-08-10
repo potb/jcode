@@ -104,16 +104,18 @@ pub(crate) fn compute_page_layout(
 }
 
 fn compact_context_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.context_info
-        && info.total_chars > 0
-    {
+    // Height and render must agree: reserving a row for a section that then
+    // draws nothing leaves a blank gap in the overview.
+    if data.show_context() {
         return 1;
     }
     0
 }
 
 fn compact_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() { 0 } else { 2 }
+    // Height and render must agree: reserving rows for a section that then
+    // draws nothing leaves a blank gap in the overview.
+    if data.show_todos() { 2 } else { 0 }
 }
 
 fn compact_memory_height(data: &InfoWidgetData) -> u16 {
@@ -203,7 +205,7 @@ fn compact_git_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
-fn compact_overview_height(data: &InfoWidgetData) -> u16 {
+pub(crate) fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     compact_model_height(data)
         + compact_context_height(data)
         + compact_todos_height(data)
@@ -215,7 +217,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() {
+    if !data.show_todos() {
         return 0;
     }
 
@@ -312,6 +314,79 @@ mod tests {
                 .pages
                 .iter()
                 .any(|page| page.kind == InfoPageKind::MemoryExpanded)
+        );
+    }
+}
+
+#[cfg(test)]
+mod height_mirror_tests {
+    use super::compact_overview_height;
+    use crate::tui::info_widget::{
+        AuthMethod, InfoWidgetData, UsageInfo, UsageProvider, render_sections,
+    };
+    use ratatui::prelude::Rect;
+
+    /// A snapshot with every overview section populated, so the height mirror is
+    /// exercised on all of its branches at once.
+    fn populated(usage_pinned: bool) -> InfoWidgetData {
+        InfoWidgetData {
+            model: Some("claude-opus-5".to_string()),
+            provider_name: Some("Claude".to_string()),
+            auth_method: AuthMethod::AnthropicOAuth,
+            session_count: Some(3),
+            context_info: Some(crate::prompt::ContextInfo {
+                total_chars: 143_000,
+                ..Default::default()
+            }),
+            context_limit: Some(1_000_000),
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::Anthropic,
+                primary_limit_label: Some("5-hour".to_string()),
+                five_hour: 0.60,
+                secondary_limit_label: Some("Weekly".to_string()),
+                seven_day: 0.13,
+                available: true,
+                ..Default::default()
+            }),
+            usage_pinned,
+            ..Default::default()
+        }
+    }
+
+    /// `compact_overview_height` is a hand-maintained mirror of what
+    /// `render_sections` emits, and its own comment admits it "must mirror
+    /// render_usage_compact exactly". When the two drift the widget either
+    /// clips its last lines or reserves rows nothing draws into, which shows up
+    /// as trailing blank rows in the overview box.
+    ///
+    /// Pinning usage is exactly such a divergence risk: it removes lines from
+    /// the renderer and must remove the same count from the height.
+    #[test]
+    fn compact_height_matches_the_lines_render_sections_emits() {
+        let inner = Rect::new(0, 0, 40, 40);
+
+        for usage_pinned in [false, true] {
+            let data = populated(usage_pinned);
+            let rendered = render_sections(&data, inner, None).len() as u16;
+            let reserved = compact_overview_height(&data);
+
+            assert_eq!(
+                reserved, rendered,
+                "height mirror drifted with usage_pinned={usage_pinned}: \
+                 reserved {reserved} rows for {rendered} rendered lines"
+            );
+        }
+    }
+
+    /// Pinning usage must shrink the reservation, not merely stop drawing.
+    #[test]
+    fn pinning_usage_shrinks_the_reserved_overview_height() {
+        let unpinned = compact_overview_height(&populated(false));
+        let pinned = compact_overview_height(&populated(true));
+
+        assert!(
+            pinned < unpinned,
+            "pinned overview should reserve fewer rows ({pinned} vs {unpinned})"
         );
     }
 }

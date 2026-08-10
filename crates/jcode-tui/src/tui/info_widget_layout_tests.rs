@@ -403,3 +403,69 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     );
     assert_placements_sane("shifted area", area1, &second.visible);
 }
+
+/// A resident widget whose content shrinks must shrink its box too.
+///
+/// Phase 1 holds an anchored widget in its recorded slot and used to reuse the
+/// height frozen when the anchor was created. Turning on the pinned usage block
+/// removes the usage lines from Overview, so the renderer emits fewer lines than
+/// the frozen box has rows; `render_overview_widget` truncates to the box height
+/// and the surplus rows stay blank, showing as a ragged empty tail under the
+/// widget. The user reported exactly that.
+///
+/// Reproduces by anchoring Overview while usage is unpinned, then re-running
+/// placement with the same anchor after usage becomes pinned.
+#[test]
+fn a_resident_widget_shrinks_when_its_content_does() {
+    let messages_area = Rect::new(0, 0, 120, 40);
+    let margins = Margins {
+        right_widths: vec![60; 40],
+        left_widths: vec![0; 40],
+        centered: false,
+        scroll_top: 0,
+        ..Default::default()
+    };
+
+    let unpinned = InfoWidgetData {
+        usage_pinned: false,
+        ..contended_data()
+    };
+
+    // Frame 1: home Overview with usage lines included.
+    let first = calculate_placements_anchored(messages_area, &margins, &unpinned, true, &[]);
+    let overview_anchor = first
+        .anchors
+        .iter()
+        .find(|anchor| anchor.placement.kind == WidgetKind::Overview)
+        .cloned()
+        .expect("overview should be placed on the first frame");
+    let tall = overview_anchor.placement.rect.height;
+
+    // Frame 2: the user turns on the pinned usage block. Overview keeps its
+    // anchor but now renders fewer lines.
+    let pinned = InfoWidgetData {
+        usage_pinned: true,
+        ..contended_data()
+    };
+    let second = calculate_placements_anchored(
+        messages_area,
+        &margins,
+        &pinned,
+        true,
+        std::slice::from_ref(&overview_anchor),
+    );
+    let held = second
+        .visible
+        .iter()
+        .find(|placement| placement.kind == WidgetKind::Overview)
+        .expect("overview should still be held in its slot");
+
+    let needed = calculate_widget_height(WidgetKind::Overview, &pinned, held.rect.width, u16::MAX);
+    assert!(
+        held.rect.height <= needed,
+        "resident kept {} rows for {} lines of content (was {tall} while unpinned): \
+         the surplus renders as blank rows",
+        held.rect.height,
+        needed
+    );
+}

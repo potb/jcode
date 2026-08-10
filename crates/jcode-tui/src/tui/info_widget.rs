@@ -50,6 +50,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -611,7 +612,8 @@ pub struct InfoWidgetData {
     /// True when `todos` is actually a projection of the shared swarm plan
     /// (task DAG) rather than this session's private todo list. The widget
     /// renders a "Plan" header instead of "Todos" so the two are not
-    /// conflated.
+    /// conflated. It is also not what `display.pin_todos` pins, so
+    /// `display.todo_widget = auto` must not hide it.
     pub todos_are_swarm_plan: bool,
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
@@ -686,7 +688,103 @@ pub struct CompactionInfo {
     pub mode: String,
 }
 
+/// Whether the memory activity section of the info widget renders at all.
+/// `display.memory_widget = false` hides it entirely.
+pub fn memory_widget_visible() -> bool {
+    crate::config::config().display.memory_widget
+}
+
+/// Whether the side todo widget should render at all. `display.todo_widget`
+/// is `auto` by default, which hides the side copy while `display.pin_todos`
+/// keeps the full list pinned to the top of the transcript.
+pub fn todo_widget_visible() -> bool {
+    let cfg = crate::config::config();
+    cfg.display.todo_widget.visible(cfg.display.pin_todos)
+}
+
+/// Whether the session-fact stack actually painted its context row on the
+/// previous frame.
+///
+/// Deliberately "did it draw", not "is it configured on". The stack stands
+/// down in several situations (overscroll owns the same facts, no blank run
+/// wide enough, a turn is streaming), and a context card that hid itself for a
+/// stack which then failed to appear would take the number off screen
+/// entirely. Trading a one-frame lag for that guarantee is the right way
+/// round: the worst case is the card lingering for a frame, never a frame with
+/// no context reading at all.
+static SESSION_FACTS_DREW_CONTEXT: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the fact stack painted a context row this frame.
+pub(crate) fn note_session_facts_context_drawn(drawn: bool) {
+    SESSION_FACTS_DREW_CONTEXT.store(drawn, Ordering::Relaxed);
+}
+
+/// Restores the context-drawn flag when dropped.
+///
+/// The flag is process-global, so a test that sets it and walks away changes
+/// what *other* tests see. That is not hypothetical: the direct-render tests
+/// for `render_context_compact` index `lines[0]`, and an inherited `true`
+/// makes the gate return no lines at all, so they panic with an out-of-bounds
+/// index depending purely on test order.
+#[cfg(test)]
+pub(crate) struct SessionFactsContextDrawnGuard(bool);
+
+#[cfg(test)]
+impl SessionFactsContextDrawnGuard {
+    pub(crate) fn set(drawn: bool) -> Self {
+        let previous = SESSION_FACTS_DREW_CONTEXT.load(Ordering::Relaxed);
+        note_session_facts_context_drawn(drawn);
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SessionFactsContextDrawnGuard {
+    fn drop(&mut self) {
+        note_session_facts_context_drawn(self.0);
+    }
+}
+
+/// Whether the side context card should render. `display.context_widget` is
+/// `auto` by default, which stands the card down while the fact stack beside
+/// the input is showing the same gauge.
+pub fn context_widget_visible() -> bool {
+    let mode = crate::config::config().display.context_widget;
+    mode.visible(SESSION_FACTS_DREW_CONTEXT.load(Ordering::Relaxed))
+}
+
 impl InfoWidgetData {
+    /// Whether the side todo section should draw. Every todo render and height
+    /// path goes through this, so the layout never reserves rows for a section
+    /// that then renders nothing.
+    pub fn show_todos(&self) -> bool {
+        if self.todos.is_empty() {
+            return false;
+        }
+        // `off` hides the side todos widget outright, including the swarm-plan
+        // projection. `auto` only steps aside for the pinned band, which shows
+        // this session's todo list and never the plan.
+        let mode = crate::config::config().display.todo_widget;
+        if mode == jcode_config_types::TodoWidgetMode::Off {
+            return false;
+        }
+        self.todos_are_swarm_plan || todo_widget_visible()
+    }
+
+    /// Whether the side context card should draw. Every context render and
+    /// height path goes through this, so the layout never reserves rows for a
+    /// card that then renders nothing.
+    pub fn show_context(&self) -> bool {
+        let has_data = self.context_info_stale
+            || self
+                .context_info
+                .as_ref()
+                .map(|c| c.total_chars > 0)
+                .unwrap_or(false)
+            || self.observed_context_tokens.is_some();
+        has_data && context_widget_visible()
+    }
+
     fn widget_disabled(kind: WidgetKind) -> bool {
         matches!(kind, WidgetKind::AmbientMode | WidgetKind::Tips)
     }
@@ -724,15 +822,10 @@ impl InfoWidgetData {
                 if self.model.is_some() {
                     sections += 1;
                 }
-                if self
-                    .context_info
-                    .as_ref()
-                    .map(|c| c.total_chars > 0)
-                    .unwrap_or(false)
-                {
+                if self.show_context() {
                     sections += 1;
                 }
-                if !self.todos.is_empty() {
+                if self.show_todos() {
                     sections += 1;
                 }
                 if self
@@ -772,20 +865,16 @@ impl InfoWidgetData {
                 // Only useful as a "join" mode when there are multiple sections.
                 sections >= 2
             }
-            WidgetKind::Todos => !self.todos.is_empty(),
-            WidgetKind::ContextUsage => {
-                self.context_info_stale
-                    || self
-                        .context_info
+            WidgetKind::Todos => self.show_todos(),
+            WidgetKind::ContextUsage => self.show_context(),
+            WidgetKind::MemoryActivity => {
+                memory_widget_visible()
+                    && self
+                        .memory_info
                         .as_ref()
-                        .map(|c| c.total_chars > 0)
+                        .map(MemoryInfo::should_render)
                         .unwrap_or(false)
             }
-            WidgetKind::MemoryActivity => self
-                .memory_info
-                .as_ref()
-                .map(MemoryInfo::should_render)
-                .unwrap_or(false),
             WidgetKind::SwarmStatus => self
                 .swarm_info
                 .as_ref()
@@ -1201,7 +1290,7 @@ pub(crate) fn calculate_widget_height(
             max_height.saturating_sub(border_height)
         }
         WidgetKind::Todos => {
-            if data.todos.is_empty() {
+            if !data.show_todos() {
                 return 0;
             }
             // Header (with inline pip meter) + up to 5 items
@@ -1209,18 +1298,13 @@ pub(crate) fn calculate_widget_height(
             1 + items + if data.todos.len() > 5 { 1 } else { 0 }
         }
         WidgetKind::ContextUsage => {
-            if data
-                .context_info
-                .as_ref()
-                .map(|c| c.total_chars == 0)
-                .unwrap_or(true)
-            {
+            if !data.show_context() {
                 return 0;
             }
             1 // Just the bar
         }
         WidgetKind::MemoryActivity => {
-            if data.memory_info.is_none() {
+            if !memory_widget_visible() || data.memory_info.is_none() {
                 return 0;
             };
             let lines =
@@ -1916,6 +2000,9 @@ fn compact_token_count(tokens: u64) -> String {
 
 /// Render context usage widget
 fn render_context_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    if !data.show_context() {
+        return Vec::new();
+    }
     if data.context_info_stale {
         return vec![Line::from(vec![
             Span::styled("Context ", Style::default().fg(rgb(140, 140, 150))),
@@ -2125,7 +2212,7 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
     }
 }
 
-fn render_sections(
+pub(crate) fn render_sections(
     data: &InfoWidgetData,
     inner: Rect,
     focus: Option<InfoPageKind>,
@@ -2143,7 +2230,7 @@ fn render_sections(
         lines.extend(render_context_compact(data, inner));
     }
 
-    if !data.todos.is_empty() {
+    if data.show_todos() {
         if matches!(focus, Some(InfoPageKind::TodosExpanded)) {
             lines.extend(render_todos_expanded(data, inner));
         } else {
@@ -2153,6 +2240,7 @@ fn render_sections(
 
     // Memory info
     if let Some(info) = &data.memory_info
+        && memory_widget_visible()
         && (info.total_count > 0 || info.activity.is_some())
     {
         if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
@@ -2295,6 +2383,9 @@ fn format_event_for_expanded(
 }
 
 fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    if !data.show_context() {
+        return Vec::new();
+    }
     if data.context_info_stale {
         return vec![Line::from(vec![
             Span::styled("Context ", Style::default().fg(rgb(140, 140, 150))),

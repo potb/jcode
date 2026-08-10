@@ -3646,6 +3646,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         chunks[7],
         chat_scrollbar_visible,
         input_cursor,
+        &mut debug_capture,
     );
 
     // Command-suggestion popover: a late overlay pass so the palette floats

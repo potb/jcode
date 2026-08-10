@@ -1111,6 +1111,12 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                // Purely local display state, so it must work while connected
+                // to a remote server too.
+                if app_mod::commands::handle_facts_command(app, trimmed) {
+                    return Ok(());
+                }
+
                 if app_mod::commands::handle_agents_command(app, trimmed) {
                     return Ok(());
                 }
@@ -1760,12 +1766,11 @@ async fn handle_remote_key_internal(
                     || trimmed == "/observe off"
                     || trimmed == "/observe status"
                     || trimmed == "/todo"
+                    // Every `/todos` subcommand is local UI state, so match the
+                    // whole family instead of listing spellings: the old literal
+                    // list already silently dropped `/todos pin` here.
                     || trimmed == "/todos"
-                    || trimmed == "/todos card"
-                    || trimmed == "/todos panel"
-                    || trimmed == "/todos on"
-                    || trimmed == "/todos off"
-                    || trimmed == "/todos status"
+                    || trimmed.starts_with("/todos ")
                     || trimmed == "/splitview"
                     || trimmed == "/splitview on"
                     || trimmed == "/splitview off"

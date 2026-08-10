@@ -244,6 +244,42 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted side todo-widget visibility preference.
+    pub fn set_todo_widget(mode: jcode_config_types::TodoWidgetMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.todo_widget = mode;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.todo_widget to config: {}",
+            mode.label()
+        ));
+        Ok(())
+    }
+
+    /// Update the persisted session-fact stack placement.
+    pub fn set_session_facts(mode: jcode_config_types::SessionFactsMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.session_facts = mode;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.session_facts to config: {}",
+            mode.label()
+        ));
+        Ok(())
+    }
+
+    /// Update the persisted side context-card visibility preference.
+    pub fn set_context_widget(mode: jcode_config_types::ContextWidgetMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.context_widget = mode;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.context_widget to config: {}",
+            mode.label()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted pinned-usage preference.
     pub fn set_pin_usage(pin: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load();
