@@ -296,16 +296,14 @@ impl Tool for ApplyPatchTool {
                     Ok(None) => {}
                     Err(_) => break,
                 }
-                Ok(None) => {}
-                Err(_) => break,
             }
-        }
+
             let output = ToolOutput::new(body);
             if touched_paths.len() == 1 {
-            Ok(output.with_title(touched_paths[0].clone()))
-        } else {
-            Ok(output.with_title(format!("{} files", touched_paths.len())))
-        }
+                Ok(output.with_title(touched_paths[0].clone()))
+            } else {
+                Ok(output.with_title(format!("{} files", touched_paths.len())))
+            }
         }
     }
 }
