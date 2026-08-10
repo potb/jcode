@@ -213,6 +213,12 @@ pub struct RenderedText {
     pub recent_messages: Vec<MessageCapture>,
     /// Streaming text (if currently streaming)
     pub streaming_text_preview: String,
+    /// Text painted into the pinned provider-usage footer
+    /// (`display.pin_usage`). Empty when the feature is off or the row is not
+    /// reserved this frame. Captured so the footer's live content is directly
+    /// observable rather than inferred from config plus widget summaries.
+    #[serde(default)]
+    pub usage_footer: String,
 }
 
 /// Mermaid image region capture

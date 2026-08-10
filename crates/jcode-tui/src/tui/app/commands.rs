@@ -3461,6 +3461,37 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    // `/usage pin` toggles the always-visible usage footer instead of printing
+    // a one-off report.
+    let arg = rest.trim().to_ascii_lowercase();
+    if matches!(arg.as_str(), "pin" | "pin on" | "pin off") {
+        let enabled = match arg.as_str() {
+            "pin on" => true,
+            "pin off" => false,
+            _ => !crate::config::config().display.pin_usage,
+        };
+        app.set_status_notice(if enabled {
+            "Pinned usage: ON"
+        } else {
+            "Pinned usage: OFF"
+        });
+        match crate::config::Config::set_pin_usage(enabled) {
+            Ok(()) => app.push_display_message(DisplayMessage::system(
+                if enabled {
+                    "Pinned usage enabled. The current provider's limits stay on the last line of the terminal, adapting to its width."
+                } else {
+                    "Pinned usage disabled."
+                }
+                .to_string(),
+            )),
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Failed to save display.pin_usage: {}",
+                error
+            ))),
+        }
+        return true;
+    }
+
     app.open_usage_inline_loading();
     app.request_usage_report();
     true

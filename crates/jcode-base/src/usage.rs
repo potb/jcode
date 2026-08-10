@@ -39,8 +39,14 @@ const CACHE_DURATION: Duration = Duration::from_secs(300);
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
 
-/// Rate limit backoff duration (wait 15 minutes before retrying after 429 errors)
+/// Rate limit backoff duration, used only when the provider gives no
+/// `Retry-After` hint (wait 15 minutes before retrying after 429 errors).
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(900);
+
+/// Floor applied to a server `Retry-After` hint. Anthropic's usage endpoint
+/// answers `retry-after: 0` on its burst limiter, and retrying literally
+/// immediately would just re-trip it, so wait a few seconds regardless.
+const MIN_RETRY_AFTER_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Minimum interval between /usage command fetches (per provider).
 const PROVIDER_USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -76,7 +82,8 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
+            let err =
+                anthropic_usage_error(&cache_key, format!("Failed to fetch usage data: {}", e));
             store_anthropic_usage(cache_key, err.clone());
             anyhow::bail!(
                 err.last_error
@@ -87,8 +94,18 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
 
     if !response.status().is_success() {
         let status = response.status();
+        // This endpoint enforces a short *burst* limit: a couple of rapid calls
+        // return 429 with `retry-after: 0`, and access is restored within
+        // seconds. Honor the server's own hint instead of assuming the 15
+        // minute penalty a sustained quota ban would deserve.
+        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers())
+            .map(|hint| hint.remaining());
         let error_text = response.text().await.unwrap_or_default();
-        let err = anthropic_usage_error(format!("Usage API error ({}): {}", status, error_text));
+        let mut err = anthropic_usage_error(
+            &cache_key,
+            format!("Usage API error ({}): {}", status, error_text),
+        );
+        err.retry_after = retry_after;
         store_anthropic_usage(cache_key, err.clone());
         anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
     }
@@ -138,6 +155,7 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
             .unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,
+        retry_after: None,
     };
 
     store_anthropic_usage(cache_key, usage.clone());

@@ -64,6 +64,16 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     (!cached.is_stale()).then_some(cached)
 }
 
+/// Read a cached entry regardless of staleness. Unlike
+/// [`cached_anthropic_usage`] this does not hide expired entries, because
+/// callers recovering from a failed refresh specifically want the last-known
+/// values and the recorded `retry_after`.
+pub(super) fn peek_anthropic_usage(cache_key: &str) -> Option<UsageData> {
+    let cache = anthropic_usage_cache();
+    let map = cache.lock().ok()?;
+    map.get(cache_key).cloned()
+}
+
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {
     if let Ok(mut map) = anthropic_usage_cache().lock() {
         map.insert(cache_key, data);
@@ -107,11 +117,24 @@ pub(super) fn store_openai_usage(cache_key: String, data: OpenAIUsageData) {
     }
 }
 
-pub(super) fn anthropic_usage_error(err_msg: String) -> UsageData {
+/// Build the `UsageData` recorded when a fetch fails.
+///
+/// The previously fetched windows are carried over rather than reset to
+/// `Default`. A failed refresh says nothing about the quota itself, so throwing
+/// the last-known utilization away turns a transient 429 into "no usage data at
+/// all" for every reader. Callers distinguish the two states through
+/// `last_error`, and surfaces that want to keep showing something (the pinned
+/// usage footer) can present the carried values as stale.
+pub(super) fn anthropic_usage_error(cache_key: &str, err_msg: String) -> UsageData {
+    let previous = anthropic_usage_cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(cache_key).cloned());
+
     UsageData {
         fetched_at: Some(Instant::now()),
         last_error: Some(err_msg),
-        ..Default::default()
+        ..previous.unwrap_or_default()
     }
 }
 
@@ -231,6 +254,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,
+        retry_after: None,
     }
 }
 

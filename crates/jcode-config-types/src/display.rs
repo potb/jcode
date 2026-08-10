@@ -54,6 +54,12 @@ pub struct DisplayConfig {
     /// it scrolls, like the sticky previous-prompt preview (default: false)
     #[serde(default)]
     pub pin_todos: bool,
+    /// Keep the current provider's usage limits pinned to the last line of the
+    /// terminal, below the input (default: false). The line adapts to the
+    /// terminal width: full labelled bars when wide, a compact
+    /// `5h 62% · wk 81%` summary when narrow.
+    #[serde(default)]
+    pub pin_usage: bool,
     /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
@@ -128,6 +134,7 @@ impl Default for DisplayConfig {
             show_diffs: None,
             pin_images: true,
             pin_todos: false,
+            pin_usage: false,
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,

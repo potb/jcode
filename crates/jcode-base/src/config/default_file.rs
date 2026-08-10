@@ -134,6 +134,12 @@ pin_images = true
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = false
 
+# Keep the current provider's usage limits pinned to the last line of the
+# terminal, below the input (default: false). The line adapts to the terminal
+# width: labelled bars when wide, a compact "5h 62% · wk 81%" summary when
+# narrow, and just the most-consumed window's percentage when very narrow.
+# pin_usage = false
+
 # Wrap long lines in the pinned diff pane (default: true)
 # Set to false for horizontal scrolling instead of wrapping
 diff_line_wrap = true

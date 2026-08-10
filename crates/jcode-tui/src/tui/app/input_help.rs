@@ -166,7 +166,7 @@ impl App {
                 "/context\nShow the full session context snapshot: prompt/context composition, compaction state, model/provider/runtime details, queued work, todos, and side-panel state."
             }
             "usage" => {
-                "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
+                "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times.\n\n/usage pin\nToggle keeping the current provider's limits pinned to the last line of the terminal, below the input (saved to config as display.pin_usage, off by default). The line adapts to the terminal width."
             }
             "subscription" => {
                 "/subscription\nCompatibility alias for /hosted status. Shows hosted-model usage, your monthly spending limit, billing status, and router configuration."

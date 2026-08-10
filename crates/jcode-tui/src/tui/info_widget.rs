@@ -386,6 +386,12 @@ pub struct UsageInfo {
     pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
+    /// Whether the values above are last-known-good readings kept after the
+    /// most recent refresh failed (typically a 429 from the provider's usage
+    /// API). `available` stays false in that case so the margin widget keeps
+    /// hiding, but the pinned footer prefers showing a marked-stale number over
+    /// disappearing, since the user explicitly asked for a permanent line.
+    pub stale: bool,
 }
 
 /// Session-level KV cache telemetry for providers that report cache usage.
@@ -659,6 +665,16 @@ pub struct InfoWidgetData {
     pub is_compacting: bool,
     /// Git repository status
     pub git_info: Option<GitInfo>,
+    /// Whether the always-visible pinned usage block (`display.pin_usage`) is
+    /// showing these same numbers at the bottom of the screen. When it is, the
+    /// margin widget and the overview's usage section hide themselves rather
+    /// than duplicating it.
+    ///
+    /// Carried as data rather than read from global config inside the query, so
+    /// widget visibility stays a pure function of the snapshot. Reading the
+    /// config here would make `has_data_for` depend on the machine's config
+    /// file, which is both untestable and surprising.
+    pub usage_pinned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -675,6 +691,13 @@ impl InfoWidgetData {
         matches!(kind, WidgetKind::AmbientMode | WidgetKind::Tips)
     }
 
+    /// Whether this snapshot suppresses `kind` because the pinned usage block
+    /// already shows it. Separate from [`Self::widget_disabled`] because it
+    /// depends on the snapshot rather than on the widget kind alone.
+    fn suppressed_by_pinned_usage(&self, kind: WidgetKind) -> bool {
+        self.usage_pinned && matches!(kind, WidgetKind::UsageLimits)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.todos.is_empty()
             && self.context_info.is_none()
@@ -689,7 +712,7 @@ impl InfoWidgetData {
 
     /// Check if a specific widget kind has data to display
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
-        if Self::widget_disabled(kind) {
+        if Self::widget_disabled(kind) || self.suppressed_by_pinned_usage(kind) {
             return false;
         }
 
@@ -723,11 +746,12 @@ impl InfoWidgetData {
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
-                if self
-                    .usage_info
-                    .as_ref()
-                    .map(|u| u.available)
-                    .unwrap_or(false)
+                if !self.usage_pinned
+                    && self
+                        .usage_info
+                        .as_ref()
+                        .map(|u| u.available)
+                        .unwrap_or(false)
                 {
                     sections += 1;
                 }
@@ -2145,9 +2169,11 @@ fn render_sections(
         lines.extend(render_background_compact(info));
     }
 
-    // Usage info (subscription limits)
+    // Usage info (subscription limits). Skipped when the pinned block is showing
+    // the same numbers permanently at the bottom of the screen.
     if let Some(info) = &data.usage_info
         && info.available
+        && !data.usage_pinned
     {
         lines.extend(render_usage_compact(info, inner.width));
     }

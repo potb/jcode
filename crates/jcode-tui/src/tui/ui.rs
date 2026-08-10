@@ -86,6 +86,15 @@ mod todo_changes;
 pub(crate) mod tools_ui;
 #[path = "ui_transitions.rs"]
 mod transitions;
+#[path = "ui_usage_footer.rs"]
+mod usage_footer;
+
+/// How many rows the pinned usage block reserves at `width`. Exposed for tests
+/// that need the layout decision without scraping rendered cells.
+#[cfg(test)]
+pub(crate) fn usage_footer_height_for_tests(app: &dyn TuiState, width: u16) -> u16 {
+    usage_footer::usage_footer_height(app, width)
+}
 #[path = "ui_viewport.rs"]
 mod viewport;
 use crate::tui::mermaid;
@@ -3066,6 +3075,36 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
+    // Pinned provider-usage footer (display.pin_usage): unlike the overscroll
+    // line this row is never transient, so it is part of the stable layout at
+    // every terminal size.
+    //
+    // It is carved off the *bottom* of the chat area rather than appended to
+    // the vertical chunk stack. The packed layout is top-aligned, so a trailing
+    // chunk lands directly under the input and floats mid-screen whenever the
+    // transcript is shorter than the terminal. "Pinned to the last line" has to
+    // mean the last line at every content height, so reserve the row up front.
+    //
+    // The block is as tall as the provider has windows to report, so ask the
+    // renderer rather than assuming one row: a reservation that disagrees with
+    // what gets painted either clips the block or leaves a blank gap.
+    let usage_footer_height: u16 = usage_footer::usage_footer_height(app, chat_area.width);
+    // Never let the block take more than a third of a short terminal.
+    let usage_footer_height = usage_footer_height.min(chat_area.height / 3);
+    let usage_footer_area = (usage_footer_height > 0).then(|| Rect {
+        x: chat_area.x,
+        y: chat_area.y + chat_area.height - usage_footer_height,
+        width: chat_area.width,
+        height: usage_footer_height,
+    });
+    let chat_area = if usage_footer_height > 0 {
+        Rect {
+            height: chat_area.height - usage_footer_height,
+            ..chat_area
+        }
+    } else {
+        chat_area
+    };
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3493,6 +3532,16 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if overscroll_height > 0 {
         input_ui::draw_overscroll_status(frame, app, chunks[8]);
+    }
+
+    if let Some(footer_area) = usage_footer_area {
+        if let Some(ref mut capture) = debug_capture {
+            capture.render_order.push("draw_usage_footer".to_string());
+            capture.rendered_text.usage_footer =
+                usage_footer::usage_footer_debug_text(app, footer_area.width);
+        }
+        clear_area(frame, footer_area);
+        usage_footer::draw_usage_footer(frame, app, footer_area);
     }
 
     if donut_height > 0 {

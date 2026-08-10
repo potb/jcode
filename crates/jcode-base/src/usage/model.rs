@@ -1,7 +1,7 @@
 use super::display::{format_reset_time, usage_reset_passed};
-use super::{CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF};
+use super::{CACHE_DURATION, ERROR_BACKOFF, MIN_RETRY_AFTER_BACKOFF, RATE_LIMIT_BACKOFF};
 use serde::Deserialize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(super) fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
@@ -66,6 +66,9 @@ pub struct UsageData {
     pub fetched_at: Option<Instant>,
     /// Last error (if any)
     pub last_error: Option<String>,
+    /// Server-provided `Retry-After` hint from the failed refresh, when the
+    /// provider sent one. Preferred over the blanket rate-limit backoff.
+    pub retry_after: Option<Duration>,
 }
 
 impl UsageData {
@@ -100,7 +103,14 @@ impl UsageData {
 
         match self.fetched_at {
             Some(t) => {
-                let ttl = if self.is_rate_limited() {
+                let ttl = if let Some(retry_after) = self.retry_after {
+                    // The server told us when to come back. Anthropic's usage
+                    // endpoint rate-limits short bursts and answers
+                    // `retry-after: 0`, so honoring the hint (floored to a
+                    // small delay so we cannot hot-loop) recovers in seconds
+                    // instead of blocking usage readouts for 15 minutes.
+                    retry_after.max(MIN_RETRY_AFTER_BACKOFF)
+                } else if self.is_rate_limited() {
                     RATE_LIMIT_BACKOFF
                 } else if self.last_error.is_some() {
                     ERROR_BACKOFF

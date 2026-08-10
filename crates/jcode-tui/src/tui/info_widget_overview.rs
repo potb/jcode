@@ -164,6 +164,11 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn compact_usage_height(data: &InfoWidgetData) -> u16 {
+    // Mirrors the `usage_pinned` skip in `render_sections`: reserving rows for a
+    // section that no longer renders leaves a blank gap in the overview.
+    if data.usage_pinned {
+        return 0;
+    }
     if let Some(info) = &data.usage_info
         && info.available
     {

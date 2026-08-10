@@ -395,6 +395,9 @@ impl App {
             cache_write_tokens: self.streaming.streaming_cache_creation_tokens,
             output_tps,
             available: true,
+            // Cost/token totals come from local session counters, so they are
+            // never a stale copy of a failed remote fetch.
+            stale: false,
         };
 
         match route.provider {
@@ -415,6 +418,7 @@ impl App {
                 cache_write_tokens: None,
                 output_tps,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
+                stale: false,
             }),
             WidgetProviderKind::Anthropic => {
                 match auth_method {
@@ -443,6 +447,14 @@ impl App {
                     cache_write_tokens: None,
                     output_tps,
                     available: usage.last_error.is_none(),
+                    // A failed refresh (usually a 429 from the usage API) keeps
+                    // the previously fetched window values in `UsageData`, so
+                    // report them as stale rather than as nothing at all.
+                    stale: usage.last_error.is_some()
+                        && (usage.five_hour > 0.0
+                            || usage.seven_day > 0.0
+                            || usage.five_hour_resets_at.is_some()
+                            || usage.seven_day_resets_at.is_some()),
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -495,6 +507,8 @@ impl App {
                     cache_write_tokens: None,
                     output_tps,
                     available: openai_usage.has_limits(),
+                    // Same last-known-good handling as the Anthropic branch.
+                    stale: openai_usage.last_error.is_some() && openai_usage.has_limits(),
                 })
             }
             WidgetProviderKind::Gemini => None,
@@ -1604,6 +1618,9 @@ impl crate::tui::TuiState for App {
             swarm_info,
             background_info,
             usage_info,
+            // The pinned block owns these numbers when enabled, so the margin
+            // and overview copies stand down.
+            usage_pinned: crate::config::config().display.pin_usage,
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name

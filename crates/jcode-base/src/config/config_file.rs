@@ -244,6 +244,15 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted pinned-usage preference.
+    pub fn set_pin_usage(pin: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.pin_usage = pin;
+        cfg.save()?;
+        crate::logging::info(&format!("Saved display.pin_usage to config: {}", pin));
+        Ok(())
+    }
+
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load();

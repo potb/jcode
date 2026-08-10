@@ -800,3 +800,119 @@ fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
     };
     assert!(!below_limit.model_scoped_exhausted("claude-fable-5"));
 }
+
+/// Anthropic's OAuth usage endpoint enforces a short *burst* limit: two rapid
+/// calls return `429` with `retry-after: 0`, and access is restored within a
+/// few seconds. Treating that like a sustained quota ban (the blanket 15 minute
+/// backoff) would freeze the usage readout long after the API recovered, so a
+/// server hint must win over `RATE_LIMIT_BACKOFF`.
+#[test]
+fn server_retry_after_hint_beats_the_blanket_rate_limit_backoff() {
+    let rate_limited = UsageData {
+        fetched_at: Some(std::time::Instant::now() - std::time::Duration::from_secs(30)),
+        last_error: Some("Usage API error (429 Too Many Requests): rate_limit_error".to_string()),
+        retry_after: Some(std::time::Duration::from_secs(0)),
+        ..Default::default()
+    };
+
+    // 30s elapsed, hint floored to MIN_RETRY_AFTER_BACKOFF (5s): refresh again.
+    assert!(rate_limited.is_stale());
+
+    // Without the hint the same error would still be serving the 15 minute
+    // penalty at 30 seconds in.
+    let no_hint = UsageData {
+        retry_after: None,
+        ..rate_limited.clone()
+    };
+    assert!(!no_hint.is_stale());
+}
+
+/// The `retry-after: 0` hint must not turn into a hot retry loop.
+#[test]
+fn zero_retry_after_is_floored_to_a_small_delay() {
+    let just_failed = UsageData {
+        fetched_at: Some(std::time::Instant::now()),
+        last_error: Some("Usage API error (429 Too Many Requests)".to_string()),
+        retry_after: Some(std::time::Duration::from_secs(0)),
+        ..Default::default()
+    };
+
+    assert!(
+        !just_failed.is_stale(),
+        "a zero retry-after must still wait out the floor before refetching"
+    );
+}
+
+/// A failed refresh says nothing about the quota itself. Wiping the last-known
+/// windows turns a transient 429 into "no usage data at all" for every reader,
+/// which is what made the pinned usage footer disappear.
+#[test]
+fn a_failed_refresh_preserves_the_last_known_windows() {
+    let cache_key = format!("preserve-test-{}", std::process::id());
+    let good = UsageData {
+        five_hour: 0.47,
+        five_hour_resets_at: Some("2026-08-10T17:00:00+00:00".to_string()),
+        seven_day: 0.12,
+        fetched_at: Some(std::time::Instant::now()),
+        ..Default::default()
+    };
+    super::cache::store_anthropic_usage(cache_key.clone(), good);
+
+    let errored = super::cache::anthropic_usage_error(
+        &cache_key,
+        "Usage API error (429 Too Many Requests)".to_string(),
+    );
+
+    assert_eq!(errored.five_hour, 0.47, "five-hour window must survive");
+    assert_eq!(errored.seven_day, 0.12, "seven-day window must survive");
+    assert!(errored.last_error.is_some(), "the error is still recorded");
+}
+
+/// `peek_anthropic_usage` must return entries the staleness filter would hide.
+/// The recovery path in `refresh_usage` depends on it: after a failed refresh
+/// the cached entry is by definition "stale" (it carries `last_error`), yet that
+/// is exactly the entry holding the `retry_after` hint and the last-known
+/// windows. A staleness-filtered read would return `None` and silently restore
+/// the 15 minute backoff.
+#[test]
+fn peek_returns_error_entries_that_the_staleness_filter_hides() {
+    let cache_key = format!("peek-test-{}", std::process::id());
+    let errored = UsageData {
+        five_hour: 0.60,
+        seven_day: 0.13,
+        fetched_at: Some(std::time::Instant::now()),
+        last_error: Some("Usage API error (429 Too Many Requests)".to_string()),
+        retry_after: Some(std::time::Duration::from_secs(0)),
+        ..Default::default()
+    };
+    super::cache::store_anthropic_usage(cache_key.clone(), errored);
+
+    let peeked = super::cache::peek_anthropic_usage(&cache_key)
+        .expect("peek must see the entry recorded by a failed refresh");
+    assert_eq!(peeked.five_hour, 0.60);
+    assert_eq!(
+        peeked.retry_after,
+        Some(std::time::Duration::from_secs(0)),
+        "the server hint must survive so the caller can honor it"
+    );
+
+    // Once the retry window has elapsed the filtered accessor hides the entry
+    // (it is due for a refetch), but `peek` must still surface it so the
+    // recovery path can carry the windows and the hint forward.
+    let expired = UsageData {
+        fetched_at: Some(std::time::Instant::now() - std::time::Duration::from_secs(60)),
+        ..super::cache::peek_anthropic_usage(&cache_key).expect("entry present")
+    };
+    super::cache::store_anthropic_usage(cache_key.clone(), expired);
+
+    assert!(
+        super::cache::cached_anthropic_usage(&cache_key).is_none(),
+        "the filtered read hides an entry whose retry window has passed"
+    );
+    assert_eq!(
+        super::cache::peek_anthropic_usage(&cache_key)
+            .expect("peek still sees it")
+            .five_hour,
+        0.60
+    );
+}

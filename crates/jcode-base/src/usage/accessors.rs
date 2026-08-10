@@ -33,6 +33,17 @@ async fn fetch_usage() -> Result<UsageData> {
     fetch_anthropic_usage_data(access_token, cache_key).await
 }
 
+/// The cached `UsageData` for the account the next fetch would use, including
+/// any `retry_after` hint and the last-known windows recorded by a failed
+/// refresh. `None` when credentials cannot be resolved or nothing is cached.
+fn cached_anthropic_usage_entry_for_active_account() -> Option<UsageData> {
+    let creds = auth::claude::load_credentials().ok()?;
+    let active_label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    let cache_key = anthropic_usage_cache_key(&creds.access_token, Some(&active_label));
+    super::cache::peek_anthropic_usage(&cache_key)
+}
+
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
     match fetch_usage().await {
         Ok(new_data) => {
@@ -40,8 +51,18 @@ async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
         }
         Err(e) => {
             let err_msg = e.to_string();
+            // `fetch_anthropic_usage_data` already recorded the failure - along
+            // with any server `Retry-After` hint - in the per-token cache. Adopt
+            // that entry instead of hand-rolling the error state here, otherwise
+            // the hint is dropped and this snapshot falls back to the blanket 15
+            // minute rate-limit backoff even when the endpoint says to retry in
+            // seconds.
+            let cached = cached_anthropic_usage_entry_for_active_account();
             let mut data = usage.write().await;
             let is_new_error = data.last_error.as_deref() != Some(&err_msg);
+            if let Some(cached) = cached {
+                *data = cached;
+            }
             data.last_error = Some(err_msg.clone());
             data.fetched_at = Some(Instant::now());
             if is_new_error {
@@ -360,6 +381,23 @@ async fn fetch_usage_for_account(
 pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
     fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
+}
+
+/// Seed the in-process usage snapshot so tests can drive UI surfaces that read
+/// [`get_sync`] without performing a network fetch. Test-only: the live path
+/// always populates this through `refresh_usage`.
+#[cfg(feature = "test-support")]
+pub fn seed_for_test(data: UsageData) {
+    let cell = Arc::new(RwLock::new(data));
+    // OnceCell may already be initialized by an earlier call; overwrite the
+    // inner value in that case so repeated seeding works.
+    if let Some(existing) = USAGE.get() {
+        if let Ok(mut guard) = existing.try_write() {
+            *guard = cell.try_read().expect("fresh lock").clone();
+        }
+        return;
+    }
+    let _ = USAGE.set(cell);
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)
