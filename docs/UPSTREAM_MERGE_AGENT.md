@@ -43,7 +43,7 @@ Assumes the standard fork layout, which `gh repo fork` produces:
 
 | Remote | Points at | Written to? |
 | --- | --- | --- |
-| `origin` | your fork | yes, fast-forward pushes only |
+| `origin` | your fork | yes, via a pull request into the base branch |
 | `upstream` | the project you forked | never |
 
 A clone with only `origin` still works; the script falls back to it and logs
@@ -64,19 +64,30 @@ that it did.
 On a verified merge it adopts the result and publishes it:
 
 6. Fast-forward your real `master` to the merge branch.
-7. Push `master` to your fork.
+7. Push those commits to `auto/upstream-merge-pr` on your fork, open a pull
+   request into the base branch, and merge it.
+8. Fast-forward your local base branch onto the fork's new merge commit.
+
+The publish step goes through a pull request because the fork's base branch is
+protected by a ruleset that forbids direct pushes. The pull request is merged
+with the **merge** method, never squash: squashing would rewrite upstream's
+commits into a single new commit, so upstream SHAs would stop being ancestors
+of your base branch and every later merge would replay the same conflicts.
 
 Both steps are guarded, because you are often mid-edit in this repo. It adopts
 only onto a clean tree, still on the expected branch, still at the commit the
-merge was built from; and it pushes only as a fast-forward, only to the fork,
-never to upstream, never forced. If any guard fails you get a "merged, needs
-adopting" notification and the branch is left for you:
+merge was built from; and it publishes only to the fork, never to upstream, and
+only when the fork's base branch is an ancestor of your local base. Only the
+dedicated PR branch is ever force-pushed, and that branch is owned entirely by
+this job. If any guard fails you get a "merged, needs adopting" notification and
+the branch is left for you:
 
 ```bash
 git -C ~/jcode merge --ff-only auto/upstream-merge
 ```
 
-Set `JCODE_UPSTREAM_PUSH=0` to keep everything local.
+Set `JCODE_UPSTREAM_PUSH=0` to keep everything local. Publishing needs `gh`
+installed and authenticated.
 
 ## GitHub Actions are kept disabled on the fork
 
@@ -84,7 +95,7 @@ A fork inherits all of upstream's workflows, including release and publish
 jobs. A synced `master` would trigger them and spend your CI minutes building
 artifacts nobody asked for.
 
-Before every push the script confirms Actions are disabled on the fork via the
+Before every publish the script confirms Actions are disabled on the fork via the
 API, disables them if something re-enabled them, and cancels any queued or
 running workflow. This is done at the repo level rather than by deleting
 `.github/workflows/`, because deleting those files would conflict with upstream
@@ -158,7 +169,9 @@ All via environment variables, so the systemd unit and plist stay generic:
 | `JCODE_UPSTREAM_REMOTE` | `upstream` | Remote holding the parent project |
 | `JCODE_UPSTREAM_REF` | `<remote>/<base>` | Upstream ref to merge from |
 | `JCODE_UPSTREAM_FORK_REMOTE` | `origin` | Remote holding your fork |
-| `JCODE_UPSTREAM_PUSH` | `1` | Push the adopted merge to the fork |
+| `JCODE_UPSTREAM_PUSH` | `1` | Publish the adopted merge to the fork via a pull request |
+| `JCODE_UPSTREAM_PR_BRANCH` | `auto/upstream-merge-pr` | Branch the pull request is opened from |
+| `JCODE_UPSTREAM_MERGE_METHOD` | `merge` | Pull request merge method; keep `merge` to preserve history |
 | `JCODE_UPSTREAM_DISABLE_ACTIONS` | `1` | Keep GitHub Actions off on the fork |
 | `JCODE_UPSTREAM_BRANCH` | `auto/upstream-merge` | Scratch result branch |
 | `JCODE_UPSTREAM_STATE_DIR` | `~/.jcode/upstream-merge` | Worktree, logs, lock, verdict |

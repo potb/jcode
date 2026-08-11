@@ -23,9 +23,18 @@ BASE="${JCODE_UPSTREAM_BASE:-master}"
 UPSTREAM_REMOTE="${JCODE_UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_REF="${JCODE_UPSTREAM_REF:-}"
 FORK_REMOTE="${JCODE_UPSTREAM_FORK_REMOTE:-origin}"
-# Push the merged result to the fork so GitHub reflects the maintained state.
-# Only ever fast-forward, and only the fork: upstream is never written to.
+# Publish the merged result to the fork so GitHub reflects the maintained state.
+# The fork's default branch is protected by a ruleset that requires a pull
+# request, so the branch is pushed and a PR is opened and merged through the
+# API instead of pushing to the base branch directly. Upstream is never
+# written to.
 PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
+# PR merge method. Must stay "merge": a squash would collapse the upstream
+# commits into one new commit, so upstream SHAs would no longer be ancestors of
+# the fork's base and every later merge would re-conflict on the same history.
+PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-merge}"
+# Branch the pull request is opened from. Owned entirely by this job.
+PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # Keep GitHub Actions disabled on the fork.
 #
 # The fork inherits upstream's 8 workflows, several of which are release and
@@ -123,16 +132,28 @@ ensure_fork_actions_disabled() {
   done
 }
 
+# The fork's owner/repo slug, derived from the fork remote URL.
+fork_slug() {
+  local url
+  url=$(git remote get-url "$FORK_REMOTE" 2>/dev/null) || return 1
+  printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'
+}
+
 # Publish the fork's base branch when it is ahead of the fork remote.
 #
-# Fast-forward only, and only ever to the fork. A force-push here could destroy
-# work that exists nowhere else, and upstream is never a valid push target: this
-# job maintains a fork, it does not contribute to the parent project.
-push_fork_if_ahead() {
-  [ "$PUSH_FORK" = "1" ] || { log "push disabled (JCODE_UPSTREAM_PUSH=$PUSH_FORK)"; return 0; }
+# The base branch is protected by a repository ruleset requiring a pull
+# request, so this pushes the commits to a PR branch and merges the PR with the
+# "merge" method. A merge (never a squash) is required so upstream's commits
+# stay reachable with their original SHAs, which is what keeps the fork's
+# history aligned with upstream and future merges conflict-free.
+#
+# Only ever the fork: upstream is never a valid push target, since this job
+# maintains a fork rather than contributing to the parent project.
+publish_fork_if_ahead() {
+  [ "$PUSH_FORK" = "1" ] || { log "publish disabled (JCODE_UPSTREAM_PUSH=$PUSH_FORK)"; return 0; }
   git remote get-url "$FORK_REMOTE" >/dev/null 2>&1 || return 0
   [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ] || {
-    log "fork remote equals upstream remote; not pushing"
+    log "fork remote equals upstream remote; not publishing"
     return 0
   }
 
@@ -145,17 +166,88 @@ push_fork_if_ahead() {
     return 0
   fi
   if [ -n "$remote_sha" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    log "WARNING: $FORK_REMOTE/$BASE has commits not in local $BASE; refusing to push"
+    log "WARNING: $FORK_REMOTE/$BASE has commits not in local $BASE; refusing to publish"
     return 1
   fi
 
   ensure_fork_actions_disabled
 
-  if git push "$FORK_REMOTE" "$BASE:$BASE"; then
-    log "pushed $BASE to $FORK_REMOTE ($local_sha)"
-  else
-    log "WARNING: push to $FORK_REMOTE failed"
+  if ! command -v gh >/dev/null 2>&1; then
+    log "WARNING: gh is required to open a pull request but is not installed"
     return 1
+  fi
+  local slug
+  slug=$(fork_slug) || { log "WARNING: could not derive the fork slug"; return 1; }
+
+  # Force-push is safe here and nowhere else: the PR branch is owned entirely by
+  # this job and is recreated from the fork's base on every run.
+  if ! git push --force-with-lease "$FORK_REMOTE" "$BASE:refs/heads/$PR_BRANCH"; then
+    log "WARNING: push of $PR_BRANCH to $FORK_REMOTE failed"
+    return 1
+  fi
+  log "pushed $local_sha to $FORK_REMOTE/$PR_BRANCH"
+
+  local pr
+  pr=$(gh pr list --repo "$slug" --head "$PR_BRANCH" --base "$BASE" --state open \
+    --json number --jq '.[0].number' 2>/dev/null)
+  if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+    pr=$(gh pr create --repo "$slug" --head "$PR_BRANCH" --base "$BASE" \
+      --title "Merge upstream into $BASE" \
+      --body "Automated upstream merge from \`$UPSTREAM_REF\` ($UP_SHA).
+
+Merged (not squashed) so upstream commits keep their original SHAs and the fork's history stays aligned with upstream.
+
+Opened by scripts/upstream_merge_agent.sh." \
+      2>&1 | tail -1)
+    log "opened pull request: $pr"
+    pr=$(printf '%s' "$pr" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+  else
+    log "reusing open pull request #$pr"
+  fi
+  case "$pr" in
+    ''|*[!0-9]*) log "WARNING: could not determine the pull request number"; return 1 ;;
+  esac
+
+  # --merge, never --squash: see PR_MERGE_METHOD. Output is captured rather
+  # than piped, because a pipeline's status is the last command's and would
+  # report every failed merge as a success.
+  local merge_out
+  if merge_out=$(gh pr merge "$pr" --repo "$slug" "--$PR_MERGE_METHOD" 2>&1); then
+    log "merged pull request #$pr into $BASE"
+  else
+    log "WARNING: could not merge pull request #$pr; it is open for manual merge"
+    log "$(printf '%s' "$merge_out" | tail -3)"
+    return 1
+  fi
+
+  # The merge commit GitHub created is not in the local repo yet, and local
+  # $BASE is now behind by exactly that commit. Fast-forwarding keeps the next
+  # run's "is the fork ahead" check honest instead of re-publishing forever.
+  git fetch --prune "$FORK_REMOTE" >/dev/null 2>&1 || true
+  sync_local_base_to_fork
+}
+
+# Fast-forward the real repo's base branch onto the fork remote after a PR
+# merge. Guarded hard: the user may be mid-edit, and moving their branch under
+# them is exactly the regret this job must avoid.
+sync_local_base_to_fork() {
+  local remote_sha local_sha
+  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null) || return 0
+  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
+  [ "$local_sha" != "$remote_sha" ] || return 0
+
+  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+    log "repo has uncommitted changes; not fast-forwarding $BASE to $FORK_REMOTE/$BASE"
+    return 0
+  fi
+  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
+    log "repo is not on $BASE; not fast-forwarding to $FORK_REMOTE/$BASE"
+    return 0
+  fi
+  if git -C "$REPO" merge --ff-only "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
+    log "fast-forwarded local $BASE to $FORK_REMOTE/$BASE ($remote_sha)"
+  else
+    log "WARNING: local $BASE could not fast-forward to $FORK_REMOTE/$BASE"
   fi
 }
 
@@ -190,7 +282,7 @@ if git merge-base --is-ancestor "$UP_SHA" "$BASE_SHA"; then
   # merge adopted by a previous run). Publishing that is the whole point of
   # "keep my fork updated", so it must not be skipped just because upstream
   # brought nothing new.
-  push_fork_if_ahead
+  publish_fork_if_ahead
   exit 0
 fi
 
@@ -417,7 +509,7 @@ case "$STATUS" in
     elif git merge --ff-only "$BRANCH" >/dev/null 2>&1; then
       ADOPTED="yes"
       log "fast-forwarded $BASE to $BRANCH"
-      push_fork_if_ahead
+      publish_fork_if_ahead
     else
       log "fast-forward of $BASE to $BRANCH failed; leaving it for review"
     fi
