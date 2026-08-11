@@ -50,6 +50,14 @@ struct Snapshot {
     /// each task, so a snapshot taken for another session is not reusable.
     session: Option<String>,
     tasks: Vec<BgTask>,
+    /// A background refresh is already in flight for this snapshot.
+    ///
+    /// Without this, every frame during the refresh window would spawn another
+    /// scanning thread, which is worse than the synchronous version it
+    /// replaced. An explicitly invalidated cache is `None`, not a stale
+    /// snapshot, so [`invalidate_cache`] still forces a synchronous refetch and
+    /// keeps the "acts immediately after starting a task" guarantee.
+    refreshing: bool,
 }
 
 impl Snapshot {
@@ -138,6 +146,18 @@ fn elapsed_secs(status: &crate::background::TaskStatusFile) -> Option<f64> {
         .map(|duration| duration.as_secs_f64())
 }
 
+/// How far back the panel is willing to read status files from disk.
+///
+/// [`FINISHED_RETENTION`] is the display rule; this is the I/O bound that keeps
+/// the render thread from paying for the whole archive to apply it. It is
+/// deliberately much larger than the retention window: a *running* task is kept
+/// regardless of age (see [`finished_recently`]), and its status file's mtime
+/// only advances when the task writes progress, so a tight cutoff could hide a
+/// quiet long-running task. At this width a task would have to be silent for
+/// twelve hours to be missed, while the common case (an archive of hundreds of
+/// long-finished tasks) is skipped without being opened.
+const MAX_STATUS_FILE_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+
 fn finished_recently(status: &crate::background::TaskStatusFile) -> bool {
     let Some(completed) = status.completed_at.as_deref() else {
         return true;
@@ -158,7 +178,11 @@ fn finished_recently(status: &crate::background::TaskStatusFile) -> bool {
 /// minutes and sort wrong across the wrap.
 fn fetch(current_session: Option<&str>) -> Vec<BgTask> {
     let manager = crate::background::global();
-    build_tasks(manager, manager.list_sync(), current_session)
+    build_tasks(
+        manager,
+        manager.list_sync_modified_within(Some(MAX_STATUS_FILE_AGE)),
+        current_session,
+    )
 }
 
 /// The pure half of [`fetch`]: retention, ordering, and mapping.
@@ -207,11 +231,53 @@ where
         .as_ref()
         .is_some_and(|snapshot| snapshot.reusable_for(current_session));
     if !reusable {
-        *guard = Some(Snapshot {
-            fetched_at: Instant::now(),
-            session: current_session.map(str::to_string),
-            tasks: fetch(current_session),
-        });
+        // A stale snapshot is refreshed off-thread. `fetch` opens and parses
+        // every status file in the task directory, which is an unbounded
+        // archive: this call sits on the TUI render thread, so paying for it
+        // inline turned one frame in four into a ~20ms stall (visible in
+        // `draw-stats` as a periodic spike on an otherwise ~3ms frame, with
+        // `changed_cells: 0`).
+        //
+        // Serving the previous snapshot for one more refresh interval is the
+        // same tradeoff the panel already makes by caching at all: task state
+        // changes on human timescales, and the alternative is a stall the user
+        // can see. Only the very first read has nothing to serve, and it
+        // populates synchronously so the panel is never briefly empty.
+        match guard.as_mut() {
+            // Same session, merely stale: the old tasks are still the right
+            // tasks, just possibly a quarter second out of date.
+            Some(snapshot)
+                if snapshot.session.as_deref() == current_session && !snapshot.refreshing =>
+            {
+                snapshot.refreshing = true;
+                let session = current_session.map(str::to_string);
+                std::thread::spawn(move || {
+                    let tasks = fetch(session.as_deref());
+                    let mut guard = match cache().lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    *guard = Some(Snapshot {
+                        fetched_at: Instant::now(),
+                        session,
+                        tasks,
+                        refreshing: false,
+                    });
+                });
+            }
+            Some(snapshot) if snapshot.session.as_deref() == current_session => {}
+            // No snapshot, or one mapped for a different session. Serving it
+            // would show another session's tasks (`is_current_session` is baked
+            // into each row), so this one has to be paid for inline.
+            _ => {
+                *guard = Some(Snapshot {
+                    fetched_at: Instant::now(),
+                    session: current_session.map(str::to_string),
+                    tasks: fetch(current_session),
+                    refreshing: false,
+                });
+            }
+        }
     }
     guard.as_ref().map(project).unwrap_or_default()
 }

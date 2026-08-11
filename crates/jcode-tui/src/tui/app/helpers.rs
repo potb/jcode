@@ -1127,12 +1127,7 @@ pub(super) fn gather_memory_info(
         None
     };
     let sidecar_model = if memory_enabled && crate::memory::memory_sidecar_enabled() {
-        let sidecar = crate::sidecar::Sidecar::new();
-        Some(format!(
-            "{} · {}",
-            sidecar.backend_name(),
-            sidecar.model_name()
-        ))
+        cached_sidecar_label()
     } else {
         None
     };
@@ -1177,6 +1172,101 @@ pub(super) fn gather_memory_info(
     }
 
     fallback_memory_info(memory_enabled, &activity, &sidecar_model)
+}
+
+/// Cached "backend · model" label for the memory sidecar.
+///
+/// `Sidecar::new()` looks cheap but is not: with no configured
+/// `agents.memory_model` it falls through to `auto_select_backend`, which probes
+/// Codex/Claude credentials, and the external-auth probe re-reads and re-parses
+/// `~/.jcode/config.toml` through `toml_edit` on every call. This label is read
+/// from the render path, where `info_widget_data()` runs several times per frame
+/// (layout measurement, then the actual draw), so the uncached version showed up
+/// as ~44% of main-thread time in a `sample` profile of a live client: a full
+/// TOML parse plus `open`/`stat` syscalls, several times per frame, forever.
+///
+/// The label only changes when credentials or the configured model change, so a
+/// short TTL is plenty: it keeps the steady-state cost at one atomic load while
+/// still picking up a login within a few seconds.
+fn cached_sidecar_label() -> Option<String> {
+    sidecar_label_cache_slot()
+        .lock()
+        .ok()
+        // A poisoned lock must not put a TOML parse back on the render path;
+        // degrade to the same "no label" state the widget shows before the
+        // first probe completes.
+        .and_then(|mut guard| cached_sidecar_label_in(&mut guard))
+}
+
+/// Process-wide storage for [`cached_sidecar_label`].
+///
+/// Split from the logic below so tests can drive TTL expiry through
+/// [`expire_sidecar_label_cache_for_tests`] instead of sleeping for the real
+/// TTL.
+fn sidecar_label_cache_slot() -> &'static std::sync::Mutex<SidecarLabelCache> {
+    static LABEL: std::sync::OnceLock<std::sync::Mutex<SidecarLabelCache>> =
+        std::sync::OnceLock::new();
+    LABEL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+type SidecarLabelCache = Option<(std::time::Instant, Option<String>)>;
+
+/// The TTL is short relative to how often the render path asks for this label
+/// (several times per frame) and long relative to how often it can change (a
+/// login, or an edited `agents.memory_model`).
+const SIDECAR_LABEL_TTL: Duration = Duration::from_secs(30);
+
+fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
+    if let Some((ts, cached)) = cache.as_ref() {
+        if ts.elapsed() < SIDECAR_LABEL_TTL {
+            return cached.clone();
+        }
+    }
+
+    let sidecar = crate::sidecar::Sidecar::new();
+    record_sidecar_probe();
+    let label = Some(format!(
+        "{} · {}",
+        sidecar.backend_name(),
+        sidecar.model_name()
+    ));
+    *cache = Some((std::time::Instant::now(), label.clone()));
+    label
+}
+
+/// Number of times the sidecar backend has actually been probed.
+///
+/// The property that matters is "the render path does not re-probe", and a
+/// wall-clock budget is a poor proxy for it: timing assertions measure the host
+/// scheduler as much as the code, so this repo gates them behind
+/// `JCODE_TEST_PERF_ASSERTIONS` (refs #592). Counting the probes asserts the
+/// same invariant exactly, and stays correct on a loaded machine.
+#[cfg(test)]
+static SIDECAR_PROBE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn record_sidecar_probe() {
+    SIDECAR_PROBE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_sidecar_probe() {}
+
+#[cfg(test)]
+pub(super) fn sidecar_probe_count_for_tests() -> usize {
+    SIDECAR_PROBE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Backdate the cached label past its TTL so the next read re-probes.
+///
+/// Exists so the expiry branch is covered by a test without a 30s sleep.
+#[cfg(test)]
+pub(super) fn expire_sidecar_label_cache_for_tests() {
+    if let Ok(mut guard) = sidecar_label_cache_slot().lock() {
+        if let Some((ts, _)) = guard.as_mut() {
+            *ts = backdated_now(SIDECAR_LABEL_TTL + Duration::from_secs(1));
+        }
+    }
 }
 
 fn fallback_memory_info(

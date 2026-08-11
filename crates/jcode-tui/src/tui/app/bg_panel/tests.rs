@@ -273,6 +273,7 @@ fn a_snapshot_is_only_reused_for_the_session_it_was_mapped_for() {
         fetched_at: std::time::Instant::now(),
         session: Some("session-a".to_string()),
         tasks: vec![sample_task("t1")],
+        refreshing: false,
     };
     assert!(
         fresh.reusable_for(Some("session-a")),
@@ -291,6 +292,7 @@ fn a_snapshot_is_only_reused_for_the_session_it_was_mapped_for() {
         fetched_at: std::time::Instant::now() - REFRESH_INTERVAL * 2,
         session: Some("session-a".to_string()),
         tasks: vec![sample_task("t1")],
+        refreshing: false,
     };
     assert!(
         !stale.reusable_for(Some("session-a")),
@@ -335,6 +337,7 @@ fn counting_borrows_the_tasks_instead_of_copying_them() {
                 task
             })
             .collect(),
+        refreshing: false,
     };
 
     assert_eq!(
@@ -386,30 +389,73 @@ fn counting_borrows_the_tasks_instead_of_copying_them() {
     );
 }
 
-/// A stale or wrong-session cache entry must be refreshed, not served.
+/// An unservable cache entry must be refetched synchronously, and a merely
+/// stale one must trigger a background refresh.
 ///
-/// Both read paths share `with_fresh_snapshot`, whose whole job is "reuse if
-/// still valid, otherwise refetch". Disabling the refetch served stale data
-/// forever and failed no test, because the other cache tests only exercise the
-/// reuse predicate, never the refresh it gates.
+/// Both read paths share `with_fresh_snapshot`, whose job is "serve if it is
+/// still the right data, otherwise get the right data". Disabling the refetch
+/// served wrong data forever and failed no test, because the other cache tests
+/// only exercise the reuse predicate, never the refresh it gates.
+///
+/// Age and session are deliberately *not* symmetric. A wrong-session snapshot
+/// cannot be shown at all (`is_current_session` is baked into every row), so it
+/// is refetched inline. A same-session snapshot that is merely stale is still
+/// the right task list, just slightly behind, so it is served once while a
+/// background refresh runs: the scan reads every status file in an unbounded
+/// archive, and paying for it on the render thread produced a visible ~20ms
+/// frame stall. Immediacy after a user action comes from `invalidate_cache`,
+/// which clears the entry outright and is therefore covered by the
+/// wrong-session/empty path below.
 ///
 /// Uses a sentinel that cannot come from a real directory scan: if it survives
-/// a read that should have refreshed, the refresh did not happen.
+/// a read that should have refetched, the refetch did not happen.
 #[test]
 fn an_unusable_cache_entry_is_refetched_rather_than_served() {
-    // Stale by age, right session: must refresh.
+    // Stale by age, right session: served once, and a refresh is started.
     {
         let mut guard = cache().lock().expect("cache lock");
         *guard = Some(Snapshot {
             fetched_at: std::time::Instant::now() - REFRESH_INTERVAL * 2,
             session: Some("session-x".to_string()),
             tasks: vec![sample_task("stale-sentinel")],
+            refreshing: false,
         });
     }
     let after_age = tasks_snapshot(Some("session-x"));
     assert!(
-        !after_age.iter().any(|t| t.id == "stale-sentinel"),
-        "an entry older than the refresh interval must be refetched, not served"
+        after_age.iter().any(|t| t.id == "stale-sentinel"),
+        "a same-session snapshot is served once rather than stalling the frame"
+    );
+    // The refresh must actually land, otherwise the panel would serve that
+    // stale entry forever.
+    let refreshed = std::iter::from_fn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Some(tasks_snapshot(Some("session-x")))
+    })
+    .take(100)
+    .any(|tasks| !tasks.iter().any(|t| t.id == "stale-sentinel"));
+    assert!(
+        refreshed,
+        "the background refresh must replace the stale snapshot"
+    );
+
+    // An explicitly invalidated cache must never serve the old entry.
+    {
+        let mut guard = cache().lock().expect("cache lock");
+        *guard = Some(Snapshot {
+            fetched_at: std::time::Instant::now() - REFRESH_INTERVAL * 2,
+            session: Some("session-x".to_string()),
+            tasks: vec![sample_task("invalidated-sentinel")],
+            refreshing: false,
+        });
+    }
+    invalidate_cache();
+    assert!(
+        !tasks_snapshot(Some("session-x"))
+            .iter()
+            .any(|t| t.id == "invalidated-sentinel"),
+        "invalidate_cache must force a synchronous refetch, so acting right \
+         after starting a task shows it immediately"
     );
 
     // Fresh but mapped for another session: must also refresh.
@@ -419,6 +465,7 @@ fn an_unusable_cache_entry_is_refetched_rather_than_served() {
             fetched_at: std::time::Instant::now(),
             session: Some("session-a".to_string()),
             tasks: vec![sample_task("wrong-session-sentinel")],
+            refreshing: false,
         });
     }
     let for_other = tasks_snapshot(Some("session-b"));
@@ -427,16 +474,18 @@ fn an_unusable_cache_entry_is_refetched_rather_than_served() {
         "a snapshot mapped for another session must be refetched, not served"
     );
 
-    // Both paths share the refresh, so the count path must honor age too.
-    // The count path shares the same refresh. Seed an implausible size: a real
-    // scan of this machine will not return 9999 tasks, so a count that large
-    // means the stale entry was served instead of refetched.
+    // Both paths share the refresh, so the count path must refetch a
+    // wrong-session entry too. Seed an implausible size under a *different*
+    // session: a real scan of this machine will not return 9999 tasks, so a
+    // count that large means the unservable entry was served instead of
+    // refetched.
     {
         let mut guard = cache().lock().expect("cache lock");
         *guard = Some(Snapshot {
-            fetched_at: std::time::Instant::now() - REFRESH_INTERVAL * 2,
-            session: Some("session-y".to_string()),
+            fetched_at: std::time::Instant::now(),
+            session: Some("session-other".to_string()),
             tasks: (0..9999).map(|i| sample_task(&format!("s{i}"))).collect(),
+            refreshing: false,
         });
     }
     assert!(
@@ -556,4 +605,104 @@ fn the_output_tail_returns_many_lines_and_keeps_the_newest() {
         tail_lines(padded, 10),
         vec!["a".to_string(), "b".to_string()]
     );
+}
+
+/// The background panel refreshes every 250ms on the TUI render thread, and
+/// `list_sync` reads and JSON-parses every status file it finds. The archive is
+/// unbounded, so on a long-lived machine that became hundreds of file reads per
+/// second to display a handful of recent tasks: 210 files on the machine this
+/// was found on, of which the panel's retention kept 7. It showed up as a
+/// periodic ~20ms spike on an otherwise ~3ms frame.
+///
+/// Pin the age filter: old files are skipped without being opened, recent ones
+/// are never skipped, and `None` still reads everything.
+#[test]
+fn list_sync_can_skip_status_files_older_than_a_cutoff() {
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let write_status = |id: &str| {
+        let status = crate::background::TaskStatusFile {
+            task_id: id.to_string(),
+            tool_name: "bash".to_string(),
+            command: None,
+            display_name: Some("cargo test".to_string()),
+            session_id: "session-a".to_string(),
+            status: crate::bus::BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: Some(chrono::Utc::now().to_rfc3339()),
+            duration_secs: Some(3.0),
+            pid: None,
+            owner_pid: None,
+            owner_instance: None,
+            detached: false,
+            progress: None,
+            notify: true,
+            wake: false,
+            event_history: Vec::new(),
+        };
+        let path = tmp.path().join(format!("{id}.status.json"));
+        std::fs::write(&path, serde_json::to_string(&status).expect("serialize"))
+            .expect("write status file");
+        path
+    };
+
+    let fresh = write_status("111111aaaa");
+    let stale = write_status("222222bbbb");
+
+    // Backdate one file. `filetime` is not a dependency here, so drive the
+    // real syscall the same way `touch -t` would.
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+    set_file_mtime(&stale, two_days_ago);
+
+    let recent = manager.list_sync_modified_within(Some(Duration::from_secs(60 * 60)));
+    let recent_ids: Vec<&str> = recent.iter().map(|s| s.task_id.as_str()).collect();
+    assert_eq!(
+        recent_ids,
+        vec!["111111aaaa"],
+        "only the freshly written status file is within the cutoff"
+    );
+    assert!(
+        fresh.exists() && stale.exists(),
+        "filtering must not delete anything"
+    );
+
+    // No cutoff keeps the previous behavior: everything is read.
+    let all = manager.list_sync_modified_within(None);
+    assert_eq!(all.len(), 2, "an unbounded listing still reads the archive");
+    assert_eq!(
+        manager.list_sync().len(),
+        2,
+        "the plain list_sync wrapper must stay unbounded"
+    );
+
+    // A cutoff wider than the backdate must include the old file again, so the
+    // filter is genuinely age-based rather than dropping arbitrary entries.
+    let wide = manager.list_sync_modified_within(Some(Duration::from_secs(7 * 24 * 60 * 60)));
+    assert_eq!(wide.len(), 2, "a wide enough cutoff includes both files");
+}
+
+/// Set a file's mtime without pulling in a new dependency.
+#[cfg(unix)]
+fn set_file_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+    let secs = when
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_secs();
+    let status = std::process::Command::new("touch")
+        .arg("-t")
+        .arg(
+            chrono::DateTime::from_timestamp(secs as i64, 0)
+                .expect("valid timestamp")
+                .format("%Y%m%d%H%M.%S")
+                .to_string(),
+        )
+        .arg(path)
+        .status()
+        .expect("run touch");
+    assert!(status.success(), "touch failed for {}", path.display());
 }

@@ -1346,7 +1346,17 @@ impl crate::tui::TuiState for App {
             }
         });
 
-        let memory_info = gather_memory_info(self.memory_enabled, self.session.working_dir.clone());
+        // `display.memory_widget = false` hides every consumer of this data
+        // (the compact/expanded memory sections and the overview line all gate
+        // on `memory_widget_visible()`), so gathering it would be pure waste on
+        // the render path: counts come from a background refresh, but the live
+        // activity read and the sidecar-backend probe happen inline, several
+        // times per frame. Skip the whole chain when nothing can display it.
+        let memory_info = if crate::tui::info_widget::memory_widget_visible() {
+            gather_memory_info(self.memory_enabled, self.session.working_dir.clone())
+        } else {
+            None
+        };
 
         // Gather swarm info
         let swarm_info = if self.swarm_enabled {

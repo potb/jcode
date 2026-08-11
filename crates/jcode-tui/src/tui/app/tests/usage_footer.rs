@@ -353,3 +353,65 @@ fn pinning_usage_hides_the_margin_and_overview_copies() {
         "with pinning on the margin copy must hide"
     );
 }
+
+/// `display.memory_widget = false` must skip memory gathering entirely, not
+/// merely hide the rendered result.
+///
+/// Every consumer of `memory_info` already gates on `memory_widget_visible()`,
+/// so gathering it while hidden was pure waste on the render path: the live
+/// activity read and the sidecar-backend probe run inline, and
+/// `info_widget_data()` is called several times per frame. This asserts the
+/// data is absent when the widget is off and present when it is on, so
+/// deleting the gate fails here instead of silently restoring the cost.
+#[test]
+fn memory_info_is_not_gathered_when_the_memory_widget_is_hidden() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+
+    // Writing display settings must not touch the developer's real config.
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let config_path = temp.path().join("config.toml");
+    let app = usage_footer_test_app();
+
+    std::fs::write(&config_path, "[display]\nmemory_widget = false\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(
+        !crate::tui::info_widget::memory_widget_visible(),
+        "test precondition: the widget must read as hidden"
+    );
+    assert!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .memory_info
+            .is_none(),
+        "memory info must not be gathered while the widget is hidden"
+    );
+
+    // Turning the widget back on must restore the data without a restart, so
+    // the skip cannot latch off for the life of the process.
+    std::fs::write(&config_path, "[display]\nmemory_widget = true\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(
+        crate::tui::info_widget::memory_widget_visible(),
+        "test precondition: the widget must read as visible"
+    );
+    assert!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .memory_info
+            .is_some(),
+        "memory info must come back once the widget is visible again"
+    );
+}

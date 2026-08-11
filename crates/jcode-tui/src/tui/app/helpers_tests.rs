@@ -303,11 +303,7 @@ fn resume_invocation_args_omits_blank_socket() {
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
-fn pinned_resume_test_home() -> (
-    crate::storage::TestEnvGuard,
-    tempfile::TempDir,
-    EnvVarGuard,
-) {
+fn pinned_resume_test_home() -> (crate::storage::TestEnvGuard, tempfile::TempDir, EnvVarGuard) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");
@@ -563,4 +559,145 @@ fn backdated_now_never_panics_and_prefers_past_instants() {
     // Zero backdate is a no-op.
     let zero = super::backdated_now(Duration::ZERO);
     assert!(zero <= Instant::now());
+}
+
+/// The memory widget's "backend · model" label is read from the render path,
+/// where `info_widget_data()` runs several times per frame. Building it calls
+/// `Sidecar::new()`, which (without a configured `agents.memory_model`) probes
+/// external auth and re-parses `~/.jcode/config.toml` through `toml_edit` on
+/// every call. A `sample` profile of a live client attributed ~51% of
+/// main-thread time to that chain, inside a `draw` that changed zero cells.
+///
+/// Pin the fix: repeated calls within the TTL must not re-run the probe. The
+/// wall-clock assertion is deliberately loose (a single uncached call costs
+/// milliseconds of TOML parsing and file I/O; a cache hit is a mutex lock and a
+/// string clone), so this stays meaningful without being timing-flaky.
+#[test]
+fn cached_sidecar_label_does_not_reprobe_within_ttl() {
+    // Prime the cache. This one may pay the full probe cost.
+    let first = super::cached_sidecar_label();
+
+    let probes_after_priming = super::sidecar_probe_count_for_tests();
+    for _ in 0..200 {
+        let repeat = super::cached_sidecar_label();
+        assert_eq!(
+            repeat, first,
+            "cached label must stay stable within its TTL"
+        );
+    }
+
+    assert_eq!(
+        super::sidecar_probe_count_for_tests(),
+        probes_after_priming,
+        "200 reads within the TTL re-probed the sidecar backend, which puts a \
+         config.toml parse back on the render path"
+    );
+}
+
+/// The cache must return a *usable* label, not just a fast one. A cache that
+/// always answered `None` would pass the timing assertion above while silently
+/// blanking the memory widget's backend/model line.
+#[test]
+fn cached_sidecar_label_returns_backend_and_model() {
+    let label = super::cached_sidecar_label().expect("sidecar label must be produced");
+    assert!(
+        label.contains(" \u{b7} "),
+        "label {label:?} should be \"backend \u{b7} model\""
+    );
+    let (backend, model) = label
+        .split_once(" \u{b7} ")
+        .expect("label must have a separator");
+    assert!(
+        !backend.trim().is_empty(),
+        "backend half was empty: {label:?}"
+    );
+    assert!(!model.trim().is_empty(), "model half was empty: {label:?}");
+}
+
+/// `gather_memory_info` must keep honoring `memory_enabled`. The label cache
+/// sits inside that check, so a refactor that hoisted it above the flag would
+/// leak a live sidecar model into the DISABLED badge state.
+#[test]
+fn gather_memory_info_suppresses_sidecar_label_when_memory_disabled() {
+    let disabled = super::gather_memory_info(false, None);
+    if let Some(info) = disabled {
+        assert!(
+            info.sidecar_model.is_none(),
+            "memory disabled must not report a sidecar model, got {:?}",
+            info.sidecar_model
+        );
+        assert!(info.disabled, "disabled flag must be set for the badge");
+    }
+
+    // Enabling again must not be poisoned by the disabled call above: the label
+    // is cached process-wide, so a shared-cache bug would surface here.
+    let enabled = super::gather_memory_info(true, None);
+    if let Some(info) = enabled {
+        assert!(
+            !info.disabled,
+            "memory enabled must not report the disabled badge"
+        );
+    }
+}
+
+/// The TTL must actually expire. A cache that never re-probed would pin the
+/// label to whatever backend was selected at startup, so logging into Codex (or
+/// editing `agents.memory_model`) would never show up in the memory widget.
+#[test]
+fn cached_sidecar_label_reprobes_after_ttl_expiry() {
+    let first = super::cached_sidecar_label();
+
+    // Within the TTL: same value, no re-probe.
+    assert_eq!(super::cached_sidecar_label(), first);
+
+    // Past the TTL: the probe runs again. Credentials have not changed inside
+    // this test, so the value must be stable, which also proves expiry does not
+    // blank the label.
+    super::expire_sidecar_label_cache_for_tests();
+    assert_eq!(
+        super::cached_sidecar_label(),
+        first,
+        "re-probe after TTL expiry must still yield a usable label"
+    );
+
+    // And the refreshed entry must be cached again rather than probing forever.
+    let probes_after_refresh = super::sidecar_probe_count_for_tests();
+    for _ in 0..100 {
+        let _ = super::cached_sidecar_label();
+    }
+    assert_eq!(
+        super::sidecar_probe_count_for_tests(),
+        probes_after_refresh,
+        "reads after a TTL refresh are not being cached again"
+    );
+}
+
+/// Cold-start integration guard for the label cache.
+///
+/// `fallback_memory_info` returns `None` (no widget at all) when there is no
+/// activity AND no sidecar label, which is the state on the very first frames
+/// before the background count refresh lands. The label cache therefore decides
+/// whether the memory widget appears at startup, not just what it says. A cache
+/// that degraded to `None` would make the widget vanish on cold start while
+/// every timing assertion still passed.
+#[test]
+fn memory_widget_survives_cold_start_when_only_the_sidecar_label_is_known() {
+    // No live activity and no cached counts: the label is the only signal.
+    let label = super::cached_sidecar_label();
+    assert!(
+        label.is_some(),
+        "the sidecar label is the only cold-start signal for the memory widget"
+    );
+
+    let info = super::fallback_memory_info(true, &None, &label)
+        .expect("a known sidecar label must keep the memory widget rendered");
+    assert_eq!(info.sidecar_model, label);
+    assert!(!info.disabled);
+
+    // The genuinely empty case must still collapse the widget rather than
+    // rendering an all-zeros card.
+    assert!(
+        super::fallback_memory_info(true, &None, &None).is_none(),
+        "with no activity and no label there is nothing to show"
+    );
 }

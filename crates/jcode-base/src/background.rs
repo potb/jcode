@@ -1608,6 +1608,27 @@ impl BackgroundTaskManager {
     /// same way the reconcilers do, so a task whose owning process is gone is
     /// reported as orphaned instead of a phantom `Running`.
     pub fn list_sync(&self) -> Vec<TaskStatusFile> {
+        self.list_sync_modified_within(None)
+    }
+
+    /// [`Self::list_sync`], skipping status files untouched for longer than
+    /// `max_age` without opening them.
+    ///
+    /// Callers that only render recent tasks would otherwise pay to read and
+    /// JSON-parse the entire archive on every call and then discard almost all
+    /// of it. On a long-lived machine that archive reached 210 files while the
+    /// background panel's 30-minute retention kept 7, and this runs on the TUI
+    /// render thread every 250ms, which showed up as a periodic ~20ms spike in
+    /// `draw-stats` on an otherwise 3ms frame.
+    ///
+    /// The filter is mtime-based and therefore approximate, which is why it is
+    /// opt-in and phrased as an age bound rather than the caller's exact
+    /// retention rule: a status file's mtime is when it was last written, so it
+    /// is never older than the completion time recorded inside it. Files are
+    /// only skipped when they are *definitely* outside the window; anything
+    /// unreadable or without a usable mtime is still parsed, and the caller's
+    /// own predicate remains authoritative.
+    pub fn list_sync_modified_within(&self, max_age: Option<Duration>) -> Vec<TaskStatusFile> {
         let mut results = Vec::new();
         let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
             return results;
@@ -1616,6 +1637,16 @@ impl BackgroundTaskManager {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(max_age) = max_age
+                && entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > max_age)
+            {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else {
