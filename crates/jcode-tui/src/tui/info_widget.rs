@@ -800,6 +800,16 @@ pub fn model_widget_identity_visible() -> bool {
     mode.visible(SESSION_FACTS_DREW_MODEL.load(Ordering::Relaxed))
 }
 
+/// Whether the model card renders at all. `display.model_widget = "off"` means
+/// the user has moved this information elsewhere (the session-fact stack), so
+/// the card is dropped outright rather than reduced to its leftover rows.
+pub fn model_card_visible() -> bool {
+    !matches!(
+        crate::config::config().display.model_widget,
+        jcode_config_types::ContextWidgetMode::Off
+    )
+}
+
 impl InfoWidgetData {
     /// Whether the side todo section should draw. Every todo render and height
     /// path goes through this, so the layout never reserves rows for a section
@@ -885,7 +895,7 @@ impl InfoWidgetData {
             WidgetKind::WorkspaceMap => !self.workspace_rows.is_empty(),
             WidgetKind::Overview => {
                 let mut sections = 0usize;
-                if self.model.is_some() {
+                if self.model.is_some() && model_card_visible() {
                     sections += 1;
                 }
                 if self.show_context() {
@@ -964,6 +974,7 @@ impl InfoWidgetData {
             // bordered box floats beside the chat.
             WidgetKind::ModelInfo => {
                 self.model.is_some()
+                    && model_card_visible()
                     && (self.show_model_identity()
                         || self.has_service_tier_badge()
                         || self.session_count.is_some()
@@ -2312,8 +2323,9 @@ pub(crate) fn render_sections(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Model info at the top
-    if data.model.is_some() {
+    // Model info at the top. `display.model_widget = "off"` removes the section
+    // here as well as the dedicated card, so the height mirror stays honest.
+    if data.model.is_some() && model_card_visible() {
         lines.extend(render_model_info(data, inner));
     }
 

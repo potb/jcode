@@ -128,7 +128,7 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn compact_model_height(data: &InfoWidgetData) -> u16 {
-    if data.model.is_none() {
+    if data.model.is_none() || !crate::tui::info_widget::model_card_visible() {
         return 0;
     }
     // Must mirror `render_model_info` line for line, or the overview clips its
