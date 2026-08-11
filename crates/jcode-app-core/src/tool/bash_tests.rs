@@ -53,8 +53,7 @@ fn a_child_script_that_calls_cargo_still_routes_through_the_wrapper() {
     {
         use std::os::unix::fs::PermissionsExt;
         for path in [scripts.join("dev_cargo.sh"), child.clone()] {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
     }
 
@@ -118,8 +117,7 @@ fn the_dynamic_cargo_shim_finds_the_wrapper_after_a_cd() {
     std::fs::create_dir_all(&nested).expect("nested dir");
 
     let command = format!("cd {} && cargo build --frobnicate", nested.display());
-    let wrapped =
-        wrap_repo_cargo_commands(&command, None).expect("cargo command must be wrapped");
+    let wrapped = wrap_repo_cargo_commands(&command, None).expect("cargo command must be wrapped");
 
     let out = std::process::Command::new("bash")
         .arg("-c")
@@ -145,8 +143,7 @@ fn the_dynamic_cargo_shim_finds_the_wrapper_after_a_cd() {
 #[test]
 fn a_background_task_records_the_users_command_not_the_cargo_shim() {
     let user_command = "cd /home/potb/jcode && cargo test -p demo";
-    let wrapped = wrap_repo_cargo_commands(user_command, None)
-        .expect("a cargo command is wrapped");
+    let wrapped = wrap_repo_cargo_commands(user_command, None).expect("a cargo command is wrapped");
 
     // Precondition: the rewritten command really does start with the shim, so
     // this test fails loudly if the wrapper stops being the risk.
@@ -242,8 +239,7 @@ fn a_command_that_never_cds_falls_back_to_the_session_wrapper() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
     // Run from a directory with no wrapper anywhere above it.
@@ -1261,4 +1257,91 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
         "background dispatch must be gated too, not just foreground"
     );
     assert!(canary.exists(), "the file must survive a backgrounded call");
+}
+
+/// The recorded command and display name must survive the *promotion* pipeline,
+/// not just the explicit `run_in_background` path. Every unix bash command is
+/// rewritten with the cargo shim before dispatch, so a promoted task recorded
+/// ~20 lines of boilerplate and rendered as `cargo() {`.
+#[tokio::test]
+async fn foreground_timeout_promotion_records_the_users_command() {
+    let tool = BashTool::new();
+    let result = tool
+        .execute(
+            json!({"command": "sleep 0.5; echo promoted_name_ok", "timeout": 100}),
+            make_ctx(None),
+        )
+        .await
+        .expect("timeout should promote to background");
+
+    let metadata = result.metadata.expect("expected background metadata");
+    let task_id = metadata["task_id"].as_str().expect("task_id").to_string();
+    let status = crate::background::global()
+        .status(&task_id)
+        .await
+        .expect("status should exist");
+
+    assert_eq!(
+        status.command.as_deref(),
+        Some("sleep 0.5; echo promoted_name_ok"),
+        "the recorded command must be what the caller wrote"
+    );
+    assert_eq!(
+        status.display_name.as_deref(),
+        Some("sleep 0.5;"),
+        "the task card must not show the cargo shim"
+    );
+
+    let _ = crate::background::global().cancel(&task_id).await;
+}
+
+/// Same guarantee for the reload-persistable (AgentTurn) foreground path, which
+/// registers a detached task instead of adopting the in-process handle.
+#[tokio::test]
+async fn reload_persistable_timeout_promotion_records_the_users_command() {
+    let tool = BashTool::new();
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let result = tool
+        .execute(
+            json!({"command": "sleep 0.5; echo detached_name_ok", "timeout": 100}),
+            make_agent_ctx(signal),
+        )
+        .await
+        .expect("timeout should promote to background");
+
+    let metadata = result.metadata.expect("expected background metadata");
+    let task_id = metadata["task_id"].as_str().expect("task_id").to_string();
+    let status = crate::background::global()
+        .status(&task_id)
+        .await
+        .expect("status should exist");
+
+    assert_eq!(
+        status.command.as_deref(),
+        Some("sleep 0.5; echo detached_name_ok"),
+        "the recorded command must be what the caller wrote"
+    );
+    assert_eq!(
+        status.display_name.as_deref(),
+        Some("sleep 0.5;"),
+        "the task card must not show the cargo shim"
+    );
+
+    let _ = crate::background::global().cancel(&task_id).await;
+}
+
+/// `cd <dir> && <cmd>` is common enough that labelling it "cd <dir>" hides what
+/// is actually running.
+#[test]
+fn a_leading_cd_does_not_become_the_label() {
+    assert_eq!(
+        summarize_background_command(None, "cd ~/x && rg -l foo"),
+        "rg -l"
+    );
+    assert_eq!(
+        summarize_background_command(None, "cd /a && cd /b && cargo test -p demo"),
+        "cargo test"
+    );
+    // A bare `cd` with nothing after it still labels as itself.
+    assert_eq!(summarize_background_command(None, "cd /tmp"), "cd /tmp");
 }

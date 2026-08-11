@@ -200,6 +200,24 @@ fn summarize_background_command(description: Option<&str>, command: &str) -> Str
         return "bash".to_string();
     }
 
+    // `cd <dir> && <real command>` is a very common shape, and labelling it
+    // "cd <dir>" says nothing about what is running. Drop leading `cd ... &&`
+    // segments so the label describes the actual command.
+    let mut trimmed = trimmed;
+    loop {
+        let Some(rest) = trimmed.strip_prefix("cd ") else {
+            break;
+        };
+        let Some((_, after)) = rest.split_once("&&") else {
+            break;
+        };
+        let after = after.trim_start();
+        if after.is_empty() {
+            break;
+        }
+        trimmed = after;
+    }
+
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     let start = tokens
         .iter()
@@ -779,9 +797,7 @@ impl Tool for BashTool {
         }
 
         if run_in_background {
-            return self
-                .execute_background(params, ctx, original_command)
-                .await;
+            return self.execute_background(params, ctx, original_command).await;
         }
 
         // Auto-detect browser bridge commands and rewrite them to the installed
@@ -803,20 +819,25 @@ impl Tool for BashTool {
         }
 
         // Foreground execution with stdin detection
-        self.execute_foreground(&params, &ctx).await
+        self.execute_foreground(&params, &ctx, &original_command)
+            .await
     }
 }
 
 impl BashTool {
+    /// `original_command` is what the caller wrote, before the cargo shim and
+    /// other internal rewrites. It is used for anything user-visible when the
+    /// command is promoted to a background task on timeout.
     async fn execute_foreground(
         &self,
         params: &BashInput,
         ctx: &ToolContext,
+        original_command: &str,
     ) -> Result<ToolOutput> {
         #[cfg(unix)]
         if self.supports_reload_persistence(ctx) {
             return self
-                .execute_reload_persistable_foreground(params, ctx)
+                .execute_reload_persistable_foreground(params, ctx, original_command)
                 .await;
         }
 
@@ -850,7 +871,7 @@ impl BashTool {
         let title = params
             .intent
             .clone()
-            .unwrap_or_else(|| params.command.clone());
+            .unwrap_or_else(|| original_command.to_string());
         let stdin_tx = ctx.stdin_request_tx.clone();
         let tool_call_id = ctx.tool_call_id.clone();
         let title_for_work = title.clone();
@@ -973,12 +994,12 @@ impl BashTool {
                 // it, promote it to a background task so it keeps running, renders
                 // as a background-task card, and the agent is told where to find it.
                 let display_name =
-                    summarize_background_command(params.intent.as_deref(), &params.command);
+                    summarize_background_command(params.intent.as_deref(), original_command);
                 let info = crate::background::global()
                     .adopt_with_options(
                         "bash",
                         Some(display_name.clone()),
-                        Some(params.command.clone()),
+                        Some(original_command.to_string()),
                         &ctx.session_id,
                         params.notify,
                         params.wake,
@@ -1034,6 +1055,7 @@ impl BashTool {
         &self,
         params: &BashInput,
         ctx: &ToolContext,
+        original_command: &str,
     ) -> Result<ToolOutput> {
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
         let timeout_duration = Duration::from_millis(timeout_ms);
@@ -1041,7 +1063,7 @@ impl BashTool {
         let started = Instant::now();
         let manager = crate::background::global();
         let info = manager.reserve_task_info();
-        let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
+        let display_name = summarize_background_command(params.intent.as_deref(), original_command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
         let stdout = OpenOptions::new()
@@ -1070,7 +1092,7 @@ impl BashTool {
                         params
                             .intent
                             .clone()
-                            .unwrap_or_else(|| params.command.clone()),
+                            .unwrap_or_else(|| original_command.to_string()),
                     ),
                 );
             }
@@ -1082,7 +1104,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
-                        Some(params.command.clone()),
+                        Some(original_command.to_string()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1116,7 +1138,7 @@ impl BashTool {
                         params
                             .intent
                             .clone()
-                            .unwrap_or_else(|| params.command.clone()),
+                            .unwrap_or_else(|| original_command.to_string()),
                     )
                     .with_metadata(json!({
                         "background": true,
@@ -1140,7 +1162,7 @@ impl BashTool {
                         &info,
                         "bash",
                         Some(display_name.clone()),
-                        Some(params.command.clone()),
+                        Some(original_command.to_string()),
                         &ctx.session_id,
                         pid,
                         &started_at,
@@ -1160,7 +1182,7 @@ impl BashTool {
                         params
                             .intent
                             .clone()
-                            .unwrap_or_else(|| params.command.clone()),
+                            .unwrap_or_else(|| original_command.to_string()),
                     )
                     .with_metadata(json!({
                         "background": true,
@@ -1189,8 +1211,7 @@ impl BashTool {
     ) -> Result<ToolOutput> {
         let command = params.command.clone();
         let description = params.intent.clone();
-        let display_name =
-            summarize_background_command(description.as_deref(), &original_command);
+        let display_name = summarize_background_command(description.as_deref(), &original_command);
         let working_dir = ctx.working_dir.clone();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
