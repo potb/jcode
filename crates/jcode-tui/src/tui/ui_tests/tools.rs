@@ -1334,6 +1334,41 @@ fn test_activity_detail_falls_back_to_input_intent_field() {
     );
 }
 
+/// Regression: the multiedit chip showed "(0 edits)" because storage
+/// compaction, which also runs on live messages via `push_display_message`,
+/// dropped the whole `edits` array the label counted.
+#[test]
+fn test_multiedit_summary_survives_display_compaction() {
+    let mut message = crate::tui::DisplayMessage::tool(
+        "Edited /tmp/demo.rs",
+        ToolCall {
+            id: "multiedit-1".to_string(),
+            name: "multiedit".to_string(),
+            input: serde_json::json!({
+                "file_path": "/tmp/demo.rs",
+                "edits": [
+                    { "old_string": "a", "new_string": "b" },
+                    { "old_string": "c", "new_string": "d" },
+                    { "old_string": "e", "new_string": "f" },
+                ],
+            }),
+            intent: None,
+            thought_signature: None,
+        },
+    );
+
+    let before = tools_ui::get_tool_summary(message.tool_data.as_ref().expect("tool data"));
+    assert!(before.contains("(3 edits)"), "{before:?}");
+
+    crate::tui::app::compact_display_messages_for_storage(std::slice::from_mut(&mut message));
+    let tool = message.tool_data.as_ref().expect("tool data");
+    // The heavy per-edit strings are still dropped; only the count survives.
+    assert!(tool.input.get("edits").is_none());
+    let after = tools_ui::get_tool_summary(tool);
+    assert!(after.contains("(3 edits)"), "{after:?}");
+    assert!(after.contains("/tmp/demo.rs"), "{after:?}");
+}
+
 /// Without an intent, the activity detail matches the plain technical summary.
 #[test]
 fn test_activity_detail_without_intent_matches_summary() {

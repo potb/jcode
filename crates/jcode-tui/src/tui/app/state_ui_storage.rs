@@ -57,13 +57,31 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                     .unwrap_or(serde_json::Value::Null),
             ),
         ]),
-        "write" | "edit" | "multiedit" => obj(vec![(
+        "write" | "edit" => obj(vec![(
             "file_path",
             input
                 .get("file_path")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         )]),
+        // Multiedit rows show "(N edits)", so keep the count. Dropping the whole
+        // `edits` array (each entry holds two full file-sized strings) is what
+        // makes compaction worthwhile, but the length is one integer.
+        "multiedit" => obj(vec![
+            (
+                "file_path",
+                input
+                    .get("file_path")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "edit_count",
+                crate::tui::ui::tools_ui::multiedit_edit_count(input)
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+        ]),
         "patch" | "apply_patch" => {
             let file_path = input.get("file_path").cloned().or_else(|| {
                 input

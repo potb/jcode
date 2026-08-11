@@ -9,6 +9,22 @@ pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, is_edit_tool_name, resolve_display_tool_name, tool_output_looks_failed,
 };
 
+/// Number of edits in a multiedit tool call.
+///
+/// Reads the live `edits` array when present, and falls back to the
+/// `edit_count` integer that storage compaction keeps after dropping the
+/// array's file-sized strings. Returns `None` when neither is present, so
+/// callers can tell "no information" from a genuine zero.
+pub(crate) fn multiedit_edit_count(input: &serde_json::Value) -> Option<usize> {
+    if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+        return Some(edits.len());
+    }
+    input
+        .get("edit_count")
+        .and_then(|v| v.as_u64())
+        .map(|count| count as usize)
+}
+
 /// Whether the dimmed technical detail (command, path, args) should render
 /// alongside a model-provided intent on tool rows. Rows without an intent
 /// always fall back to the technical detail regardless of this setting.
@@ -986,12 +1002,7 @@ pub(super) fn get_tool_summary_with_budget(
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let count = tool
-                .input
-                .get("edits")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+            let count = multiedit_edit_count(&tool.input).unwrap_or(0);
             let suffix = format!(" ({} edits)", count);
             max_width
                 .map(|w| truncate_path_with_suffix(path, suffix.as_str(), w))
