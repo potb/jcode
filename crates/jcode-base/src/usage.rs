@@ -574,7 +574,10 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
 
     match report {
         Some(report) => {
-            let usage_data = usage_data_from_provider_report(report);
+            let usage_data = merge_anthropic_report_over_cached(
+                usage_data_from_provider_report(report),
+                &cached,
+            );
             if let Ok(creds) = auth::claude::load_credentials() {
                 let cache_key = anthropic_usage_cache_key(
                     &creds.access_token,
@@ -594,6 +597,25 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
                 ..Default::default()
             };
         }
+    }
+}
+
+/// Fold a freshly parsed Anthropic report onto whatever the shared cache holds.
+///
+/// A report that failed before it could carry any window (an expired token, or
+/// a 429 raised with nothing cached in this process yet) must not erase windows
+/// we already have. Readers cannot distinguish zeroed windows from "quota is at
+/// zero", so they simply stop rendering, which is how a transient 429 used to
+/// make the pinned usage footer vanish (issue #21).
+fn merge_anthropic_report_over_cached(incoming: UsageData, cached: &UsageData) -> UsageData {
+    if incoming.last_error.is_none() || incoming.has_known_windows() {
+        return incoming;
+    }
+    UsageData {
+        fetched_at: incoming.fetched_at.or_else(|| Some(Instant::now())),
+        last_error: incoming.last_error,
+        retry_after: incoming.retry_after,
+        ..cached.clone()
     }
 }
 

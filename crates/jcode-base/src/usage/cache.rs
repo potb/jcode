@@ -142,10 +142,16 @@ pub(super) fn provider_report_from_usage_data(
     display_name: String,
     data: &UsageData,
 ) -> ProviderUsage {
-    if let Some(error) = &data.last_error {
+    // A failed refresh does not invalidate the last-known windows, so carry
+    // them alongside `error` instead of blanking them. Readers that only want
+    // to report the failure look at `error` first; readers that would rather
+    // show a slightly old number than nothing (the pinned usage footer) can
+    // still find one. Without any known window there is nothing to carry, and
+    // emitting 0% limits would fabricate data we never fetched.
+    if data.last_error.is_some() && !data.has_known_windows() {
         return ProviderUsage {
             provider_name: display_name,
-            error: Some(error.clone()),
+            error: data.last_error.clone(),
             ..Default::default()
         };
     }
@@ -191,20 +197,12 @@ pub(super) fn provider_report_from_usage_data(
         limits,
         extra_info,
         hard_limit_reached: false,
-        error: None,
+        error: data.last_error.clone(),
         last_used_unix_secs: None,
     }
 }
 
 pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageData {
-    if let Some(error) = &report.error {
-        return UsageData {
-            fetched_at: Some(Instant::now()),
-            last_error: Some(error.clone()),
-            ..Default::default()
-        };
-    }
-
     let five_hour = report
         .limits
         .iter()
@@ -253,7 +251,11 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         model_scoped,
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
         fetched_at: Some(Instant::now()),
-        last_error: None,
+        // Mirrors `openai_usage_data_from_provider_report`: fill the windows
+        // from the report, then record the failure on top. Returning early on
+        // `error` used to discard windows the fetcher had deliberately carried
+        // over, which left the stale-footer path permanently unreachable.
+        last_error: report.error.clone(),
         retry_after: None,
     }
 }

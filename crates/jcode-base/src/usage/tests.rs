@@ -949,3 +949,134 @@ fn peek_returns_error_entries_that_the_staleness_filter_hides() {
         0.60
     );
 }
+
+#[test]
+fn anthropic_error_report_keeps_last_known_windows_for_the_stale_footer() {
+    // A 429 arrives after a good fetch: `anthropic_usage_error` carries the
+    // previous windows, and the report/UsageData round trip must not drop them,
+    // otherwise the pinned usage footer disappears instead of greying out.
+    let carried = UsageData {
+        five_hour: 0.42,
+        five_hour_resets_at: Some("2026-08-11T18:00:00Z".to_string()),
+        seven_day: 0.11,
+        seven_day_resets_at: Some("2026-08-16T00:00:00Z".to_string()),
+        last_error: Some("Usage API error (429 Too Many Requests): {}".to_string()),
+        ..Default::default()
+    };
+
+    let report = provider_report_from_usage_data("Anthropic".to_string(), &carried);
+    assert!(report.error.is_some(), "the failure must still be reported");
+    assert_eq!(
+        report
+            .limits
+            .iter()
+            .find(|limit| limit.name == "5-hour window")
+            .map(|limit| limit.usage_percent),
+        Some(42.0)
+    );
+
+    let restored = usage_data_from_provider_report(&report);
+    assert!((restored.five_hour - 0.42).abs() < f32::EPSILON);
+    assert!((restored.seven_day - 0.11).abs() < f32::EPSILON);
+    assert_eq!(
+        restored.five_hour_resets_at.as_deref(),
+        Some("2026-08-11T18:00:00Z")
+    );
+    assert!(restored.last_error.is_some());
+    assert!(
+        restored.has_known_windows(),
+        "the TUI keys its stale presentation off this predicate"
+    );
+}
+
+#[test]
+fn anthropic_error_report_without_history_reports_no_windows() {
+    // Nothing was ever fetched, so there is nothing to show as stale. Emitting
+    // 0% limits here would fabricate a reading we never had.
+    let never_fetched = UsageData {
+        last_error: Some("OAuth token expired".to_string()),
+        ..Default::default()
+    };
+
+    let report = provider_report_from_usage_data("Anthropic".to_string(), &never_fetched);
+    assert!(report.limits.is_empty());
+    assert!(report.extra_info.is_empty());
+    assert_eq!(report.error.as_deref(), Some("OAuth token expired"));
+
+    let restored = usage_data_from_provider_report(&report);
+    assert!(!restored.has_known_windows());
+    assert_eq!(restored.last_error.as_deref(), Some("OAuth token expired"));
+}
+
+#[test]
+fn has_known_windows_separates_a_real_zero_reading_from_never_fetched() {
+    assert!(!UsageData::default().has_known_windows());
+    assert!(
+        UsageData {
+            five_hour: 0.0,
+            five_hour_resets_at: Some("2026-08-11T18:00:00Z".to_string()),
+            ..Default::default()
+        }
+        .has_known_windows(),
+        "a genuine 0% reading carries a reset timestamp"
+    );
+    assert!(
+        UsageData {
+            model_scoped: vec![ModelScopedUsageWindow {
+                model_name: "Fable".to_string(),
+                utilization: 0.0,
+                resets_at: None,
+            }],
+            ..Default::default()
+        }
+        .has_known_windows()
+    );
+}
+
+#[test]
+fn failed_refresh_does_not_erase_the_cached_anthropic_windows() {
+    let cached = UsageData {
+        five_hour: 0.42,
+        five_hour_resets_at: Some("2026-08-11T18:00:00Z".to_string()),
+        seven_day: 0.11,
+        ..Default::default()
+    };
+    let failed = UsageData {
+        fetched_at: Some(Instant::now()),
+        last_error: Some("Usage API error (429 Too Many Requests): {}".to_string()),
+        retry_after: Some(std::time::Duration::from_secs(0)),
+        ..Default::default()
+    };
+
+    let merged = merge_anthropic_report_over_cached(failed, &cached);
+
+    assert!((merged.five_hour - 0.42).abs() < f32::EPSILON);
+    assert!((merged.seven_day - 0.11).abs() < f32::EPSILON);
+    assert_eq!(
+        merged.five_hour_resets_at.as_deref(),
+        Some("2026-08-11T18:00:00Z")
+    );
+    assert!(merged.last_error.is_some());
+    assert_eq!(merged.retry_after, Some(std::time::Duration::from_secs(0)));
+}
+
+#[test]
+fn successful_refresh_replaces_the_cached_anthropic_windows() {
+    let cached = UsageData {
+        five_hour: 0.42,
+        seven_day: 0.11,
+        ..Default::default()
+    };
+    let fresh = UsageData {
+        five_hour: 0.05,
+        seven_day: 0.02,
+        fetched_at: Some(Instant::now()),
+        ..Default::default()
+    };
+
+    let merged = merge_anthropic_report_over_cached(fresh, &cached);
+
+    assert!((merged.five_hour - 0.05).abs() < f32::EPSILON);
+    assert!((merged.seven_day - 0.02).abs() < f32::EPSILON);
+    assert!(merged.last_error.is_none());
+}

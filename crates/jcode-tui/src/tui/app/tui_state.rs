@@ -450,11 +450,7 @@ impl App {
                     // A failed refresh (usually a 429 from the usage API) keeps
                     // the previously fetched window values in `UsageData`, so
                     // report them as stale rather than as nothing at all.
-                    stale: usage.last_error.is_some()
-                        && (usage.five_hour > 0.0
-                            || usage.seven_day > 0.0
-                            || usage.five_hour_resets_at.is_some()
-                            || usage.seven_day_resets_at.is_some()),
+                    stale: usage.last_error.is_some() && usage.has_known_windows(),
                 })
             }
             WidgetProviderKind::OpenAI => {

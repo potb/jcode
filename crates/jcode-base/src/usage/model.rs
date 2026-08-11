@@ -88,6 +88,21 @@ impl UsageData {
         })
     }
 
+    /// Whether this snapshot holds any usage window worth showing.
+    ///
+    /// Distinguishes "we fetched something once" from a zeroed `Default`, which
+    /// matters after a failed refresh: carried-over windows are still worth
+    /// presenting as stale, while a never-populated snapshot has nothing to
+    /// show and must not be rendered as 0% used.
+    pub fn has_known_windows(&self) -> bool {
+        self.five_hour > 0.0
+            || self.seven_day > 0.0
+            || self.five_hour_resets_at.is_some()
+            || self.seven_day_resets_at.is_some()
+            || self.seven_day_opus.is_some()
+            || !self.model_scoped.is_empty()
+    }
+
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
         if usage_reset_passed([

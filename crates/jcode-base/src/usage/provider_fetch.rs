@@ -46,13 +46,17 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
+    match fetch_anthropic_usage_data(access_token, cache_key.clone()).await {
         Ok(data) => provider_report_from_usage_data(display_name, &data),
-        Err(e) => ProviderUsage {
-            provider_name: display_name,
-            error: Some(e.to_string()),
-            ..Default::default()
-        },
+        Err(e) => {
+            // The fetcher already stored the failure with the previous windows
+            // carried over (see `anthropic_usage_error`). Report from that
+            // entry so the last-known numbers reach the UI as stale instead of
+            // being replaced by "no usage data at all" (issue #21).
+            let mut carried = peek_anthropic_usage(&cache_key).unwrap_or_default();
+            carried.last_error = Some(e.to_string());
+            provider_report_from_usage_data(display_name, &carried)
+        }
     }
 }
 
