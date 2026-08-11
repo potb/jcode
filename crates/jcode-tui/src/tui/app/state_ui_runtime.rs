@@ -66,12 +66,16 @@ impl App {
     /// discharging at/below `[power].prevent_sleep_min_battery_percent` (#29).
     pub(super) fn sync_sleep_guard(&mut self) {
         let power = &crate::config::config().power;
-        let enabled = power.prevent_sleep_while_streaming;
-        let low_battery = crate::battery::detect_cached()
-            .is_draining_below(power.prevent_sleep_min_battery_percent);
-        let busy = self.is_processing() || crate::background::global().has_running_tasks();
-        self.power_inhibitor
-            .set_active(enabled && !low_battery && busy);
+        let active = sleep_guard_should_hold(
+            power.prevent_sleep_while_streaming,
+            self.is_processing(),
+            || crate::background::global().has_running_tasks(),
+            || {
+                crate::battery::detect_cached()
+                    .is_draining_below(power.prevent_sleep_min_battery_percent)
+            },
+        );
+        self.power_inhibitor.set_active(active);
     }
 
     pub fn streaming_text(&self) -> &str {
@@ -464,5 +468,109 @@ impl App {
             self.stashed_input = Some((input, cursor));
             self.set_status_notice("📋 Input stashed");
         }
+    }
+}
+
+/// Whether the sleep inhibitor should be held, given the config flag and the
+/// two expensive inputs behind closures.
+///
+/// The closures are the point. Reading a battery percentage forks `pmset` on
+/// macOS, and asking whether any background task is running scans the shared
+/// status directory, which is an archive that grows with everything the user has
+/// ever run. `sync_sleep_guard` runs once per event-loop iteration, so a version
+/// that computed both eagerly and then `&&`-ed them made an idle client with the
+/// feature switched off pay for it forever. Only evaluate what the answer
+/// actually depends on.
+fn sleep_guard_should_hold(
+    enabled: bool,
+    is_processing: bool,
+    background_running: impl FnOnce() -> bool,
+    draining_below_floor: impl FnOnce() -> bool,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    // Streaming settles the common case without any syscall.
+    if !(is_processing || background_running()) {
+        return false;
+    }
+    !draining_below_floor()
+}
+
+#[cfg(test)]
+mod sleep_guard_tests {
+    use super::sleep_guard_should_hold;
+    use std::cell::Cell;
+
+    /// The regression this exists for: with the feature off, neither expensive
+    /// input may be touched.
+    #[test]
+    fn a_disabled_guard_probes_neither_battery_nor_background_tasks() {
+        let scans = Cell::new(0);
+        let battery_reads = Cell::new(0);
+
+        let hold = sleep_guard_should_hold(
+            false,
+            false,
+            || {
+                scans.set(scans.get() + 1);
+                false
+            },
+            || {
+                battery_reads.set(battery_reads.get() + 1);
+                false
+            },
+        );
+
+        assert!(!hold);
+        assert_eq!(scans.get(), 0, "disabled guard must not scan for tasks");
+        assert_eq!(battery_reads.get(), 0, "disabled guard must not fork pmset");
+    }
+
+    /// An idle client still has to ask about background tasks (the server runs
+    /// them in another process), but must not reach the battery until something
+    /// could actually hold the inhibitor.
+    #[test]
+    fn an_idle_enabled_guard_checks_tasks_but_not_the_battery() {
+        let battery_reads = Cell::new(0);
+
+        let hold = sleep_guard_should_hold(true, false, || false, || {
+            battery_reads.set(battery_reads.get() + 1);
+            false
+        });
+
+        assert!(!hold);
+        assert_eq!(
+            battery_reads.get(),
+            0,
+            "nothing is running, so the battery cannot change the answer"
+        );
+    }
+
+    /// Streaming answers "busy" on its own, so the directory scan is skipped.
+    #[test]
+    fn a_streaming_guard_holds_without_scanning_the_task_directory() {
+        let scans = Cell::new(0);
+
+        let hold = sleep_guard_should_hold(
+            true,
+            true,
+            || {
+                scans.set(scans.get() + 1);
+                false
+            },
+            || false,
+        );
+
+        assert!(hold);
+        assert_eq!(scans.get(), 0, "streaming already proves the client is busy");
+    }
+
+    /// The behaviour all of the above must preserve: a draining laptop releases
+    /// the inhibitor even while busy (#29).
+    #[test]
+    fn a_low_battery_releases_the_guard_while_busy() {
+        assert!(!sleep_guard_should_hold(true, true, || false, || true));
+        assert!(sleep_guard_should_hold(true, false, || true, || false));
     }
 }

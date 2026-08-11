@@ -749,3 +749,177 @@ async fn has_running_tasks_caches_within_its_ttl() -> Result<()> {
 
     Ok(())
 }
+
+/// The status directory is an archive: it keeps one file per task ever run,
+/// while the interesting files are the few still running. A finished task can
+/// never run again, so once its file has been read in a terminal state the
+/// scans behind the status widget must stop opening it. Without that, the cost
+/// of asking "what is running in this session" grows with everything the user
+/// has ever run: the machine this was found on had 115 files to surface 1 row,
+/// and the scan sat on the render thread.
+#[tokio::test]
+async fn a_settled_status_file_is_never_parsed_twice() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    // One live task, plus an archive of finished ones. The scan only trusts a
+    // `Running` file while a live process owns it, so point the fixture at this
+    // test process.
+    let mut live = running_status_fixture("live111aaaa", "session-a");
+    live.owner_pid = Some(std::process::id());
+    live.owner_instance = Some(model::process_instance_token().to_string());
+    write_status_fixture(&manager, &live).await;
+    for index in 0..24 {
+        let mut finished = running_status_fixture(&format!("done{index:06}xx"), "session-a");
+        finished.status = BackgroundTaskStatus::Completed;
+        finished.exit_code = Some(0);
+        finished.completed_at = Some(Utc::now().to_rfc3339());
+        write_status_fixture(&manager, &finished).await;
+    }
+
+    // First scan has to look at everything: it cannot know what is terminal
+    // until it reads each file once.
+    manager.reset_status_parse_count_for_tests();
+    let first = manager.running_rows_for_session("session-a");
+    let first_parses = manager.status_parse_count_for_tests();
+    assert_eq!(
+        first_parses, 25,
+        "the first scan must read every status file once"
+    );
+
+    // A later scan must not re-read anything that has not changed on disk. The
+    // cache in front of this scan is time-based, so wait it out to be sure the
+    // second call really re-scans rather than being served that snapshot.
+    //
+    // Zero, not one: the archive is skipped without a syscall because it is
+    // settled, and the live file is served from the parse memo because its
+    // mtime and length are untouched. `a_running_status_file_is_reparsed_when_it_changes`
+    // is the other half of this contract and pins that a live task's own
+    // updates still get re-read.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    manager.reset_status_parse_count_for_tests();
+    let second = manager.running_rows_for_session("session-a");
+    let second_parses = manager.status_parse_count_for_tests();
+    assert_eq!(
+        second_parses, 0,
+        "an unchanged re-scan must not reparse the archive"
+    );
+
+    // Skipping work must not change the answer.
+    let ids: Vec<&str> = first.iter().map(|row| row.task_id.as_str()).collect();
+    assert_eq!(ids, vec!["live111aaaa"]);
+    let ids: Vec<&str> = second.iter().map(|row| row.task_id.as_str()).collect();
+    assert_eq!(ids, vec!["live111aaaa"]);
+
+    Ok(())
+}
+
+/// The mirror of the test above: skipping must be driven by the file's *state*,
+/// never by "have I seen this path before". A running task whose progress is
+/// rewritten has to be re-read, or the widget would freeze at whatever the
+/// first scan happened to catch.
+#[tokio::test]
+async fn a_running_status_file_is_reparsed_when_it_changes() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let mut status = running_status_fixture("live222bbbb", "session-b");
+    status.owner_pid = Some(std::process::id());
+    status.owner_instance = Some(model::process_instance_token().to_string());
+    status.display_name = Some("first".to_string());
+    write_status_fixture(&manager, &status).await;
+
+    let rows = manager.running_rows_for_session("session-b");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "first");
+
+    // Rewrite the same path with a new label. Length changes here, and mtime
+    // may not have moved on a coarse-grained filesystem, so this also pins that
+    // the stamp is not mtime alone.
+    status.display_name = Some("second stage".to_string());
+    write_status_fixture(&manager, &status).await;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let rows = manager.running_rows_for_session("session-b");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].label, "second stage",
+        "a running task's own updates must still reach the widget"
+    );
+
+    Ok(())
+}
+
+/// The background panel shows a fixed number of trailing lines, so the read
+/// behind it must cost the same whether a task printed one line or a hundred
+/// megabytes of build log. Reading the whole file to discard nearly all of it
+/// put the size of the log on the render path.
+#[tokio::test]
+async fn output_tail_sync_reads_only_the_end_of_a_large_output() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    // 2 MB of output, with a recognizable last line.
+    let mut output = String::new();
+    for index in 0..40_000 {
+        output.push_str(&format!("line {index} of compiler noise\n"));
+    }
+    output.push_str("FINAL LINE\n");
+    let path = manager.output_path_for("tail111aaaa");
+    tokio::fs::write(&path, &output).await?;
+    assert!(
+        output.len() > 1_000_000,
+        "fixture should be big enough to matter, was {}",
+        output.len()
+    );
+
+    let tail = manager
+        .output_tail_sync("tail111aaaa", 4096)
+        .ok_or_else(|| anyhow!("tail should read"))?;
+
+    assert!(
+        tail.len() <= 4096,
+        "the read must be bounded by the budget, got {} bytes",
+        tail.len()
+    );
+    assert!(
+        tail.ends_with("FINAL LINE\n"),
+        "the tail must be the *end* of the file"
+    );
+
+    // A byte-aligned cut can land mid-line, so the first line may be a
+    // fragment. Callers take whole trailing lines, so what matters is that
+    // every line after the first is intact.
+    let lines: Vec<&str> = tail.lines().collect();
+    assert!(lines.len() > 1);
+    for line in &lines[1..] {
+        assert!(
+            line.starts_with("line ") || *line == "FINAL LINE",
+            "expected intact lines after the first, got {line:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// A file smaller than the budget must come back whole, not truncated or
+/// padded, and must not error on the seek that a large file needs.
+#[tokio::test]
+async fn output_tail_sync_returns_a_small_output_in_full() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let path = manager.output_path_for("tail222bbbb");
+    tokio::fs::write(&path, b"one\ntwo\n").await?;
+
+    let tail = manager
+        .output_tail_sync("tail222bbbb", 64 * 1024)
+        .ok_or_else(|| anyhow!("tail should read"))?;
+    assert_eq!(tail, "one\ntwo\n");
+
+    // A missing file is a normal state (a task that has not written yet), not
+    // an error to surface.
+    assert!(manager.output_tail_sync("nosuchtask", 1024).is_none());
+
+    Ok(())
+}

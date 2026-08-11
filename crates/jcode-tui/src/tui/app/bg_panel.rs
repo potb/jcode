@@ -308,11 +308,22 @@ pub(crate) fn invalidate_cache() {
 /// Only ever called for the selected task: reading every task's output on
 /// every frame would turn a status panel into a disk hog.
 pub(crate) fn output_tail(task_id: &str, max_lines: usize) -> Vec<String> {
-    let Some(output) = crate::background::global().output_sync(task_id) else {
+    // Read from the end rather than the whole file. A task's output is
+    // unbounded (this panel exists to watch builds), but the panel only ever
+    // shows `OUTPUT_TAIL_LINES` trailing lines, so the read is capped at a
+    // generous byte budget for that many lines instead of the file's size.
+    let Some(output) =
+        crate::background::global().output_tail_sync(task_id, OUTPUT_TAIL_READ_BYTES)
+    else {
         return Vec::new();
     };
     tail_lines(&output, max_lines)
 }
+
+/// Byte budget for the tail read: enough that `OUTPUT_TAIL_LINES` full-width
+/// terminal lines fit comfortably, with room for the leading partial line that
+/// a byte-aligned cut leaves behind.
+const OUTPUT_TAIL_READ_BYTES: u64 = 64 * 1024;
 
 /// The tail rule, split from the disk read so it is testable.
 ///

@@ -37,6 +37,11 @@ use model::{
 /// long enough that a per-frame caller does not re-read the status directory.
 const ANY_RUNNING_CACHE_TTL: Duration = Duration::from_millis(1000);
 
+/// Identity of a status file on disk: the fields that change whenever its
+/// contents change. A task's status file is rewritten in place, so mtime plus
+/// length is enough to notice a new state without re-parsing the JSON.
+type StatusFileStamp = (Option<std::time::SystemTime>, u64);
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -49,6 +54,33 @@ pub struct BackgroundTaskManager {
     /// [`BackgroundTaskManager::has_running_tasks`], stamped with the time it
     /// was taken.
     any_running_cache: std::sync::Mutex<Option<(Instant, bool)>>,
+    /// Parsed status files keyed by path and stamped with the file identity
+    /// they were parsed from.
+    ///
+    /// The status directory is an append-mostly archive: it accumulates one
+    /// file per task and is only pruned by cleanup, while the *interesting*
+    /// files are the few still running. Re-reading and re-parsing every
+    /// finished task's JSON on each scan is the dominant cost of the scan, so
+    /// entries are reused until the file itself changes.
+    status_parse_cache: std::sync::Mutex<HashMap<PathBuf, (StatusFileStamp, TaskStatusFile)>>,
+    /// Counts status files this manager actually read and parsed from disk.
+    ///
+    /// A skip-the-archive optimization is only observable by counting the work
+    /// that did *not* happen: a broken cache still returns correct rows, just
+    /// slowly, so asserting on rows alone would pass either way. Per-manager
+    /// rather than global because the suite runs tests in parallel threads
+    /// inside one process, and a shared counter would make two such tests
+    /// corrupt each other's expectations.
+    #[cfg(test)]
+    status_parse_count: std::sync::atomic::AtomicUsize,
+    /// Status files already observed in a terminal state.
+    ///
+    /// A task id is unique to one task and a finished task never runs again, so
+    /// a file that once read `Completed`/`Failed`/`Cancelled`/`TimedOut` can be
+    /// skipped by later "what is running" scans without any syscall at all.
+    /// This is what keeps those scans proportional to the number of *running*
+    /// tasks instead of to the size of the archive.
+    settled_status_files: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 impl BackgroundTaskManager {
@@ -62,6 +94,10 @@ impl BackgroundTaskManager {
             output_dir,
             foreign_running_cache: std::sync::Mutex::new(None),
             any_running_cache: std::sync::Mutex::new(None),
+            status_parse_cache: std::sync::Mutex::new(HashMap::new()),
+            settled_status_files: std::sync::Mutex::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            status_parse_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1526,12 +1562,14 @@ impl BackgroundTaskManager {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            if self.status_file_is_settled(&path) {
+                continue;
+            }
+            let Some(status) = self.read_status_cached(&path, entry.metadata().ok().as_ref())
+            else {
                 continue;
             };
-            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
-                continue;
-            };
+            self.note_status_settled(&path, &status);
             if status.session_id != session_id || status.status != BackgroundTaskStatus::Running {
                 continue;
             }
@@ -1549,6 +1587,90 @@ impl BackgroundTaskManager {
         }
 
         matches
+    }
+
+    /// Number of status files this manager has read and parsed from disk.
+    #[cfg(test)]
+    pub(crate) fn status_parse_count_for_tests(&self) -> usize {
+        self.status_parse_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_status_parse_count_for_tests(&self) {
+        self.status_parse_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this status file was already seen in a terminal state, and can
+    /// therefore be skipped by a "what is running" scan.
+    fn status_file_is_settled(&self, path: &std::path::Path) -> bool {
+        self.settled_status_files
+            .lock()
+            .map(|settled| settled.contains(path))
+            .unwrap_or(false)
+    }
+
+    /// Record a status file as settled once its parsed state is terminal.
+    fn note_status_settled(&self, path: &std::path::Path, status: &TaskStatusFile) {
+        if status.status == BackgroundTaskStatus::Running {
+            return;
+        }
+        if let Ok(mut settled) = self.settled_status_files.lock() {
+            settled.insert(path.to_path_buf());
+        }
+        // A settled file is never parsed again, so its memo entry is dead
+        // weight; dropping it keeps the two caches from both growing with the
+        // archive.
+        if let Ok(mut cache) = self.status_parse_cache.lock() {
+            cache.remove(path);
+        }
+    }
+
+    /// Read and parse a status file, reusing the previous parse while the file
+    /// on disk is unchanged.
+    ///
+    /// `metadata` is the directory entry's metadata when the caller already has
+    /// it, which avoids a second `stat` during a scan.
+    fn read_status_cached(
+        &self,
+        path: &std::path::Path,
+        metadata: Option<&std::fs::Metadata>,
+    ) -> Option<TaskStatusFile> {
+        let stamp: Option<StatusFileStamp> = metadata
+            .map(|metadata| (metadata.modified().ok(), metadata.len()))
+            .or_else(|| {
+                std::fs::metadata(path)
+                    .ok()
+                    .map(|metadata| (metadata.modified().ok(), metadata.len()))
+            });
+
+        // Without a stamp there is nothing to key the memo on, so fall back to
+        // a plain read rather than risk serving a stale parse forever.
+        let Some(stamp) = stamp else {
+            let content = std::fs::read_to_string(path).ok()?;
+            #[cfg(test)]
+            self.status_parse_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return serde_json::from_str::<TaskStatusFile>(&content).ok();
+        };
+
+        if let Ok(cache) = self.status_parse_cache.lock()
+            && let Some((cached_stamp, status)) = cache.get(path)
+            && *cached_stamp == stamp
+        {
+            return Some(status.clone());
+        }
+
+        let content = std::fs::read_to_string(path).ok()?;
+        #[cfg(test)]
+        self.status_parse_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let status = serde_json::from_str::<TaskStatusFile>(&content).ok()?;
+        if let Ok(mut cache) = self.status_parse_cache.lock() {
+            cache.insert(path.to_path_buf(), (stamp, status.clone()));
+        }
+        Some(status)
     }
 
     /// Best-effort synchronous lookup of detached tasks that are still running
@@ -1673,6 +1795,33 @@ impl BackgroundTaskManager {
         std::fs::read_to_string(self.output_path_for(task_id)).ok()
     }
 
+    /// Read at most the last `max_bytes` of a task's captured output.
+    ///
+    /// The panel shows a fixed number of trailing lines, so reading the whole
+    /// file to throw nearly all of it away puts the size of a build log on the
+    /// render path. Seeking to the tail keeps the cost fixed no matter how much
+    /// the task has printed.
+    ///
+    /// The returned text may begin mid-line, since the cut is by bytes; callers
+    /// take whole trailing lines and so drop that fragment. Reading a little
+    /// more than one line's worth is what makes that safe.
+    pub fn output_tail_sync(&self, task_id: &str, max_bytes: u64) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let path = self.output_path_for(task_id);
+        let mut file = std::fs::File::open(&path).ok()?;
+        let len = file.metadata().ok()?.len();
+        if len > max_bytes {
+            file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+        }
+        let mut buffer = Vec::with_capacity(max_bytes.min(len) as usize);
+        file.read_to_end(&mut buffer).ok()?;
+        // Output is captured process bytes, so it can split a UTF-8 sequence at
+        // either edge; lossy conversion keeps a partial glyph from discarding
+        // the whole tail.
+        Some(String::from_utf8_lossy(&buffer).into_owned())
+    }
+
     /// Whether a status file that claims to be `Running` still has a live
     /// owner, so callers can distinguish real work from a stale phantom.
     pub fn task_looks_live(&self, status: &TaskStatusFile) -> bool {
@@ -1733,12 +1882,14 @@ impl BackgroundTaskManager {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            if self.status_file_is_settled(&path) {
+                continue;
+            }
+            let Some(status) = self.read_status_cached(&path, entry.metadata().ok().as_ref())
+            else {
                 continue;
             };
-            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
-                continue;
-            };
+            self.note_status_settled(&path, &status);
             if self.task_looks_live(&status) {
                 return true;
             }

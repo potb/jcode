@@ -857,6 +857,18 @@ pub struct App {
     /// Monotonic frame counter bounding the lifetime of
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
+    /// Per-frame memo for `info_widget_data()`, paired with the epoch below.
+    ///
+    /// One frame reads this ~10 times (input-block width and height, the usage
+    /// footer's height and draw, the left/right session-fact block, overscroll
+    /// status, and the widget itself) and every read rebuilt the whole struct:
+    /// todos, memory, git, swarm and background snapshots. The value cannot
+    /// change *within* a frame, so it is built once and reused.
+    info_widget_data_cache: RefCell<Option<crate::tui::info_widget::InfoWidgetData>>,
+    /// Whether a frame is currently being composed, which is the only window in
+    /// which `info_widget_data_cache` may be served. Outside a frame the call is
+    /// asking whether state changed, so it always gathers fresh data.
+    info_widget_frame_active: std::cell::Cell<bool>,
     cursor_pos: usize,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming

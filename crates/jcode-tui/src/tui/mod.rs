@@ -315,6 +315,18 @@ pub trait TuiState {
     /// the list also depends on mutable session state. Defaults to a no-op for
     /// impls that do not cache.
     fn advance_command_suggestions_epoch(&self) {}
+    /// Open the window in which the `info_widget_data()` memo is valid, and
+    /// invalidate whatever it held. Called at the top of every rendered frame.
+    ///
+    /// The memo is deliberately scoped to a frame rather than to a duration:
+    /// callers outside `draw` (the redraw scheduler, `has_notification()`) ask
+    /// this question precisely to find out whether state has changed, so they
+    /// must always see freshly gathered data. Defaults to a no-op for impls that
+    /// do not cache.
+    fn begin_info_widget_frame(&self) {}
+
+    /// Close that window, so reads after the frame gather fresh data again.
+    fn end_info_widget_frame(&self) {}
     fn command_suggestion_selected(&self) -> usize {
         0
     }

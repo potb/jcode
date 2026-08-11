@@ -2619,6 +2619,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Suggestions are read many times while composing one frame. Bump the
     // epoch here so the memo is scoped to exactly this frame.
     app.advance_command_suggestions_epoch();
+    // Same reasoning for the info-widget snapshot: scope its memo to exactly
+    // this frame.
+    let _info_widget_memo = InfoWidgetMemoFrame::enter(app);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
@@ -2636,6 +2639,30 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // deletion commands on any completed frame so terminal-side pixel storage
     // is reclaimed even when no image widget renders again.
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
+}
+
+/// Bounds the `info_widget_data()` memo to the frame being drawn.
+///
+/// The memo must not outlive `draw`: `has_notification()` and the redraw
+/// scheduler call `info_widget_data()` *between* frames to decide whether a
+/// repaint is needed, and serving those a snapshot from the last frame would let
+/// a new notification go unnoticed until something else forced a redraw.
+/// Advancing the epoch on the way out (including while unwinding, since `draw`
+/// catches panics to render a recovery frame) keeps every off-frame reader on
+/// freshly gathered data.
+struct InfoWidgetMemoFrame<'a>(&'a dyn TuiState);
+
+impl<'a> InfoWidgetMemoFrame<'a> {
+    fn enter(app: &'a dyn TuiState) -> Self {
+        app.begin_info_widget_frame();
+        Self(app)
+    }
+}
+
+impl Drop for InfoWidgetMemoFrame<'_> {
+    fn drop(&mut self) {
+        self.0.end_info_widget_frame();
+    }
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());

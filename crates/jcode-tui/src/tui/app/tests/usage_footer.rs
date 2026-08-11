@@ -415,3 +415,76 @@ fn memory_info_is_not_gathered_when_the_memory_widget_is_hidden() {
         "memory info must come back once the widget is visible again"
     );
 }
+
+/// One frame asks for `info_widget_data()` roughly ten times: the input block's
+/// width and height, the usage footer's height and its draw, the session-fact
+/// block, the overscroll status row, and the widget itself. Each build gathers
+/// todos, the memory sidecar label, git info and the background-task snapshot,
+/// and none of that can change while a single frame is being composed.
+///
+/// Counting builds rather than timing the frame keeps this exact and
+/// machine-independent (see `JCODE_TEST_PERF_ASSERTIONS`, refs #592): a
+/// scheduler hiccup cannot make it flake, and the failure message names the
+/// regression instead of a millisecond budget.
+#[test]
+fn one_frame_builds_the_info_widget_snapshot_once() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinUsageEnvGuard::enable();
+    let app = usage_footer_test_app();
+
+    let backend = ratatui::backend::TestBackend::new(100, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+    crate::tui::app::tui_state::reset_info_widget_data_builds_for_tests();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .expect("full draw should not panic");
+    let builds = crate::tui::app::tui_state::info_widget_data_builds_for_tests();
+
+    assert_eq!(
+        builds, 1,
+        "one frame must gather the info-widget snapshot exactly once"
+    );
+}
+
+/// The other half of the contract: the memo must not outlive the frame. The
+/// redraw scheduler calls `info_widget_data()` *between* frames (through
+/// `has_notification()`) to decide whether anything needs repainting, so a memo
+/// that survived the frame would answer that question with stale data and a new
+/// notification could go unpainted until something else forced a redraw.
+#[test]
+fn a_later_frame_gathers_the_info_widget_snapshot_again() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinUsageEnvGuard::enable();
+    let app = usage_footer_test_app();
+
+    let backend = ratatui::backend::TestBackend::new(100, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+    crate::tui::app::tui_state::reset_info_widget_data_builds_for_tests();
+    for _ in 0..3 {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .expect("full draw should not panic");
+    }
+    let builds = crate::tui::app::tui_state::info_widget_data_builds_for_tests();
+
+    assert_eq!(
+        builds, 3,
+        "each frame must gather its own snapshot: one per frame, never one for all time"
+    );
+
+    // And readers outside `draw` are never served a memo at all: each call
+    // gathers fresh data, because off-frame callers are asking whether state has
+    // changed since the last frame.
+    crate::tui::app::tui_state::reset_info_widget_data_builds_for_tests();
+    let _ = crate::tui::TuiState::info_widget_data(&app);
+    let _ = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        crate::tui::app::tui_state::info_widget_data_builds_for_tests(),
+        2,
+        "off-frame readers must each gather fresh data, never share a memo"
+    );
+}

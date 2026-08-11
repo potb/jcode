@@ -58,7 +58,424 @@ struct WidgetRouteInfo {
     is_remote: bool,
 }
 
+/// Counts full `InfoWidgetData` builds.
+///
+/// The per-frame memo is only observable by counting the work it removes: a memo
+/// that never hit would still render identical frames, just slowly. Exact count
+/// rather than a timing budget, per this repo's `JCODE_TEST_PERF_ASSERTIONS`
+/// convention. A process-global counter is safe here because the test that reads
+/// it drives one app by hand rather than sharing state with other tests.
+#[cfg(test)]
+static INFO_WIDGET_DATA_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn info_widget_data_builds_for_tests() -> usize {
+    INFO_WIDGET_DATA_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_info_widget_data_builds_for_tests() {
+    INFO_WIDGET_DATA_BUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl App {
+    /// Uncached body of [`crate::tui::TuiState::info_widget_data`].
+    pub(crate) fn info_widget_data_uncached(&self) -> crate::tui::info_widget::InfoWidgetData {
+        #[cfg(test)]
+        INFO_WIDGET_DATA_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let session_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+
+        let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
+        let (todos, todo_goals) =
+            if !crate::tui::info_widget::todo_widget_visible() && !todos_are_swarm_plan {
+                // Ask the widget mode, not `pin_todos` alone. Under `auto` the
+                // pinned band is the single source of truth and the side copy
+                // stands down, but `off` hides the side list regardless, and
+                // `on` is an explicit request to keep both, which a bare
+                // `pin_todos` check silently overrode.
+                (Vec::new(), Vec::new())
+            } else if todos_are_swarm_plan {
+                (
+                    crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
+                    Vec::new(),
+                )
+            } else {
+                gather_todos_and_goals_for_session(session_id)
+            };
+
+        let context_snapshot = self.context_snapshot();
+        let context_info = if let Some(context_info) = context_snapshot.info.clone() {
+            (context_info.total_chars > 0).then_some(context_info)
+        } else {
+            None
+        };
+
+        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
+        let (
+            model,
+            reasoning_effort,
+            service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
+        ) = if uses_remote_widget_metadata {
+            (
+                self.remote_provider_model.clone(),
+                self.remote_reasoning_effort.clone(),
+                self.remote_service_tier.clone(),
+                None,
+                None,
+            )
+        } else {
+            (
+                Some(self.provider.model()),
+                self.provider.reasoning_effort(),
+                self.provider.service_tier(),
+                self.provider.native_compaction_mode(),
+                self.provider.native_compaction_threshold_tokens(),
+            )
+        };
+
+        let (session_count, client_count) = if self.is_remote {
+            (Some(self.remote_sessions.len()), None)
+        } else {
+            (None, None)
+        };
+        let session_name = self.session_display_name().map(|name| {
+            if let Some(ref srv) = self.remote_server_short_name {
+                format!("{} {}", srv, name)
+            } else {
+                name
+            }
+        });
+
+        // `display.memory_widget = false` hides every consumer of this data
+        // (the compact/expanded memory sections and the overview line all gate
+        // on `memory_widget_visible()`), so gathering it would be pure waste on
+        // the render path: counts come from a background refresh, but the live
+        // activity read and the sidecar-backend probe happen inline, several
+        // times per frame. Skip the whole chain when nothing can display it.
+        let memory_info = if crate::tui::info_widget::memory_widget_visible() {
+            gather_memory_info(self.memory_enabled, self.session.working_dir.clone())
+        } else {
+            None
+        };
+
+        // Gather swarm info
+        let swarm_info = if self.swarm_enabled {
+            let subagent_status = self.subagent_status.clone();
+            let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
+            let (session_count, client_count, session_names, has_activity) = if self.is_remote {
+                // The compact swarm widget renders at most three rows. Keep the
+                // complete snapshot in `remote_swarm_members`, but do not clone
+                // every historical member (including large detail/todo payloads)
+                // on every frame just to discard almost all of them below.
+                let has_members = !self.remote_swarm_members.is_empty();
+                let session_names = if has_members {
+                    Vec::new()
+                } else {
+                    self.remote_sessions.iter().take(3).cloned().collect()
+                };
+                members = self.remote_swarm_members.iter().take(3).cloned().collect();
+                let session_count = if has_members {
+                    self.remote_swarm_members.len()
+                } else {
+                    self.remote_sessions.len()
+                };
+                let has_activity = self
+                    .remote_swarm_members
+                    .iter()
+                    .any(|m| m.status != "ready" || m.detail.is_some());
+                (
+                    session_count,
+                    self.remote_client_count,
+                    session_names,
+                    has_activity,
+                )
+            } else {
+                let (status, detail) = match &self.status {
+                    ProcessingStatus::Idle => ("ready".to_string(), None),
+                    ProcessingStatus::Sending => {
+                        ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Connecting(phase) => {
+                        ("running".to_string(), Some(phase.to_string()))
+                    }
+                    ProcessingStatus::Thinking(_) => ("thinking".to_string(), None),
+                    ProcessingStatus::Streaming => {
+                        ("running".to_string(), Some("streaming".to_string()))
+                    }
+                    ProcessingStatus::WaitingForNetwork { listener } => {
+                        ("waiting_network".to_string(), Some(listener.clone()))
+                    }
+                    ProcessingStatus::RunningTool(name) => {
+                        ("running".to_string(), Some(format!("tool: {}", name)))
+                    }
+                };
+                let detail = subagent_status.clone().or(detail);
+                let has_activity = status != "ready" || detail.is_some();
+                if has_activity {
+                    members.push(crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status,
+                        detail,
+                        task_label: None,
+                        role: None,
+                        is_headless: Some(false),
+                        live_attachments: Some(1),
+                        status_age_secs: Some(0),
+                        output_tail: None,
+                        report_back_to_session_id: None,
+                        todo_progress: None,
+                        todo_items: Vec::new(),
+                        runtime: crate::protocol::SwarmMemberRuntime::default(),
+                    });
+                }
+                (
+                    1,
+                    None,
+                    vec![self.session.display_name().to_string()],
+                    has_activity,
+                )
+            };
+
+            // Dock data: the agents this session actually manages (spawn
+            // subtree), the shared panel selection/focus, and plan progress.
+            // This is what the SwarmStatus widget renders. Computed outside
+            // the activity gate: managing agents is itself "interesting".
+            let managed_members = self.inline_swarm_members();
+
+            // Only show if there's something interesting
+            if has_activity
+                || session_count > 1
+                || client_count.is_some()
+                || !managed_members.is_empty()
+            {
+                let plan_progress = if self.swarm_plan_items.is_empty() {
+                    None
+                } else {
+                    let total = self.swarm_plan_items.len() as u32;
+                    let done = self
+                        .swarm_plan_items
+                        .iter()
+                        .filter(|item| matches!(item.status.as_str(), "completed" | "done"))
+                        .count() as u32;
+                    let running = self
+                        .swarm_plan_items
+                        .iter()
+                        .filter(|item| matches!(item.status.as_str(), "running" | "running_stale"))
+                        .count() as u32;
+                    Some((done, running, total))
+                };
+                Some(crate::tui::info_widget::SwarmInfo {
+                    session_count,
+                    subagent_status,
+                    client_count,
+                    session_names,
+                    members,
+                    selected: if managed_members.is_empty() {
+                        0
+                    } else {
+                        self.swarm_panel_selected
+                            .min(managed_members.len().saturating_sub(1))
+                    },
+                    focused: self.swarm_panel_focused,
+                    plan_progress,
+                    spinner_frame: (self.animation_elapsed()
+                        * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
+                        as usize,
+                    managed_members,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Gather background task info.
+        //
+        // Tools usually run in the server/daemon process, not this client, so
+        // ask for a session-scoped snapshot: it merges this process's tasks
+        // with running status files owned by the server for the same session.
+        let background_info = {
+            let bg_manager = crate::background::global();
+            let background_session_id = if self.is_remote {
+                self.remote_session_id.as_deref()
+            } else {
+                Some(self.session.id.as_str())
+            };
+            let rows = match background_session_id {
+                Some(session_id) => bg_manager.running_rows_for_session(session_id),
+                None => bg_manager.local_running_rows(),
+            };
+            let running_count = rows.len();
+            let running_tasks: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
+            let running_task_ids: Vec<String> =
+                rows.iter().map(|row| row.task_id.clone()).collect();
+            let progress = rows.iter().find(|row| row.detail.is_some()).cloned();
+
+            if running_count > 0 {
+                Some(crate::tui::info_widget::BackgroundInfo {
+                    running_count,
+                    running_tasks,
+                    running_task_ids,
+                    progress_summary: progress.as_ref().map(|progress| progress.label.clone()),
+                    progress_detail: progress
+                        .as_ref()
+                        .and_then(|progress| progress.detail.clone()),
+                    memory_agent_active: false,
+                    memory_agent_turns: 0,
+                })
+            } else {
+                None
+            }
+        };
+
+        let route = self.widget_route_info(model.as_deref());
+        let auth_method = self.widget_auth_method(route);
+        let usage_info = self.widget_usage_info(route, auth_method);
+
+        let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
+            self.compute_streaming_tps()
+        } else {
+            None
+        };
+
+        let cache_hit_info =
+            (self.token_accounting.total_cache_reported_input_tokens > 0).then(|| {
+                crate::tui::info_widget::CacheHitInfo {
+                    reported_input_tokens: self.token_accounting.total_cache_reported_input_tokens,
+                    read_tokens: self.token_accounting.total_cache_read_tokens,
+                    creation_tokens: self.token_accounting.total_cache_creation_tokens,
+                    optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
+                    last_reported_input_tokens: self
+                        .token_accounting
+                        .last_cache_reported_input_tokens,
+                    last_read_tokens: self.token_accounting.last_cache_read_tokens,
+                    last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
+                    last_optimal_input_tokens: self
+                        .token_accounting
+                        .last_cache_optimal_input_tokens,
+                    miss_attributions: self
+                        .kv_cache
+                        .kv_cache_miss_samples
+                        .iter()
+                        .rev()
+                        .map(|sample| crate::tui::info_widget::CacheMissAttribution {
+                            turn_number: sample.turn_number,
+                            call_index: sample.call_index,
+                            missed_tokens: sample.missed_tokens,
+                            reason: sample.reason.label().to_string(),
+                        })
+                        .collect(),
+                }
+            });
+
+        // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
+        let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
+            crate::tui::mermaid::get_active_diagrams()
+        } else {
+            Vec::new()
+        };
+
+        let workspace_rows = if self.workspace_client.is_enabled() {
+            let session_id = if self.is_remote {
+                self.remote_session_id.as_deref()
+            } else {
+                Some(self.session.id.as_str())
+            };
+            self.workspace_client
+                .visible_rows(5, session_id, self.is_processing)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
+
+        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
+            let compaction = self.registry.compaction();
+            compaction.try_read().ok().and_then(|manager| {
+                let compacted_messages = manager.compacted_count();
+                let summary_chars = manager.summary_chars();
+                let is_compacting = manager.is_compacting();
+                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
+                    crate::tui::info_widget::CompactionInfo {
+                        is_compacting,
+                        compacted_messages,
+                        active_messages: manager.active_messages_count(),
+                        summary_chars,
+                        mode: manager.mode().as_str().to_string(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        crate::tui::info_widget::InfoWidgetData {
+            todos,
+            todo_goals,
+            todos_are_swarm_plan,
+            context_info,
+            context_info_stale: !context_snapshot.fresh,
+            queue_mode: Some(self.queue_mode),
+            context_limit: Some(self.context_limit as usize),
+            model,
+            reasoning_effort,
+            service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
+            session_count,
+            session_name,
+            working_dir: self.session.working_dir.clone(),
+            client_count,
+            memory_info,
+            swarm_info,
+            background_info,
+            usage_info,
+            // The pinned block owns these numbers when enabled, so the margin
+            // and overview copies stand down.
+            usage_pinned: crate::config::config().display.pin_usage,
+            todo_widget_yields_to_band: !crate::tui::info_widget::todo_widget_visible(),
+            todo_widget_mode_off: crate::config::config().display.todo_widget
+                == jcode_config_types::TodoWidgetMode::Off,
+            tokens_per_second,
+            provider_name: if uses_remote_widget_metadata {
+                self.remote_provider_name
+                    .clone()
+                    .or_else(|| Some(self.provider.display_name()))
+            } else {
+                Some(self.provider.display_name())
+            },
+            auth_method,
+            upstream_provider: self.upstream_provider.clone(),
+            connection_type: self.connection_type.clone(),
+            diagrams,
+            workspace_rows,
+            workspace_animation_tick,
+            ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
+            observed_context_tokens: self.current_stream_context_tokens(),
+            cache_hit_info,
+            compaction_info,
+            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
+                let compaction = self.registry.compaction();
+                compaction
+                    .try_read()
+                    .map(|m| m.is_compacting())
+                    .unwrap_or(false)
+            } else {
+                false
+            },
+            git_info: gather_git_info(),
+        }
+    }
+
     fn sanitize_remote_model_hint(model: Option<String>) -> Option<String> {
         model
             .map(|model| model.trim().to_string())
@@ -779,6 +1196,16 @@ impl crate::tui::TuiState for App {
         App::advance_command_suggestions_epoch(self)
     }
 
+    fn begin_info_widget_frame(&self) {
+        self.info_widget_data_cache.borrow_mut().take();
+        self.info_widget_frame_active.set(true);
+    }
+
+    fn end_info_widget_frame(&self) {
+        self.info_widget_frame_active.set(false);
+        self.info_widget_data_cache.borrow_mut().take();
+    }
+
     fn command_suggestion_selected(&self) -> usize {
         self.command_suggestion_selected
     }
@@ -1277,396 +1704,28 @@ impl crate::tui::TuiState for App {
     }
 
     fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
-        let session_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-
-        let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
-        let (todos, todo_goals) =
-            if !crate::tui::info_widget::todo_widget_visible() && !todos_are_swarm_plan {
-                // Ask the widget mode, not `pin_todos` alone. Under `auto` the
-                // pinned band is the single source of truth and the side copy
-                // stands down, but `off` hides the side list regardless, and
-                // `on` is an explicit request to keep both, which a bare
-                // `pin_todos` check silently overrode.
-                (Vec::new(), Vec::new())
-            } else if todos_are_swarm_plan {
-                (
-                    crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
-                    Vec::new(),
-                )
-            } else {
-                gather_todos_and_goals_for_session(session_id)
-            };
-
-        let context_snapshot = self.context_snapshot();
-        let context_info = if let Some(context_info) = context_snapshot.info.clone() {
-            (context_info.total_chars > 0).then_some(context_info)
-        } else {
-            None
-        };
-
-        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
-        let (
-            model,
-            reasoning_effort,
-            service_tier,
-            native_compaction_mode,
-            native_compaction_threshold_tokens,
-        ) = if uses_remote_widget_metadata {
-            (
-                self.remote_provider_model.clone(),
-                self.remote_reasoning_effort.clone(),
-                self.remote_service_tier.clone(),
-                None,
-                None,
-            )
-        } else {
-            (
-                Some(self.provider.model()),
-                self.provider.reasoning_effort(),
-                self.provider.service_tier(),
-                self.provider.native_compaction_mode(),
-                self.provider.native_compaction_threshold_tokens(),
-            )
-        };
-
-        let (session_count, client_count) = if self.is_remote {
-            (Some(self.remote_sessions.len()), None)
-        } else {
-            (None, None)
-        };
-        let session_name = self.session_display_name().map(|name| {
-            if let Some(ref srv) = self.remote_server_short_name {
-                format!("{} {}", srv, name)
-            } else {
-                name
-            }
-        });
-
-        // `display.memory_widget = false` hides every consumer of this data
-        // (the compact/expanded memory sections and the overview line all gate
-        // on `memory_widget_visible()`), so gathering it would be pure waste on
-        // the render path: counts come from a background refresh, but the live
-        // activity read and the sidecar-backend probe happen inline, several
-        // times per frame. Skip the whole chain when nothing can display it.
-        let memory_info = if crate::tui::info_widget::memory_widget_visible() {
-            gather_memory_info(self.memory_enabled, self.session.working_dir.clone())
-        } else {
-            None
-        };
-
-        // Gather swarm info
-        let swarm_info = if self.swarm_enabled {
-            let subagent_status = self.subagent_status.clone();
-            let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
-            let (session_count, client_count, session_names, has_activity) = if self.is_remote {
-                // The compact swarm widget renders at most three rows. Keep the
-                // complete snapshot in `remote_swarm_members`, but do not clone
-                // every historical member (including large detail/todo payloads)
-                // on every frame just to discard almost all of them below.
-                let has_members = !self.remote_swarm_members.is_empty();
-                let session_names = if has_members {
-                    Vec::new()
-                } else {
-                    self.remote_sessions.iter().take(3).cloned().collect()
-                };
-                members = self.remote_swarm_members.iter().take(3).cloned().collect();
-                let session_count = if has_members {
-                    self.remote_swarm_members.len()
-                } else {
-                    self.remote_sessions.len()
-                };
-                let has_activity = self
-                    .remote_swarm_members
-                    .iter()
-                    .any(|m| m.status != "ready" || m.detail.is_some());
-                (
-                    session_count,
-                    self.remote_client_count,
-                    session_names,
-                    has_activity,
-                )
-            } else {
-                let (status, detail) = match &self.status {
-                    ProcessingStatus::Idle => ("ready".to_string(), None),
-                    ProcessingStatus::Sending => {
-                        ("running".to_string(), Some("sending".to_string()))
-                    }
-                    ProcessingStatus::Connecting(phase) => {
-                        ("running".to_string(), Some(phase.to_string()))
-                    }
-                    ProcessingStatus::Thinking(_) => ("thinking".to_string(), None),
-                    ProcessingStatus::Streaming => {
-                        ("running".to_string(), Some("streaming".to_string()))
-                    }
-                    ProcessingStatus::WaitingForNetwork { listener } => {
-                        ("waiting_network".to_string(), Some(listener.clone()))
-                    }
-                    ProcessingStatus::RunningTool(name) => {
-                        ("running".to_string(), Some(format!("tool: {}", name)))
-                    }
-                };
-                let detail = subagent_status.clone().or(detail);
-                let has_activity = status != "ready" || detail.is_some();
-                if has_activity {
-                    members.push(crate::protocol::SwarmMemberStatus {
-                        session_id: self.session.id.clone(),
-                        friendly_name: Some(self.session.display_name().to_string()),
-                        status,
-                        detail,
-                        task_label: None,
-                        role: None,
-                        is_headless: Some(false),
-                        live_attachments: Some(1),
-                        status_age_secs: Some(0),
-                        output_tail: None,
-                        report_back_to_session_id: None,
-                        todo_progress: None,
-                        todo_items: Vec::new(),
-                        runtime: crate::protocol::SwarmMemberRuntime::default(),
-                    });
-                }
-                (
-                    1,
-                    None,
-                    vec![self.session.display_name().to_string()],
-                    has_activity,
-                )
-            };
-
-            // Dock data: the agents this session actually manages (spawn
-            // subtree), the shared panel selection/focus, and plan progress.
-            // This is what the SwarmStatus widget renders. Computed outside
-            // the activity gate: managing agents is itself "interesting".
-            let managed_members = self.inline_swarm_members();
-
-            // Only show if there's something interesting
-            if has_activity
-                || session_count > 1
-                || client_count.is_some()
-                || !managed_members.is_empty()
-            {
-                let plan_progress = if self.swarm_plan_items.is_empty() {
-                    None
-                } else {
-                    let total = self.swarm_plan_items.len() as u32;
-                    let done = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "completed" | "done"))
-                        .count() as u32;
-                    let running = self
-                        .swarm_plan_items
-                        .iter()
-                        .filter(|item| matches!(item.status.as_str(), "running" | "running_stale"))
-                        .count() as u32;
-                    Some((done, running, total))
-                };
-                Some(crate::tui::info_widget::SwarmInfo {
-                    session_count,
-                    subagent_status,
-                    client_count,
-                    session_names,
-                    members,
-                    selected: if managed_members.is_empty() {
-                        0
-                    } else {
-                        self.swarm_panel_selected
-                            .min(managed_members.len().saturating_sub(1))
-                    },
-                    focused: self.swarm_panel_focused,
-                    plan_progress,
-                    spinner_frame: (self.animation_elapsed()
-                        * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
-                        as usize,
-                    managed_members,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Gather background task info.
+        // Composing one frame reads this ~10 times (input-block width and
+        // height, the usage footer's height and draw, the session-fact block,
+        // overscroll status, and the widget itself). Each rebuild gathers
+        // todos, the memory label, git info and the background-task snapshot,
+        // none of which can change *within* a frame, so build once and reuse.
         //
-        // Tools usually run in the server/daemon process, not this client, so
-        // ask for a session-scoped snapshot: it merges this process's tasks
-        // with running status files owned by the server for the same session.
-        let background_info = {
-            let bg_manager = crate::background::global();
-            let background_session_id = if self.is_remote {
-                self.remote_session_id.as_deref()
-            } else {
-                Some(self.session.id.as_str())
-            };
-            let rows = match background_session_id {
-                Some(session_id) => bg_manager.running_rows_for_session(session_id),
-                None => bg_manager.local_running_rows(),
-            };
-            let running_count = rows.len();
-            let running_tasks: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
-            let running_task_ids: Vec<String> =
-                rows.iter().map(|row| row.task_id.clone()).collect();
-            let progress = rows.iter().find(|row| row.detail.is_some()).cloned();
-
-            if running_count > 0 {
-                Some(crate::tui::info_widget::BackgroundInfo {
-                    running_count,
-                    running_tasks,
-                    running_task_ids,
-                    progress_summary: progress.as_ref().map(|progress| progress.label.clone()),
-                    progress_detail: progress
-                        .as_ref()
-                        .and_then(|progress| progress.detail.clone()),
-                    memory_agent_active: false,
-                    memory_agent_turns: 0,
-                })
-            } else {
-                None
-            }
-        };
-
-        let route = self.widget_route_info(model.as_deref());
-        let auth_method = self.widget_auth_method(route);
-        let usage_info = self.widget_usage_info(route, auth_method);
-
-        let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
-            self.compute_streaming_tps()
-        } else {
-            None
-        };
-
-        let cache_hit_info =
-            (self.token_accounting.total_cache_reported_input_tokens > 0).then(|| {
-                crate::tui::info_widget::CacheHitInfo {
-                    reported_input_tokens: self.token_accounting.total_cache_reported_input_tokens,
-                    read_tokens: self.token_accounting.total_cache_read_tokens,
-                    creation_tokens: self.token_accounting.total_cache_creation_tokens,
-                    optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
-                    last_reported_input_tokens: self
-                        .token_accounting
-                        .last_cache_reported_input_tokens,
-                    last_read_tokens: self.token_accounting.last_cache_read_tokens,
-                    last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
-                    last_optimal_input_tokens: self
-                        .token_accounting
-                        .last_cache_optimal_input_tokens,
-                    miss_attributions: self
-                        .kv_cache
-                        .kv_cache_miss_samples
-                        .iter()
-                        .rev()
-                        .map(|sample| crate::tui::info_widget::CacheMissAttribution {
-                            turn_number: sample.turn_number,
-                            call_index: sample.call_index,
-                            missed_tokens: sample.missed_tokens,
-                            reason: sample.reason.label().to_string(),
-                        })
-                        .collect(),
-                }
-            });
-
-        // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
-        let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
-            crate::tui::mermaid::get_active_diagrams()
-        } else {
-            Vec::new()
-        };
-
-        let workspace_rows = if self.workspace_client.is_enabled() {
-            let session_id = if self.is_remote {
-                self.remote_session_id.as_deref()
-            } else {
-                Some(self.session.id.as_str())
-            };
-            self.workspace_client
-                .visible_rows(5, session_id, self.is_processing)
-        } else {
-            Vec::new()
-        };
-
-        let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
-
-        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
-            let compaction = self.registry.compaction();
-            compaction.try_read().ok().and_then(|manager| {
-                let compacted_messages = manager.compacted_count();
-                let summary_chars = manager.summary_chars();
-                let is_compacting = manager.is_compacting();
-                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
-                    crate::tui::info_widget::CompactionInfo {
-                        is_compacting,
-                        compacted_messages,
-                        active_messages: manager.active_messages_count(),
-                        summary_chars,
-                        mode: manager.mode().as_str().to_string(),
-                    }
-                })
-            })
-        } else {
-            None
-        };
-
-        crate::tui::info_widget::InfoWidgetData {
-            todos,
-            todo_goals,
-            todos_are_swarm_plan,
-            context_info,
-            context_info_stale: !context_snapshot.fresh,
-            queue_mode: Some(self.queue_mode),
-            context_limit: Some(self.context_limit as usize),
-            model,
-            reasoning_effort,
-            service_tier,
-            native_compaction_mode,
-            native_compaction_threshold_tokens,
-            session_count,
-            session_name,
-            working_dir: self.session.working_dir.clone(),
-            client_count,
-            memory_info,
-            swarm_info,
-            background_info,
-            usage_info,
-            // The pinned block owns these numbers when enabled, so the margin
-            // and overview copies stand down.
-            usage_pinned: crate::config::config().display.pin_usage,
-            todo_widget_yields_to_band: !crate::tui::info_widget::todo_widget_visible(),
-            todo_widget_mode_off: crate::config::config().display.todo_widget
-                == jcode_config_types::TodoWidgetMode::Off,
-            tokens_per_second,
-            provider_name: if uses_remote_widget_metadata {
-                self.remote_provider_name
-                    .clone()
-                    .or_else(|| Some(self.provider.display_name()))
-            } else {
-                Some(self.provider.display_name())
-            },
-            auth_method,
-            upstream_provider: self.upstream_provider.clone(),
-            connection_type: self.connection_type.clone(),
-            diagrams,
-            workspace_rows,
-            workspace_animation_tick,
-            ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
-            observed_context_tokens: self.current_stream_context_tokens(),
-            cache_hit_info,
-            compaction_info,
-            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
-                let compaction = self.registry.compaction();
-                compaction
-                    .try_read()
-                    .map(|m| m.is_compacting())
-                    .unwrap_or(false)
-            } else {
-                false
-            },
-            git_info: gather_git_info(),
+        // Strictly *within* a frame: outside one, this is the question "has
+        // anything changed?" (the redraw scheduler, `has_notification()`, and
+        // tests that flip config and re-read), and answering that from a cache
+        // would defeat the point. So the memo only exists between
+        // `begin_info_widget_frame` and `end_info_widget_frame`.
+        if !self.info_widget_frame_active.get() {
+            return App::info_widget_data_uncached(self);
         }
+
+        if let Some(cached) = self.info_widget_data_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+
+        let data = App::info_widget_data_uncached(self);
+        *self.info_widget_data_cache.borrow_mut() = Some(data.clone());
+        data
     }
 
     fn workspace_mode_enabled(&self) -> bool {

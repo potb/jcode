@@ -19,12 +19,7 @@ pub struct ServerSpec {
 }
 
 fn builtin_catalog() -> Vec<ServerSpec> {
-    fn spec(
-        id: &str,
-        command: &[&str],
-        extensions: &[&str],
-        root_markers: &[&str],
-    ) -> ServerSpec {
+    fn spec(id: &str, command: &[&str], extensions: &[&str], root_markers: &[&str]) -> ServerSpec {
         ServerSpec {
             id: id.to_string(),
             command: command.iter().map(|s| s.to_string()).collect(),
@@ -147,18 +142,63 @@ pub fn spec_for_path<'a>(catalog: &'a [ServerSpec], path: &Path) -> Option<&'a S
 
 /// Walk up from `path` looking for the spec's root markers.
 /// Falls back to `fallback` (session cwd) when no marker is found.
+///
+/// Keep walking past the first match when a further-up marker declares itself
+/// the root of a multi-package workspace. Servers are keyed by this path, and
+/// a language server for one member of a workspace typically indexes the whole
+/// workspace anyway, so stopping at the nearest marker spawns one full-workspace
+/// server *per member crate touched*. On this repo (86 member crates) reading
+/// files from two crates started two rust-analyzers, 3 GB each.
 pub fn workspace_root(spec: &ServerSpec, path: &Path, fallback: &Path) -> PathBuf {
-    let start = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
     let mut dir = Some(start);
+    let mut nearest: Option<PathBuf> = None;
     while let Some(d) = dir {
         for marker in &spec.root_markers {
-            if d.join(marker).exists() {
-                return d.to_path_buf();
+            let candidate = d.join(marker);
+            if candidate.exists() {
+                if nearest.is_none() {
+                    nearest = Some(d.to_path_buf());
+                }
+                if marker_declares_workspace(&candidate) {
+                    return d.to_path_buf();
+                }
             }
         }
         dir = d.parent();
     }
-    fallback.to_path_buf()
+    nearest.unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// Whether this marker file declares a multi-package workspace, meaning
+/// everything below it should share one server.
+///
+/// Deliberately a cheap textual check rather than a manifest parse: the answer
+/// only picks a cache key, a wrong guess costs an extra server rather than
+/// correctness, and this runs while opening a file.
+fn marker_declares_workspace(marker: &Path) -> bool {
+    let name = marker.file_name().and_then(|name| name.to_str());
+    let Some(name) = name else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(marker) else {
+        return false;
+    };
+    match name {
+        // Cargo: `[workspace]`, including the virtual-manifest case where the
+        // root has no `[package]` at all.
+        "Cargo.toml" => contents
+            .lines()
+            .map(str::trim)
+            .any(|line| line == "[workspace]" || line.starts_with("[workspace.")),
+        // npm/yarn/pnpm workspaces put the member globs in the root manifest.
+        "package.json" => contents.contains("\"workspaces\""),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +245,87 @@ mod tests {
         std::fs::create_dir_all(tmp2.path().join("x")).unwrap();
         let found = workspace_root(rs, &tmp2.path().join("x/main.rs"), Path::new("/fb"));
         assert_eq!(found, PathBuf::from("/fb"));
+    }
+
+    /// Every member of a Cargo workspace must resolve to the *workspace* root.
+    ///
+    /// Servers are keyed by this path and rust-analyzer indexes the whole
+    /// workspace regardless of which member it was pointed at, so returning the
+    /// member directory spawns one 3 GB server per crate touched. This repo has
+    /// 86 members; two files from two crates was 6 GB of resident memory and the
+    /// single largest source of machine-wide lag.
+    #[test]
+    fn a_workspace_member_resolves_to_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/member-a/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/member-b/src")).unwrap();
+        // A virtual manifest: `[workspace]` and no `[package]`, as in this repo.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/member-a/Cargo.toml"), "[package]\nname = \"a\"\n")
+            .unwrap();
+        std::fs::write(root.join("crates/member-b/Cargo.toml"), "[package]\nname = \"b\"\n")
+            .unwrap();
+
+        let catalog = resolve_catalog(&LspConfig::default());
+        let rs = spec_for_path(&catalog, Path::new("f.rs")).unwrap();
+
+        let a = workspace_root(rs, &root.join("crates/member-a/src/lib.rs"), Path::new("/fb"));
+        let b = workspace_root(rs, &root.join("crates/member-b/src/lib.rs"), Path::new("/fb"));
+        assert_eq!(a, root, "a member must resolve to the workspace root");
+        assert_eq!(
+            a, b,
+            "two members must share one root, or they get one server each"
+        );
+    }
+
+    /// A standalone crate keeps its own root: it is not part of a workspace, so
+    /// hoisting it to some ancestor would put unrelated code in one server.
+    #[test]
+    fn a_standalone_crate_keeps_its_own_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("outer/inner/src")).unwrap();
+        // An ancestor manifest that is a plain package, not a workspace.
+        std::fs::write(root.join("outer/Cargo.toml"), "[package]\nname = \"outer\"\n").unwrap();
+        std::fs::write(
+            root.join("outer/inner/Cargo.toml"),
+            "[package]\nname = \"inner\"\n",
+        )
+        .unwrap();
+
+        let catalog = resolve_catalog(&LspConfig::default());
+        let rs = spec_for_path(&catalog, Path::new("f.rs")).unwrap();
+        let found = workspace_root(rs, &root.join("outer/inner/src/lib.rs"), Path::new("/fb"));
+        assert_eq!(
+            found,
+            root.join("outer/inner"),
+            "the nearest marker wins when no ancestor declares a workspace"
+        );
+    }
+
+    /// `[workspace.dependencies]` and friends also mark a workspace root, and a
+    /// root can be both a package and a workspace.
+    #[test]
+    fn a_workspace_table_subsection_also_marks_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"root\"\n\n[workspace.dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("sub/Cargo.toml"), "[package]\nname = \"sub\"\n").unwrap();
+
+        let catalog = resolve_catalog(&LspConfig::default());
+        let rs = spec_for_path(&catalog, Path::new("f.rs")).unwrap();
+        let found = workspace_root(rs, &root.join("sub/src/lib.rs"), Path::new("/fb"));
+        assert_eq!(found, root);
     }
 
     #[test]
