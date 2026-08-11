@@ -29,10 +29,15 @@ FORK_REMOTE="${JCODE_UPSTREAM_FORK_REMOTE:-origin}"
 # API instead of pushing to the base branch directly. Upstream is never
 # written to.
 PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
-# PR merge method. Must stay "merge": a squash would collapse the upstream
-# commits into one new commit, so upstream SHAs would no longer be ancestors of
-# the fork's base and every later merge would re-conflict on the same history.
-PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-merge}"
+# Pull request merge method. Squash, matching how every other pull request on
+# this fork lands, so the base branch stays one linear commit per change.
+#
+# A squash replaces the pushed commits with a single new one, so after each
+# publish the local base branch is content-identical to the remote but shares
+# no ancestry with it. That is the same shape as any other history rewrite, and
+# `reconcile_rewritten_base` resolves it on the next run by resetting onto the
+# remote once it confirms nothing was lost.
+PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-squash}"
 # Branch the pull request is opened from. Owned entirely by this job.
 PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # Keep GitHub Actions disabled on the fork.
@@ -132,6 +137,20 @@ ensure_fork_actions_disabled() {
   done
 }
 
+# --- notify through jcode's own channels -------------------------------------
+# `jcode notify` fans out to ntfy/email/desktop/chat exactly as ambient does, so
+# this script never needs to know how the user is reachable.
+notify() {
+  local title="$1" body="$2" priority="$3"
+  if ! "$JCODE_BIN" notify --no-update "$title" "$body" --priority "$priority" 2>/dev/null; then
+    # Older binaries lack `notify`. Falling back keeps the escalation path
+    # working, since an unreported "needs_user" merge is the whole failure mode
+    # this script exists to prevent.
+    "$JCODE_BIN" notify "$title" "$body" --priority "$priority" 2>/dev/null \
+      || log "WARNING: could not send notification: $title"
+  fi
+}
+
 # The fork's owner/repo slug, derived from the fork remote URL.
 fork_slug() {
   local url
@@ -139,13 +158,86 @@ fork_slug() {
   printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'
 }
 
+# Recover when the fork's base branch was rewritten on GitHub.
+#
+# The usual cause is deliberate history editing by the repo owner: commits
+# squashed, reordered, or dropped while the resulting code stays the same. That
+# leaves the remote branch with no ancestry relationship to the local one, which
+# is indistinguishable by SHA from "somebody pushed work that only exists on the
+# remote". Refusing outright was the old behavior and it wedged this job
+# permanently: every later run saw the same divergence and skipped publishing
+# forever, reporting nothing but a log line.
+#
+# So compare content, not ancestry. If the rewrite kept every local commit's
+# work (identical trees, or every local-only commit already present upstream by
+# patch id), the local branch is simply an outdated encoding of the same code
+# and is reset onto the remote. If local commits carry work the rewrite dropped,
+# that is real potential data loss: stop and tell the user, never reset over it.
+#
+# Only ever resets the local base branch, and only when the working tree is
+# clean and actually on that branch, because the user is often mid-edit here.
+reconcile_rewritten_base() {
+  local remote_sha="$1" local_sha="$2"
+  log "$FORK_REMOTE/$BASE ($remote_sha) is not a descendant of local $BASE ($local_sha); checking for a history rewrite"
+
+  local lost="" merged_tree remote_tree
+  if git -C "$REPO" diff --quiet "$local_sha" "$remote_sha" 2>/dev/null; then
+    log "the rewrite preserved the tree exactly; adopting $FORK_REMOTE/$BASE"
+  else
+    # Ask the only question that matters: does the local branch carry any
+    # content the rewrite does not already have? Merge the two in memory and
+    # compare the result against the remote. Same tree means local contributes
+    # nothing, so the rewrite kept all the work and only re-encoded it.
+    #
+    # Patch-id comparison (`git cherry`) is not enough here: squashing several
+    # commits into one produces a combined patch that matches none of the
+    # originals, so the most common rewrite of all would look like data loss.
+    remote_tree=$(git -C "$REPO" rev-parse "$remote_sha^{tree}" 2>/dev/null)
+    merged_tree=$(git -C "$REPO" merge-tree --write-tree "$remote_sha" "$local_sha" 2>/dev/null | head -1)
+    if [ -z "$merged_tree" ] || [ -z "$remote_tree" ]; then
+      # A conflicting merge means the two histories genuinely disagree about
+      # content, which is never a mechanical rewrite.
+      log "WARNING: local $BASE and $FORK_REMOTE/$BASE conflict; refusing to publish"
+      lost="  the two branches cannot be merged cleanly"
+    elif [ "$merged_tree" != "$remote_tree" ]; then
+      lost=$(git -C "$REPO" diff --stat "$remote_tree" "$merged_tree" 2>/dev/null | head -20 | sed 's/^/  /')
+    fi
+    if [ -n "$lost" ]; then
+      log "WARNING: local $BASE has work missing from $FORK_REMOTE/$BASE; refusing to publish"
+      log "$lost"
+      notify "Fork master was rewritten, local work would be lost" \
+"$FORK_REMOTE/$BASE was rewritten and no longer contains some commits on your local $BASE.
+
+Nothing was published or reset. Resolve it by hand, then this job resumes on its own.
+
+Inspect: git -C $REPO log --oneline $FORK_REMOTE/$BASE..$BASE
+Keep the remote's history and replay your work: git -C $REPO rebase --onto $FORK_REMOTE/$BASE $remote_sha $BASE" "high"
+      return 1
+    fi
+    log "every local change is already in $FORK_REMOTE/$BASE (squashed, reordered, or dropped as redundant); adopting it"
+  fi
+
+  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+    log "repo has uncommitted changes; not resetting $BASE onto $FORK_REMOTE/$BASE"
+    return 1
+  fi
+  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
+    log "repo is not on $BASE; not resetting onto $FORK_REMOTE/$BASE"
+    return 1
+  fi
+  if git -C "$REPO" reset --hard "$remote_sha" >/dev/null 2>&1; then
+    log "reset local $BASE onto the rewritten $FORK_REMOTE/$BASE ($remote_sha)"
+    return 0
+  fi
+  log "WARNING: could not reset $BASE onto $FORK_REMOTE/$BASE"
+  return 1
+}
+
 # Publish the fork's base branch when it is ahead of the fork remote.
 #
 # The base branch is protected by a repository ruleset requiring a pull
-# request, so this pushes the commits to a PR branch and merges the PR with the
-# "merge" method. A merge (never a squash) is required so upstream's commits
-# stay reachable with their original SHAs, which is what keeps the fork's
-# history aligned with upstream and future merges conflict-free.
+# request, so this pushes the commits to a PR branch, opens a pull request, and
+# squash-merges it (see PR_MERGE_METHOD).
 #
 # Only ever the fork: upstream is never a valid push target, since this job
 # maintains a fork rather than contributing to the parent project.
@@ -166,8 +258,12 @@ publish_fork_if_ahead() {
     return 0
   fi
   if [ -n "$remote_sha" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    log "WARNING: $FORK_REMOTE/$BASE has commits not in local $BASE; refusing to publish"
-    return 1
+    reconcile_rewritten_base "$remote_sha" "$local_sha" || return 1
+    local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
+    [ "$local_sha" != "$remote_sha" ] || {
+      log "fork $FORK_REMOTE/$BASE already matches local $BASE"
+      return 0
+    }
   fi
 
   ensure_fork_actions_disabled
@@ -195,8 +291,6 @@ publish_fork_if_ahead() {
       --title "Merge upstream into $BASE" \
       --body "Automated upstream merge from \`$UPSTREAM_REF\` ($UP_SHA).
 
-Merged (not squashed) so upstream commits keep their original SHAs and the fork's history stays aligned with upstream.
-
 Opened by scripts/upstream_merge_agent.sh." \
       2>&1 | tail -1)
     log "opened pull request: $pr"
@@ -208,7 +302,7 @@ Opened by scripts/upstream_merge_agent.sh." \
     ''|*[!0-9]*) log "WARNING: could not determine the pull request number"; return 1 ;;
   esac
 
-  # --merge, never --squash: see PR_MERGE_METHOD. Output is captured rather
+  # Merge method comes from PR_MERGE_METHOD. Output is captured rather
   # than piped, because a pipeline's status is the last command's and would
   # report every failed merge as a success.
   local merge_out
@@ -220,11 +314,20 @@ Opened by scripts/upstream_merge_agent.sh." \
     return 1
   fi
 
-  # The merge commit GitHub created is not in the local repo yet, and local
-  # $BASE is now behind by exactly that commit. Fast-forwarding keeps the next
-  # run's "is the fork ahead" check honest instead of re-publishing forever.
+  # The commit GitHub created is not in the local repo yet. Adopt it, so the
+  # next run's "is the fork ahead" check is honest instead of re-publishing
+  # forever. A squash shares no ancestry with what was pushed, so the
+  # fast-forward will not apply and the rewrite path takes over: it confirms the
+  # squash kept every local change, then resets onto it.
   git fetch --prune "$FORK_REMOTE" >/dev/null 2>&1 || true
-  sync_local_base_to_fork
+  local new_remote_sha
+  new_remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+  if [ -n "$new_remote_sha" ] \
+    && ! git -C "$REPO" merge-base --is-ancestor "$local_sha" "$new_remote_sha"; then
+    reconcile_rewritten_base "$new_remote_sha" "$local_sha"
+  else
+    sync_local_base_to_fork
+  fi
 }
 
 # Fast-forward the real repo's base branch onto the fork remote after a PR
@@ -358,20 +461,6 @@ else
     REASON="merge produced conflicts"
   fi
 fi
-# --- notify through jcode's own channels -------------------------------------
-# `jcode notify` fans out to ntfy/email/desktop/chat exactly as ambient does, so
-# this script never needs to know how the user is reachable.
-notify() {
-  local title="$1" body="$2" priority="$3"
-  if ! "$JCODE_BIN" notify --no-update "$title" "$body" --priority "$priority" 2>/dev/null; then
-    # Older binaries lack `notify`. Falling back keeps the escalation path
-    # working, since an unreported "needs_user" merge is the whole failure mode
-    # this script exists to prevent.
-    "$JCODE_BIN" notify "$title" "$body" --priority "$priority" 2>/dev/null \
-      || log "WARNING: could not send notification: $title"
-  fi
-}
-
 read_verdict() {
   [ -f "$VERDICT_FILE" ] || return 1
   python3 - "$VERDICT_FILE" <<'PY' 2>/dev/null

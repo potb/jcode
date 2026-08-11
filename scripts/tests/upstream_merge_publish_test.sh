@@ -2,8 +2,8 @@
 # Harness test for publish_fork_if_ahead: real git repos, stubbed `gh`.
 #
 # Verifies the pull-request publish path end to end without touching GitHub:
-# the PR branch is pushed, a PR is opened and merged with the `merge` method
-# (never squash), and the local base branch is fast-forwarded onto the result.
+# the PR branch is pushed, a PR is opened and squash-merged, and the local base
+# branch is adopted onto the squash even though it shares no ancestry with it.
 set -uo pipefail
 
 # Resolve before any cd: the rest of the test runs inside a temp repo.
@@ -27,17 +27,17 @@ case "$1 $2" in
   "pr create") echo "https://github.com/o/r/pull/7" ;;
   "pr merge")
     for a in "$@"; do
-      case "$a" in --squash) echo "SQUASH USED" >&2; exit 1 ;; esac
+      case "$a" in --merge) echo "MERGE USED" >&2; exit 1 ;; esac
     done
-    # A bare repo cannot `git merge`, so build the merge commit directly. This
-    # is exactly what GitHub's "merge" method produces: a two-parent commit
-    # keeping both sides' original SHAs.
+    # Reproduce GitHub's squash exactly: one brand-new single-parent commit
+    # carrying the PR branch's tree. It shares no ancestry with what was
+    # pushed, which is the whole point of this test.
     base=$(git --git-dir="$REMOTE" rev-parse master)
     head=$(git --git-dir="$REMOTE" rev-parse auto/upstream-merge-pr)
     tree=$(git --git-dir="$REMOTE" rev-parse "$head^{tree}")
-    merge=$(git --git-dir="$REMOTE" commit-tree "$tree" -p "$base" -p "$head" \
-      -m "Merge pull request #7") || { echo "merge failed" >&2; exit 1; }
-    git --git-dir="$REMOTE" update-ref refs/heads/master "$merge"
+    squash=$(git --git-dir="$REMOTE" commit-tree "$tree" -p "$base" \
+      -m "Merge upstream into master (#7)") || { echo "squash failed" >&2; exit 1; }
+    git --git-dir="$REMOTE" update-ref refs/heads/master "$squash"
     ;;
   "api "*) ;;
 esac
@@ -63,28 +63,30 @@ AHEAD=$(git rev-parse master)
 
 # --- load the script's functions without running it --------------------------
 FORK_REMOTE=origin UPSTREAM_REMOTE=upstream BASE=master
-PUSH_FORK=1 PR_MERGE_METHOD=merge PR_BRANCH=auto/upstream-merge-pr
+PUSH_FORK=1 PR_MERGE_METHOD=squash PR_BRANCH=auto/upstream-merge-pr
+REPO="$REPO"
 UPSTREAM_REF=upstream/master UP_SHA=deadbeef ENFORCE_ACTIONS_OFF=0
 log() { echo "[log] $*"; }
 ensure_fork_actions_disabled() { :; }
 eval "$(awk '/^fork_slug\(\) \{/,/^}/' "$SCRIPT")"
 eval "$(awk '/^publish_fork_if_ahead\(\) \{/,/^}/' "$SCRIPT")"
 eval "$(awk '/^sync_local_base_to_fork\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^reconcile_rewritten_base\(\) \{/,/^}/' "$SCRIPT")"
 
 fail() { echo "FAIL: $*"; exit 1; }
 
 publish_fork_if_ahead || fail "publish returned nonzero"
 
 grep -q "pr create" "$GH_CALLS" || fail "no pull request was created"
-grep -q -- "--merge" "$GH_CALLS" || fail "pull request was not merged with --merge"
-grep -q -- "--squash" "$GH_CALLS" && fail "squash must never be used"
+grep -q -- "--squash" "$GH_CALLS" || fail "pull request was not squash-merged"
 
 git --git-dir="$REMOTE" rev-parse auto/upstream-merge-pr >/dev/null 2>&1 \
   || fail "PR branch was not pushed to the fork"
-git --git-dir="$REMOTE" merge-base --is-ancestor "$AHEAD" master \
-  || fail "the fork's base does not contain the published commits"
+# A squash keeps the content, not the commits, so assert on the tree.
+[ "$(git --git-dir="$REMOTE" rev-parse "master^{tree}")" = "$(git -C "$REPO" rev-parse "$AHEAD^{tree}")" ] \
+  || fail "the fork's base does not contain the published work"
 [ "$(git -C "$REPO" rev-parse master)" = "$(git --git-dir="$REMOTE" rev-parse master)" ] \
-  || fail "local base was not fast-forwarded onto the fork's merge commit"
+  || fail "local base was not adopted onto the fork's squash commit"
 
 # A second run has nothing to publish and must stay silent.
 : > "$GH_CALLS"

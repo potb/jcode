@@ -65,19 +65,26 @@ On a verified merge it adopts the result and publishes it:
 
 6. Fast-forward your real `master` to the merge branch.
 7. Push those commits to `auto/upstream-merge-pr` on your fork, open a pull
-   request into the base branch, and merge it.
-8. Fast-forward your local base branch onto the fork's new merge commit.
+   request into the base branch, and squash-merge it.
+8. Adopt the fork's new commit as your local base branch.
 
 The publish step goes through a pull request because the fork's base branch is
-protected by a ruleset that forbids direct pushes. The pull request is merged
-with the **merge** method, never squash: squashing would rewrite upstream's
-commits into a single new commit, so upstream SHAs would stop being ancestors
-of your base branch and every later merge would replay the same conflicts.
+protected by a ruleset that forbids direct pushes. The pull request is squashed,
+matching how every other pull request on the fork lands, so the base branch
+stays one linear commit per change.
+
+A squash replaces the pushed commits with a new one, so afterwards your local
+base is content-identical to the remote but shares no ancestry with it. Step 8
+handles that through the same rewrite path described below: it confirms the
+squash kept every local change, then resets onto it. Set
+`JCODE_UPSTREAM_MERGE_METHOD=merge` if you would rather keep the individual
+commits.
 
 Both steps are guarded, because you are often mid-edit in this repo. It adopts
 only onto a clean tree, still on the expected branch, still at the commit the
 merge was built from; and it publishes only to the fork, never to upstream, and
-only when the fork's base branch is an ancestor of your local base. Only the
+only when the fork's base branch is an ancestor of your local base, or is a
+rewrite of it that lost nothing (see below). Only the
 dedicated PR branch is ever force-pushed, and that branch is owned entirely by
 this job. If any guard fails you get a "merged, needs adopting" notification and
 the branch is left for you:
@@ -88,6 +95,23 @@ git -C ~/jcode merge --ff-only auto/upstream-merge
 
 Set `JCODE_UPSTREAM_PUSH=0` to keep everything local. Publishing needs `gh`
 installed and authenticated.
+
+## When the fork's base branch is rewritten
+
+Editing history on GitHub (squashing, reordering, or dropping commits) leaves
+the remote branch with no ancestry link to your local one. Refusing on sight
+would wedge this job forever, so it compares content instead: it merges the two
+in memory and checks whether your local branch contributes anything the rewrite
+does not already contain.
+
+- **Nothing new** (the usual squash/reorder): your local base is an outdated
+  encoding of the same code, so it is reset onto the rewritten remote and the
+  run continues.
+- **Local work is missing from the rewrite**: nothing is reset or published, and
+  you get a high-priority notification naming the missing changes.
+
+Either way the reset only happens on a clean tree that is still on the base
+branch. Uncommitted work is never discarded.
 
 ## GitHub Actions are kept disabled on the fork
 
@@ -171,7 +195,7 @@ All via environment variables, so the systemd unit and plist stay generic:
 | `JCODE_UPSTREAM_FORK_REMOTE` | `origin` | Remote holding your fork |
 | `JCODE_UPSTREAM_PUSH` | `1` | Publish the adopted merge to the fork via a pull request |
 | `JCODE_UPSTREAM_PR_BRANCH` | `auto/upstream-merge-pr` | Branch the pull request is opened from |
-| `JCODE_UPSTREAM_MERGE_METHOD` | `merge` | Pull request merge method; keep `merge` to preserve history |
+| `JCODE_UPSTREAM_MERGE_METHOD` | `squash` | Pull request merge method (`squash` or `merge`) |
 | `JCODE_UPSTREAM_DISABLE_ACTIONS` | `1` | Keep GitHub Actions off on the fork |
 | `JCODE_UPSTREAM_BRANCH` | `auto/upstream-merge` | Scratch result branch |
 | `JCODE_UPSTREAM_STATE_DIR` | `~/.jcode/upstream-merge` | Worktree, logs, lock, verdict |
