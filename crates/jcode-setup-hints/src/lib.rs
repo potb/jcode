@@ -183,6 +183,15 @@ pub const HOTKEY_LISTENER_VERSION: u32 = 6;
 /// Current version of generated launch commands carrying learning metadata.
 const LAUNCH_HOTKEY_TRACKING_VERSION: u32 = 1;
 
+/// How many slot-indexed keybinding entries an uninstall sweeps.
+///
+/// Installs write slots `jcode-launch-0..N` where N is the number of configured
+/// hotkeys. Uninstall cannot know what an older install wrote, so it clears a
+/// fixed, generous range instead: clearing an unused slot is a no-op, while
+/// missing one leaves a live global shortcut behind.
+#[cfg(target_os = "linux")]
+const MAX_MANAGED_HOTKEY_SLOTS: usize = 32;
+
 /// Maximum number of times we will ever show the terminal/setup nudge prompt
 /// to a user (across all launches and platforms). After this many nudges we stop
 /// asking, even if the user never explicitly picked "Don't ask again".
@@ -674,6 +683,10 @@ pub fn run_setup_hotkey(
             return run_macos_hotkey_listener();
         }
 
+        if _uninstall {
+            return uninstall_macos_launch_hotkeys();
+        }
+
         let mut state = SetupHintsState::load();
         let terminal = effective_macos_terminal();
         eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
@@ -712,6 +725,10 @@ pub fn run_setup_hotkey(
 
     #[cfg(target_os = "linux")]
     {
+        if _uninstall {
+            return uninstall_linux_launch_hotkeys_cli();
+        }
+
         let mut state = SetupHintsState::load();
         eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
         eprintln!();
@@ -1676,6 +1693,228 @@ fn install_linux_launch_hotkeys(comp: linux_env::LinuxCompositor) -> Result<bool
     }
 }
 
+/// Full CLI-level teardown for `jcode setup-hotkey --uninstall` on Linux.
+///
+/// Removes the managed hotkey bindings from whichever compositor we installed
+/// into, deletes the generated launch scripts, drops the SessionStart reminders
+/// written into other CLIs, and clears `hotkey_configured` so startup hints do
+/// not reinstall them (issue #17).
+#[cfg(target_os = "linux")]
+fn uninstall_linux_launch_hotkeys_cli() -> Result<()> {
+    eprintln!("\x1b[1mjcode setup-hotkey --uninstall\x1b[0m");
+    eprintln!();
+
+    match detect_linux_compositor() {
+        Some(comp) => match uninstall_linux_launch_hotkeys(comp) {
+            Ok(true) => eprintln!(
+                "  \x1b[32m✓\x1b[0m Removed the jcode launch hotkeys from your {} config",
+                comp.name()
+            ),
+            Ok(false) => eprintln!(
+                "  \x1b[32m✓\x1b[0m No jcode launch hotkeys were installed in your {} config",
+                comp.name()
+            ),
+            Err(err) => {
+                eprintln!("  \x1b[31m✗\x1b[0m Failed: {err}");
+                anyhow::bail!("{} hotkey removal failed: {err}", comp.name());
+            }
+        },
+        None => eprintln!("  No supported compositor detected; nothing to unbind."),
+    }
+
+    remove_generated_hotkey_scripts();
+    let removed_hints = uninstall_cli_launch_hints_notice();
+    if !removed_hints.is_empty() {
+        eprintln!(
+            "  \x1b[32m✓\x1b[0m Removed launch-shortcut reminders from {}",
+            removed_hints.join(" and ")
+        );
+    }
+
+    let mut state = SetupHintsState::load();
+    state.hotkey_configured = false;
+    state.hotkey_dismissed = true;
+    let _ = state.save();
+
+    eprintln!();
+    eprintln!("  Re-run \x1b[1mjcode setup-hotkey\x1b[0m to install them again.");
+    Ok(())
+}
+
+/// Remove the managed launch hotkeys for the detected compositor. Returns
+/// `Ok(true)` if anything was actually removed.
+#[cfg(target_os = "linux")]
+fn uninstall_linux_launch_hotkeys(comp: linux_env::LinuxCompositor) -> Result<bool> {
+    use linux_env::LinuxCompositor;
+    match comp {
+        LinuxCompositor::Niri => uninstall_niri_launch_hotkeys(),
+        LinuxCompositor::Gnome => uninstall_gnome_launch_hotkeys(),
+        LinuxCompositor::Kde => uninstall_kde_launch_hotkeys(),
+        LinuxCompositor::Cinnamon => uninstall_cinnamon_launch_hotkeys(),
+        LinuxCompositor::Mate => uninstall_mate_launch_hotkeys(),
+        LinuxCompositor::Xfce => uninstall_xfce_launch_hotkeys(),
+        other => uninstall_flat_launch_hotkeys(other),
+    }
+}
+
+/// Strip the managed block out of the user's niri `config.kdl`.
+#[cfg(target_os = "linux")]
+fn uninstall_niri_launch_hotkeys() -> Result<bool> {
+    let Some(config_path) = niri_config_path() else {
+        return Ok(false);
+    };
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let current = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let result = linux_niri::strip_managed_block(&current);
+    if !result.changed {
+        return Ok(false);
+    }
+    backup_compositor_config(&config_path);
+    storage::write_bytes(&config_path, result.text.as_bytes())
+        .with_context(|| format!("writing {}", config_path.display()))?;
+    Ok(true)
+}
+
+/// Strip the managed block out of a flat `#`-commented compositor config
+/// (Hyprland, sway, i3, sxhkd).
+#[cfg(target_os = "linux")]
+fn uninstall_flat_launch_hotkeys(comp: linux_env::LinuxCompositor) -> Result<bool> {
+    let Some(config_path) = flat_compositor_config_path(comp) else {
+        return Ok(false);
+    };
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let current = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let result = linux_env::strip_flat_managed_block(&current);
+    if !result.changed {
+        return Ok(false);
+    }
+    backup_compositor_config(&config_path);
+    storage::write_bytes(&config_path, result.text.as_bytes())
+        .with_context(|| format!("writing {}", config_path.display()))?;
+    reload_compositor_config(comp);
+    Ok(true)
+}
+
+/// Reset one dconf directory. Returns whether it held anything.
+#[cfg(target_os = "linux")]
+fn dconf_reset_dir(dir: &str) -> bool {
+    if dconf_list(dir).trim().is_empty() {
+        return false;
+    }
+    let _ = std::process::Command::new("dconf")
+        .args(["reset", "-f", dir])
+        .status();
+    true
+}
+
+/// Drop jcode's GNOME custom keybindings and unlink them from the
+/// custom-keybindings list, leaving the user's own entries untouched.
+#[cfg(target_os = "linux")]
+fn uninstall_gnome_launch_hotkeys() -> Result<bool> {
+    let list_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings";
+    let current = gnome_keybinding_list();
+    let merged = linux_env::merge_gnome_keybinding_list(&current, &[]);
+    let mut changed = dconf_write_checked(list_path, &merged)?;
+    for index in 0..MAX_MANAGED_HOTKEY_SLOTS {
+        changed |= dconf_reset_dir(&linux_env::gnome_keybinding_path(index));
+    }
+    Ok(changed)
+}
+
+/// Drop jcode's Cinnamon custom keybindings and unlink them from `custom-list`.
+#[cfg(target_os = "linux")]
+fn uninstall_cinnamon_launch_hotkeys() -> Result<bool> {
+    let list_path = "/org/cinnamon/desktop/keybindings/custom-list";
+    let current = dconf_read(list_path);
+    let merged = linux_env::merge_gnome_keybinding_list(&current, &[]);
+    let mut changed = dconf_write_checked(list_path, &merged)?;
+    for index in 0..MAX_MANAGED_HOTKEY_SLOTS {
+        changed |= dconf_reset_dir(&format!(
+            "/org/cinnamon/desktop/keybindings/custom-keybindings/{}/",
+            linux_env::dconf_slot_name(index)
+        ));
+    }
+    Ok(changed)
+}
+
+/// Drop jcode's MATE keybinding slots. MATE has no master list to update.
+#[cfg(target_os = "linux")]
+fn uninstall_mate_launch_hotkeys() -> Result<bool> {
+    let mut changed = false;
+    for index in 0..MAX_MANAGED_HOTKEY_SLOTS {
+        changed |= dconf_reset_dir(&format!(
+            "/org/mate/desktop/keybindings/{}/",
+            linux_env::dconf_slot_name(index)
+        ));
+    }
+    Ok(changed)
+}
+
+/// Remove every XFCE shortcut whose command points at a generated jcode launch
+/// script.
+#[cfg(target_os = "linux")]
+fn uninstall_xfce_launch_hotkeys() -> Result<bool> {
+    let existing = xfce_shortcut_commands_text();
+    let mut changed = false;
+    for line in existing.lines() {
+        let Some((prop, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if !value.trim().contains("/launch_jcode_") {
+            continue;
+        }
+        let _ = std::process::Command::new("xfconf-query")
+            .args(["-c", "xfce4-keyboard-shortcuts", "-p", prop, "-r"])
+            .status();
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Remove jcode's KDE global shortcut sections and the hidden desktop files
+/// backing them.
+#[cfg(target_os = "linux")]
+fn uninstall_kde_launch_hotkeys() -> Result<bool> {
+    let mut changed = false;
+
+    if let Some(rc_path) = kde_globalshortcutsrc_path()
+        && rc_path.exists()
+    {
+        let current = std::fs::read_to_string(&rc_path)
+            .with_context(|| format!("reading {}", rc_path.display()))?;
+        let updated = linux_env::upsert_kde_shortcut_sections(&current, &[]);
+        if updated != current {
+            backup_compositor_config(&rc_path);
+            storage::write_bytes(&rc_path, updated.as_bytes())
+                .with_context(|| format!("writing {}", rc_path.display()))?;
+            changed = true;
+        }
+    }
+
+    if let Some(apps_dir) = kde_applications_dir() {
+        for index in 0..MAX_MANAGED_HOTKEY_SLOTS {
+            let path = apps_dir.join(linux_env::kde_desktop_file_name(index));
+            if path.exists() && std::fs::remove_file(&path).is_ok() {
+                changed = true;
+            }
+        }
+    }
+
+    let _ = std::process::Command::new("kquitapp6")
+        .arg("kglobalaccel")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(changed)
+}
+
 /// Install (or refresh) the niri launch-hotkey binds into the user's
 /// `config.kdl`. Writes a timestamped backup before modifying, and is a no-op
 /// when the managed block already matches. Returns `Ok(true)` if the config was
@@ -2530,6 +2769,85 @@ fn uninstall_macos_hotkey_listener() -> Result<()> {
     std::fs::remove_file(&plist_path).context("failed to remove jcode hotkey LaunchAgent plist")?;
     jcode_logging::info("Removed macOS launch-hotkey LaunchAgent (launch_hotkeys.enabled = false)");
     Ok(())
+}
+
+/// Full CLI-level teardown for `jcode setup-hotkey --uninstall` on macOS.
+///
+/// Removes the LaunchAgent, stops the running listener, clears the generated
+/// launch scripts, drops the SessionStart reminders written into other CLIs,
+/// and clears `hotkey_configured` so the next session's setup hints do not
+/// migrate or reinstall the listener behind the user's back (issue #17).
+#[cfg(target_os = "macos")]
+fn uninstall_macos_launch_hotkeys() -> Result<()> {
+    eprintln!("\x1b[1mjcode setup-hotkey --uninstall\x1b[0m");
+    eprintln!();
+
+    uninstall_macos_hotkey_listener()?;
+
+    // The LaunchAgent is unloaded above, but a listener started manually (or by
+    // an older install) can outlive it. Best-effort so a missing pkill or no
+    // matching process is not an error.
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "jcode.*--listen-macos-hotkey"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    remove_generated_hotkey_scripts();
+    let removed_hints = uninstall_cli_launch_hints_notice();
+
+    let mut state = SetupHintsState::load();
+    state.hotkey_configured = false;
+    // Keep it dismissed: the user explicitly removed the hotkeys, so startup
+    // hints must not offer to install them again.
+    state.hotkey_dismissed = true;
+    state.hotkey_listener_version = 0;
+    let _ = state.save();
+
+    eprintln!("  \x1b[32m✓\x1b[0m Removed the jcode launch hotkeys and their LaunchAgent");
+    if !removed_hints.is_empty() {
+        eprintln!(
+            "  \x1b[32m✓\x1b[0m Removed launch-shortcut reminders from {}",
+            removed_hints.join(" and ")
+        );
+    }
+    eprintln!();
+    eprintln!("  Re-run \x1b[1mjcode setup-hotkey\x1b[0m to install them again.");
+    Ok(())
+}
+
+/// Delete the generated per-hotkey launch scripts and the listener's plan file.
+/// Best-effort: the hotkeys are already unbound at this point, so a leftover
+/// script is cosmetic and must not fail the uninstall.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn remove_generated_hotkey_scripts() {
+    let Ok(dir) = mac_hotkey_support_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("launch_jcode_") || name == "plan.json" {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Remove the SessionStart launch reminders from external CLIs. Returns the
+/// labels of the CLIs actually changed.
+fn uninstall_cli_launch_hints_notice() -> Vec<String> {
+    match cli_launch_hints::uninstall_all() {
+        Ok(removed) => removed,
+        Err(err) => {
+            jcode_logging::warn(&format!(
+                "could not remove external CLI launch-shortcut reminders: {err}"
+            ));
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

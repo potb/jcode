@@ -218,6 +218,23 @@ fn fresh_user_gets_hotkey_install() {
     );
 }
 
+/// `setup-hotkey --uninstall` clears `hotkey_configured` and keeps the hint
+/// dismissed. Startup must then leave the user alone rather than reinstalling
+/// or migrating the listener it just removed (issue #17).
+#[test]
+fn uninstalled_user_is_not_reinstalled_or_migrated_on_next_launch() {
+    let state = SetupHintsState {
+        hotkey_configured: false,
+        hotkey_dismissed: true,
+        hotkey_listener_version: 0,
+        ..SetupHintsState::default()
+    };
+    assert_eq!(
+        mac_hotkey_action_for_state(&state, None),
+        MacHotkeyAction::None
+    );
+}
+
 #[test]
 fn legacy_configured_user_gets_migrated_on_update() {
     // Configured before the version field existed -> version defaults to 0.

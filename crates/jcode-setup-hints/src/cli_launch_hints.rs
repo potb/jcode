@@ -44,13 +44,6 @@ impl CliSource {
             Self::Codex => "Codex CLI",
         }
     }
-
-    fn binary(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
 }
 
 pub(super) fn install_available() -> Result<Vec<String>> {
@@ -60,8 +53,7 @@ pub(super) fn install_available() -> Result<Vec<String>> {
         let Some(path) = hook_path(source) else {
             continue;
         };
-        let config_home_exists = path.parent().is_some_and(Path::exists);
-        if !config_home_exists && !binary_on_path(source.binary()) {
+        if !has_user_config_dir(&path) {
             continue;
         }
         match install_hook(&path, source)
@@ -76,6 +68,38 @@ pub(super) fn install_available() -> Result<Vec<String>> {
     }
 
     Ok(installed)
+}
+
+/// Whether the external CLI's config directory already exists.
+///
+/// This is the consent signal for writing a hook: a stale binary on `PATH` is
+/// not consent, and creating `~/.claude/` as a side effect of a hotkey command
+/// surprises people who do not use that tool (issue #19).
+fn has_user_config_dir(hook_path: &Path) -> bool {
+    hook_path.parent().is_some_and(Path::exists)
+}
+
+/// Remove jcode's managed SessionStart hooks from every external CLI config we
+/// may have written to. Foreign handlers and unrelated settings are preserved,
+/// and a missing config is treated as already-clean.
+pub(super) fn uninstall_all() -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for source in [CliSource::Claude, CliSource::Codex] {
+        let Some(path) = hook_path(source) else {
+            continue;
+        };
+        match uninstall_hook(&path)
+            .with_context(|| format!("removing {} SessionStart hook", source.label()))
+        {
+            Ok(true) => removed.push(source.label().to_string()),
+            Ok(false) => {}
+            Err(err) => jcode_logging::warn(&format!(
+                "could not remove {} launch-shortcut reminder: {err}",
+                source.label()
+            )),
+        }
+    }
+    Ok(removed)
 }
 
 pub(super) fn maybe_notify(source: &str) -> Result<()> {
@@ -161,25 +185,6 @@ fn hook_path(source: CliSource) -> Option<PathBuf> {
     }
 }
 
-fn binary_on_path(binary: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        if dir.join(binary).is_file() {
-            return true;
-        }
-        #[cfg(windows)]
-        {
-            return dir.join(format!("{binary}.exe")).is_file()
-                || dir.join(format!("{binary}.cmd")).is_file()
-                || dir.join(format!("{binary}.bat")).is_file();
-        }
-        #[cfg(not(windows))]
-        false
-    })
-}
-
 fn install_hook(path: &Path, source: CliSource) -> Result<()> {
     let mut root = if path.exists() {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -203,6 +208,77 @@ fn install_hook(path: &Path, source: CliSource) -> Result<()> {
     jcode_storage::write_bytes(path, &bytes)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Remove jcode's managed handler from one CLI's hook config. Returns whether
+/// the file changed. A missing or foreign-shaped config is left alone.
+fn uninstall_hook(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut root: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {} without modifying it", path.display()))?;
+    if !remove_hook(&mut root) {
+        return Ok(false);
+    }
+    let mut out = serde_json::to_vec_pretty(&root)?;
+    out.push(b'\n');
+    jcode_storage::write_bytes(path, &out)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// Strip jcode's SessionStart handler out of a parsed hook config, dropping any
+/// group and container that our handler left empty. Returns whether anything
+/// was removed.
+fn remove_hook(root: &mut Value) -> bool {
+    let Some(root_obj) = root.as_object_mut() else {
+        return false;
+    };
+    let Some(hooks_obj) = root_obj.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let Some(groups) = hooks_obj
+        .get_mut("SessionStart")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let mut changed = false;
+    for group in groups.iter_mut() {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = handlers.len();
+        handlers.retain(|handler| {
+            !handler
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.contains(HOOK_COMMAND_MARKER))
+        });
+        changed |= handlers.len() != before;
+    }
+    if !changed {
+        return false;
+    }
+
+    // Drop groups our handler emptied, but keep user-authored groups even when
+    // they are empty: we did not create them.
+    groups.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_none_or(|handlers| !handlers.is_empty())
+    });
+    if groups.is_empty() {
+        hooks_obj.remove("SessionStart");
+    }
+    if hooks_obj.is_empty() {
+        root_obj.remove("hooks");
+    }
+    true
 }
 
 fn upsert_hook(root: &mut Value, command: &str) -> Result<bool> {
@@ -511,6 +587,68 @@ mod tests {
 
         install_hook(&path, CliSource::Claude).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn missing_external_config_dir_is_not_consent_to_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join(".claude").join("settings.json");
+        assert!(!has_user_config_dir(&absent));
+
+        std::fs::create_dir_all(absent.parent().unwrap()).unwrap();
+        assert!(has_user_config_dir(&absent));
+    }
+
+    #[test]
+    fn uninstall_hook_removes_only_our_handler_and_leaves_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "echo mine"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}]
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        install_hook(&path, CliSource::Claude).unwrap();
+        assert!(uninstall_hook(&path).unwrap(), "hook should be removed");
+
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(parsed["theme"], "dark");
+        assert_eq!(parsed["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        let session_start = parsed["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1, "user group must survive");
+        assert_eq!(session_start[0]["hooks"][0]["command"], "echo mine");
+
+        // Idempotent: a second removal is a no-op.
+        assert!(!uninstall_hook(&path).unwrap());
+    }
+
+    #[test]
+    fn uninstall_hook_drops_empty_containers_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}\n").unwrap();
+
+        install_hook(&path, CliSource::Claude).unwrap();
+        assert!(uninstall_hook(&path).unwrap());
+
+        let parsed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(parsed, json!({}), "nothing of ours should remain");
+    }
+
+    #[test]
+    fn uninstall_hook_is_a_no_op_for_a_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(!uninstall_hook(&path).unwrap());
+        assert!(!path.exists(), "must not create the config to remove a hook");
     }
 
     #[cfg(not(windows))]

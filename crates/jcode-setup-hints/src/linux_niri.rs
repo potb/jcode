@@ -302,6 +302,25 @@ pub(crate) fn splice_managed_block(config: &str, block: &str) -> SpliceResult {
     }
 }
 
+/// Remove the managed region from `config`, leaving everything the user wrote
+/// untouched. Returns `changed = false` when no complete managed region exists,
+/// so a hand-edited or never-installed config is never rewritten.
+pub(crate) fn strip_managed_block(config: &str) -> SpliceResult {
+    let (Some(begin_idx), Some(end_line_end)) = find_managed_region(config) else {
+        return SpliceResult {
+            text: config.to_string(),
+            changed: false,
+        };
+    };
+    let mut text = String::with_capacity(config.len());
+    text.push_str(&config[..begin_idx]);
+    text.push_str(&config[end_line_end..]);
+    SpliceResult {
+        changed: text != config,
+        text,
+    }
+}
+
 /// Find the byte range of an existing managed region: `(start_of_BEGIN_line,
 /// end_of_END_line_including_newline)`. Returns `None` if either sentinel is
 /// missing.
@@ -519,6 +538,35 @@ mod tests {
         let binds_idx = res.text.find("binds {").unwrap();
         let begin_idx = res.text.find(NIRI_BLOCK_BEGIN).unwrap();
         assert!(begin_idx > binds_idx);
+    }
+
+    #[test]
+    fn strip_removes_the_managed_region_and_leaves_user_binds() {
+        let cfg = "binds {\n    Alt+Tab { focus-window-previous; }\n}\n";
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+        let installed = splice_managed_block(cfg, &block);
+        assert!(installed.changed);
+
+        let stripped = strip_managed_block(&installed.text);
+        assert!(stripped.changed);
+        assert!(!stripped.text.contains(NIRI_BLOCK_BEGIN));
+        assert!(!stripped.text.contains(NIRI_BLOCK_END));
+        assert!(stripped.text.contains("Alt+Tab { focus-window-previous; }"));
+        assert_eq!(stripped.text, cfg, "install then uninstall must round-trip");
+    }
+
+    #[test]
+    fn strip_is_a_no_op_without_a_managed_region() {
+        let cfg = "binds {\n    Alt+Tab { focus-window-previous; }\n}\n";
+        let res = strip_managed_block(cfg);
+        assert!(!res.changed);
+        assert_eq!(res.text, cfg);
     }
 
     #[test]

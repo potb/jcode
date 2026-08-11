@@ -608,6 +608,24 @@ pub(crate) fn splice_flat_managed_block(config: &str, block: &str) -> FlatSplice
     }
 }
 
+/// Remove the managed region from a flat config, leaving user content intact.
+/// Returns `changed = false` when no complete managed region exists.
+pub(crate) fn strip_flat_managed_block(config: &str) -> FlatSpliceResult {
+    let Some((begin, end)) = find_flat_managed_region(config) else {
+        return FlatSpliceResult {
+            text: config.to_string(),
+            changed: false,
+        };
+    };
+    let mut text = String::with_capacity(config.len());
+    text.push_str(&config[..begin]);
+    text.push_str(&config[end..]);
+    FlatSpliceResult {
+        changed: text != config,
+        text,
+    }
+}
+
 /// Byte range of an existing managed region: `(start_of_BEGIN_line,
 /// end_of_END_line_including_newline)`. Returns `None` when either sentinel is
 /// missing so a half-deleted region is never mangled.
@@ -1005,6 +1023,25 @@ mod tests {
         assert!(replaced.text.contains("/b.sh"));
         assert!(!replaced.text.contains("/a.sh"));
         assert!(replaced.text.contains("bind = SUPER, Q, killactive"));
+    }
+
+    #[test]
+    fn strip_flat_removes_only_the_managed_region() {
+        let cfg = "# my config\nbind = SUPER, Q, killactive\n";
+        let block = render_hyprland_block(&[bind("cmd+;", "/a.sh", "a", false)]).unwrap();
+        let installed = splice_flat_managed_block(cfg, &block);
+        assert!(installed.changed);
+
+        let stripped = strip_flat_managed_block(&installed.text);
+        assert!(stripped.changed);
+        assert!(!stripped.text.contains(HASH_BLOCK_BEGIN));
+        assert!(!stripped.text.contains("/a.sh"));
+        assert!(stripped.text.contains("bind = SUPER, Q, killactive"));
+
+        // Removing again changes nothing.
+        let again = strip_flat_managed_block(&stripped.text);
+        assert!(!again.changed);
+        assert_eq!(again.text, stripped.text);
     }
 
     #[test]
