@@ -1330,8 +1330,26 @@ pub fn build_ambient_system_prompt(
                 dirs.push(project.path.clone());
             }
         }
-        let mut sections = String::new();
+
+        // A session started in a subdirectory belongs to its project, so
+        // collapse it onto the project root before rendering. Left as-is, the
+        // heading names a subdirectory as though it were the project, and a
+        // project that also appears by its own path gets its rules printed
+        // twice.
+        let mut headings: Vec<String> = Vec::new();
         for dir in &dirs {
+            let heading = projects
+                .iter()
+                .find(|p| paths_match(dir, &p.path))
+                .map(|p| p.path.clone())
+                .unwrap_or_else(|| dir.clone());
+            if !headings.contains(&heading) {
+                headings.push(heading);
+            }
+        }
+
+        let mut sections = String::new();
+        for dir in &headings {
             // Config wins over the slug-named file: an instruction the user can
             // see in their config must not be silently overridden by a file
             // they forgot exists.

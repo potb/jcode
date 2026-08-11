@@ -1733,3 +1733,74 @@ fn per_project_active_windows_gate_only_their_own_project() {
     crate::config::invalidate_config_cache();
 }
 
+
+
+/// A session started in a subdirectory belongs to its project, so its
+/// instructions must render under the project root. Observed live: a session in
+/// `<project>/crates/jcode-app-core` produced a heading naming that
+/// subdirectory as though it were the project.
+#[test]
+fn per_project_instructions_render_under_the_project_root() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\n\
+         instructions = \"Always work in a git worktree.\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let session = |id: &str, dir: &str| RecentSessionInfo {
+        id: id.into(),
+        status: "closed".into(),
+        topic: Some("work".into()),
+        duration_secs: 60,
+        extraction_status: "extracted".into(),
+        working_dir: Some(dir.into()),
+    };
+    let sessions = vec![
+        session("s1", "/home/potb/jcode/crates/jcode-app-core"),
+        session("s2", "/home/potb/jcode"),
+    ];
+
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &sessions,
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    let section = prompt
+        .split("## Per-Project Standing Instructions")
+        .nth(1)
+        .expect("per-project section");
+
+    assert!(
+        section.contains("### /home/potb/jcode\n"),
+        "instructions belong under the project root; got:\n{section}"
+    );
+    assert!(
+        !section.contains("### /home/potb/jcode/crates"),
+        "a subdirectory must not be presented as its own project; got:\n{section}"
+    );
+    assert_eq!(
+        section.matches("Always work in a git worktree.").count(),
+        1,
+        "the project's rules must appear once, not once per subdirectory seen; \
+         got:\n{section}"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
