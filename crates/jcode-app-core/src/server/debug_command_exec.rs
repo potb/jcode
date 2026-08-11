@@ -349,7 +349,7 @@ pub(super) async fn execute_debug_command(
         let tool = parts
             .next()
             .ok_or_else(|| anyhow::anyhow!("Usage: mcp:call:<server>:<tool> <json>"))?;
-        let tool_name = format!("mcp__{}__{}", server, tool);
+        let tool_name = crate::mcp::mcp_tool_name(server, tool);
         let input: serde_json::Value =
             serde_json::from_str(args_json).map_err(|e| anyhow::anyhow!("Invalid JSON: {}", e))?;
         let agent = agent.lock().await;

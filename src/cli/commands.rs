@@ -2584,7 +2584,7 @@ async fn wait_for_cold_cache_mcp_tools(registry: &crate::tool::Registry) {
     loop {
         let names = registry.tool_names().await;
         let covered = cold_servers.iter().all(|server| {
-            let prefix = format!("mcp__{}__", server);
+            let prefix = crate::mcp::mcp_tool_prefix(server);
             names.iter().any(|name| name.starts_with(&prefix))
         });
         if covered {
