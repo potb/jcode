@@ -1100,3 +1100,151 @@ fn ambient_prompt_scopes_the_pr_repo_override_to_its_own_repository() {
     }
     crate::config::invalidate_config_cache();
 }
+
+/// Config booleans can only say whether to work, never what the user wants
+/// done. The instructions file is where that intent lives, and it has to
+/// outrank the caution the agent talks itself into across cycles.
+#[test]
+fn ambient_prompt_includes_the_users_standing_instructions() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let render = || {
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let without = render();
+    assert!(
+        !without.contains("## Standing Instructions From The User"),
+        "with no instructions file the prompt must not invent the section"
+    );
+
+    std::fs::write(
+        temp.path()
+            .join(crate::ambient::prompt::AMBIENT_INSTRUCTIONS_FILE),
+        "Ship at least one PR per day. Do not ask, just do it.",
+    )
+    .expect("write instructions");
+
+    let with = render();
+    assert!(
+        with.contains("Ship at least one PR per day"),
+        "the user's own words must reach the prompt verbatim"
+    );
+    assert!(
+        with.contains("OUTRANK"),
+        "instructions must be stated as outranking self-written caution"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// Per-project instructions are the user talking to their own agent. Writing
+/// them into the project would put them in diffs, reviews and other people's
+/// checkouts, so they stay under ~/.jcode and never touch the repo.
+#[test]
+fn project_instructions_live_under_jcode_home_not_in_the_project() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let path = crate::ambient::prompt::project_instructions_path("/home/user/work/api")
+        .expect("instructions path");
+    assert!(
+        path.starts_with(temp.path()),
+        "instructions must live under JCODE_HOME, got {}",
+        path.display()
+    );
+    assert!(
+        !path.to_string_lossy().contains("/home/user/work/api/"),
+        "nothing may be written inside the project directory"
+    );
+
+    // Same basename, different projects: these must not share a file.
+    let a = crate::ambient::prompt::project_instructions_slug("/home/user/work/api");
+    let b = crate::ambient::prompt::project_instructions_slug("/home/user/personal/api");
+    assert_ne!(a, b, "the full path must disambiguate identical basenames");
+    // A trailing slash is the same project, not a second one.
+    assert_eq!(
+        a,
+        crate::ambient::prompt::project_instructions_slug("/home/user/work/api/")
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// The instructions have to arrive before the agent picks a project, so they
+/// are rendered for recently-seen projects rather than on demand afterwards.
+#[test]
+fn per_project_instructions_render_for_recently_seen_projects() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let path = crate::ambient::prompt::project_instructions_path("/home/user/work/api")
+        .expect("instructions path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&path, "Keep the migration tests green.").expect("write");
+
+    let sessions = vec![RecentSessionInfo {
+        id: "session_a".into(),
+        status: "closed".into(),
+        topic: Some("api work".into()),
+        duration_secs: 300,
+        extraction_status: "extracted".into(),
+        working_dir: Some("/home/user/work/api".into()),
+    }];
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &sessions,
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    assert!(prompt.contains("## Per-Project Standing Instructions"));
+    assert!(prompt.contains("Keep the migration tests green."));
+    assert!(prompt.contains("### /home/user/work/api"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}

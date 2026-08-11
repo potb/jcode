@@ -750,6 +750,18 @@ pub fn build_ambient_system_prompt(
              Without project_dir a project-scoped write is silently dropped.\n",
         );
     }
+    // A memory you wrote about a passing situation ("the user has live sessions
+    // in X, stay out") is an observation with a timestamp, not a standing rule.
+    // Re-check the condition before letting one block work; if it no longer
+    // holds, or it never named an expiry, rewrite or forget it this cycle.
+    prompt.push_str(
+        "Treat your own memories that tell you to AVOID an area as observations \
+         with an expiry, not as permanent rules. Before letting one stop you, \
+         re-check whether the condition it describes still holds right now. If \
+         it does not, forget or rewrite it in this cycle rather than skipping \
+         the work again. Repeatedly declining to work somewhere because of a \
+         note you wrote yourself is how a whole project goes untouched for days.\n",
+    );
     prompt.push('\n');
 
     // --- User Feedback History ---
@@ -1001,8 +1013,139 @@ pub fn build_ambient_system_prompt(
         );
     }
 
+    // --- User standing instructions ---
+    //
+    // Config booleans can only say "do work" or "don't". They cannot say what
+    // kind of work matters, what is off limits, or how assertive to be. Users
+    // need a place to state that in prose, and it has to outrank the agent's
+    // own accumulated caution: memories written during one busy afternoon were
+    // otherwise treated as permanent rules and quietly fenced whole repos off.
+    if let Some(instructions) = user_ambient_instructions() {
+        prompt.push_str(
+            "\n## Standing Instructions From The User\n\n\
+             These come from the user's own ambient instructions file. They are \
+             a direct statement of what they want you to do, so they OUTRANK \
+             your own habits, your cautious defaults, and any memory you wrote \
+             in an earlier cycle. If a memory says to avoid an area but these \
+             instructions ask for work there, follow the instructions and \
+             correct the memory.\n\n",
+        );
+        prompt.push_str(instructions.trim());
+        prompt.push_str("\n\n");
+    }
+
+    // Per-project instructions, for every project the user is likely to touch
+    // this cycle: the ones seen recently plus the configured priorities. The
+    // agent picks its own working directory, so it needs these up front rather
+    // than after it has already decided where to work.
+    {
+        let priority = configured_project_priority();
+        let mut dirs: Vec<String> = Vec::new();
+        for dir in recent_sessions.iter().filter_map(|s| s.working_dir.clone()) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        for p in &priority {
+            if !dirs.iter().any(|d| paths_match(d, p)) {
+                dirs.push(p.clone());
+            }
+        }
+        let mut sections = String::new();
+        for dir in &dirs {
+            if let Some(text) = project_ambient_instructions(dir) {
+                sections.push_str(&format!("### {}\n{}\n\n", dir, text.trim()));
+            }
+        }
+        if !sections.is_empty() {
+            prompt.push_str(
+                "\n## Per-Project Standing Instructions\n\n\
+                 The user wrote these for specific projects. They apply whenever \
+                 you work in that project and carry the same weight as the \
+                 standing instructions above.\n\n",
+            );
+            prompt.push_str(&sections);
+        }
+    }
+
     prompt
 }
+
+/// Standing ambient instructions written by the user, if any.
+///
+/// Read from `~/.jcode/ambient-instructions.md`. Read fresh on every cycle
+/// rather than cached, so editing the file takes effect on the next wake
+/// without restarting the daemon.
+pub fn user_ambient_instructions() -> Option<String> {
+    let path = crate::storage::jcode_dir()
+        .ok()?
+        .join(AMBIENT_INSTRUCTIONS_FILE);
+    read_instructions_file(&path)
+}
+
+/// Per-project standing instructions for `project_dir`, if any.
+///
+/// These live centrally under `~/.jcode/ambient/instructions/`, NOT inside the
+/// project itself. A dotfile committed into every repo the user works in is
+/// their instructions to their own agent leaking into shared source trees,
+/// where it shows up in diffs, reviews and other people's checkouts. Keeping
+/// the whole set in one place also means they can be read and edited together.
+///
+/// The file name is derived from the absolute project path, so two projects
+/// with the same directory name do not collide.
+pub fn project_ambient_instructions(project_dir: &str) -> Option<String> {
+    let path = project_instructions_path(project_dir)?;
+    read_instructions_file(&path)
+}
+
+/// Path of the central instructions file for a project directory.
+pub fn project_instructions_path(project_dir: &str) -> Option<std::path::PathBuf> {
+    let dir = crate::storage::jcode_dir()
+        .ok()?
+        .join("ambient")
+        .join(AMBIENT_INSTRUCTIONS_DIR);
+    Some(dir.join(format!("{}.md", project_instructions_slug(project_dir))))
+}
+
+/// Filesystem-safe, collision-resistant slug for an absolute project path.
+///
+/// The basename alone would map `~/work/api` and `~/personal/api` onto the same
+/// file, so the full path is flattened instead.
+pub fn project_instructions_slug(project_dir: &str) -> String {
+    let trimmed = project_dir.trim_end_matches('/');
+    let flattened: String = trimmed
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if flattened.is_empty() {
+        "root".to_string()
+    } else {
+        flattened
+    }
+}
+
+fn read_instructions_file(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// File name, under `~/.jcode/`, holding the user's standing ambient
+/// instructions.
+pub const AMBIENT_INSTRUCTIONS_FILE: &str = "ambient-instructions.md";
+
+/// Directory, under `~/.jcode/ambient/`, holding per-project instruction files.
+pub const AMBIENT_INSTRUCTIONS_DIR: &str = "instructions";
 
 pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
     let mut lines = vec![

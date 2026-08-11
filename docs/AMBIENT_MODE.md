@@ -886,6 +886,34 @@ graph TD
 
 ---
 
+## Standing Instructions
+
+Config booleans decide *whether* ambient works, never *what* the user wants
+done. Standing instructions are where that intent goes, in prose.
+
+- **Global**: `~/.jcode/ambient-instructions.md`
+- **Per project**: `~/.jcode/ambient/instructions/<flattened-path>.md`
+
+Both are optional, read fresh at the start of every cycle (edit them and the
+next wake picks the change up, no restart), and skipped entirely when empty.
+
+Per-project instructions deliberately live under `~/.jcode/`, **not** inside the
+project. A dotfile committed into every repo would put the user's private notes
+to their own agent into diffs, reviews and other people's checkouts. The file
+name flattens the absolute path, so `~/work/api` and `~/personal/api` do not
+collide. To find the path for a project, see `project_instructions_path` in
+`crates/jcode-app-core/src/ambient/prompt.rs`.
+
+The prompt states that these instructions **outrank** the agent's own cautious
+defaults and any memory it wrote in an earlier cycle. That ordering matters: an
+observation like "the user has live sessions in this worktree, stay out" is true
+for an afternoon, but stored as a memory it reads as a permanent rule and can
+quietly fence off a whole repo for days. The prompt now also tells the agent to
+re-check any avoid-this-area memory against present reality and rewrite or forget
+it instead of skipping the work again.
+
+---
+
 ## Proactive Work
 
 ### What Ambient Does
