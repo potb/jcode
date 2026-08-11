@@ -65,20 +65,22 @@ On a verified merge it adopts the result and publishes it:
 
 6. Fast-forward your real `master` to the merge branch.
 7. Push those commits to `auto/upstream-merge-pr` on your fork, open a pull
-   request into the base branch, and squash-merge it.
-8. Adopt the fork's new commit as your local base branch.
+   request into the base branch, and merge it.
+8. Fast-forward your local base branch onto the fork's new merge commit.
 
 The publish step goes through a pull request because the fork's base branch is
-protected by a ruleset that forbids direct pushes. The pull request is squashed,
-matching how every other pull request on the fork lands, so the base branch
-stays one linear commit per change.
+protected by a ruleset that forbids direct pushes.
 
-A squash replaces the pushed commits with a new one, so afterwards your local
-base is content-identical to the remote but shares no ancestry with it. Step 8
-handles that through the same rewrite path described below: it confirms the
-squash kept every local change, then resets onto it. Set
-`JCODE_UPSTREAM_MERGE_METHOD=merge` if you would rather keep the individual
-commits.
+**This pull request is merged, not squashed**, even though ordinary pull
+requests on the fork are squashed. The point of this job is for the fork to sit
+on top of upstream, and that requires upstream's commits to be genuine ancestors
+of your base branch, which only a two-parent merge commit provides. A squash
+would replace them with one new commit merely containing the same code: upstream
+SHAs would be unreachable, `git merge-base` would still report the old fork
+point, and every later run would re-merge the same history.
+
+`JCODE_UPSTREAM_MERGE_METHOD=squash` is supported but defeats the purpose; the
+adopt step then falls back to the rewrite path described below.
 
 Both steps are guarded, because you are often mid-edit in this repo. It adopts
 only onto a clean tree, still on the expected branch, still at the commit the
@@ -195,7 +197,7 @@ All via environment variables, so the systemd unit and plist stay generic:
 | `JCODE_UPSTREAM_FORK_REMOTE` | `origin` | Remote holding your fork |
 | `JCODE_UPSTREAM_PUSH` | `1` | Publish the adopted merge to the fork via a pull request |
 | `JCODE_UPSTREAM_PR_BRANCH` | `auto/upstream-merge-pr` | Branch the pull request is opened from |
-| `JCODE_UPSTREAM_MERGE_METHOD` | `squash` | Pull request merge method (`squash` or `merge`) |
+| `JCODE_UPSTREAM_MERGE_METHOD` | `merge` | Pull request merge method; keep `merge` to stay on top of upstream |
 | `JCODE_UPSTREAM_DISABLE_ACTIONS` | `1` | Keep GitHub Actions off on the fork |
 | `JCODE_UPSTREAM_BRANCH` | `auto/upstream-merge` | Scratch result branch |
 | `JCODE_UPSTREAM_STATE_DIR` | `~/.jcode/upstream-merge` | Worktree, logs, lock, verdict |

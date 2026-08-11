@@ -29,15 +29,16 @@ FORK_REMOTE="${JCODE_UPSTREAM_FORK_REMOTE:-origin}"
 # API instead of pushing to the base branch directly. Upstream is never
 # written to.
 PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
-# Pull request merge method. Squash, matching how every other pull request on
-# this fork lands, so the base branch stays one linear commit per change.
+# Pull request merge method. Must stay "merge" for this job, even though
+# ordinary pull requests on this fork are squashed.
 #
-# A squash replaces the pushed commits with a single new one, so after each
-# publish the local base branch is content-identical to the remote but shares
-# no ancestry with it. That is the same shape as any other history rewrite, and
-# `reconcile_rewritten_base` resolves it on the next run by resetting onto the
-# remote once it confirms nothing was lost.
-PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-squash}"
+# The whole point here is for the fork to sit on top of upstream. That requires
+# upstream's commits to be genuine ancestors of the fork's base branch, which
+# only a real two-parent merge commit gives. A squash would replace them with a
+# single new commit that merely contains the same code: upstream SHAs would no
+# longer be reachable, `git merge-base` would still report the old fork point,
+# and every later run would try to merge the same upstream history again.
+PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-merge}"
 # Branch the pull request is opened from. Owned entirely by this job.
 PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # Keep GitHub Actions disabled on the fork.
@@ -237,7 +238,7 @@ Keep the remote's history and replay your work: git -C $REPO rebase --onto $FORK
 #
 # The base branch is protected by a repository ruleset requiring a pull
 # request, so this pushes the commits to a PR branch, opens a pull request, and
-# squash-merges it (see PR_MERGE_METHOD).
+# merges it with the "merge" method (see PR_MERGE_METHOD).
 #
 # Only ever the fork: upstream is never a valid push target, since this job
 # maintains a fork rather than contributing to the parent project.
@@ -291,6 +292,11 @@ publish_fork_if_ahead() {
       --title "Merge upstream into $BASE" \
       --body "Automated upstream merge from \`$UPSTREAM_REF\` ($UP_SHA).
 
+**Merge this, do not squash.** The fork is meant to sit on top of upstream, which
+requires upstream's commits to stay genuine ancestors of \`$BASE\`. A squash would
+replace them with one new commit containing the same code, leaving upstream SHAs
+unreachable and every later run re-merging the same history.
+
 Opened by scripts/upstream_merge_agent.sh." \
       2>&1 | tail -1)
     log "opened pull request: $pr"
@@ -302,7 +308,7 @@ Opened by scripts/upstream_merge_agent.sh." \
     ''|*[!0-9]*) log "WARNING: could not determine the pull request number"; return 1 ;;
   esac
 
-  # Merge method comes from PR_MERGE_METHOD. Output is captured rather
+  # --merge, not --squash: see PR_MERGE_METHOD. Output is captured rather
   # than piped, because a pipeline's status is the last command's and would
   # report every failed merge as a success.
   local merge_out
@@ -314,11 +320,13 @@ Opened by scripts/upstream_merge_agent.sh." \
     return 1
   fi
 
-  # The commit GitHub created is not in the local repo yet. Adopt it, so the
-  # next run's "is the fork ahead" check is honest instead of re-publishing
-  # forever. A squash shares no ancestry with what was pushed, so the
-  # fast-forward will not apply and the rewrite path takes over: it confirms the
-  # squash kept every local change, then resets onto it.
+  # The merge commit GitHub created is not in the local repo yet, and local
+  # $BASE is now behind by exactly that commit. Adopt it, so the next run's
+  # "is the fork ahead" check is honest instead of re-publishing forever.
+  #
+  # With the default merge method this is a plain fast-forward. The rewrite path
+  # is the fallback for a squash (JCODE_UPSTREAM_MERGE_METHOD=squash), which
+  # shares no ancestry with what was pushed.
   git fetch --prune "$FORK_REMOTE" >/dev/null 2>&1 || true
   local new_remote_sha
   new_remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
