@@ -148,6 +148,13 @@ pub struct DisplayConfig {
     /// its own gauge and the card would be the same number a second time.
     #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub context_widget: ContextWidgetMode,
+    /// Whether the info widget's model card repeats the model, reasoning effort,
+    /// provider, and access method (auto/on/off, default: auto). `auto` drops
+    /// those rows while the session-fact stack is reporting the same values, so
+    /// the identity is not stated twice. The card's session line and its
+    /// widget-only badges are unaffected.
+    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub model_widget: ContextWidgetMode,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -191,6 +198,7 @@ impl Default for DisplayConfig {
             overscroll_status: OverscrollStatusMode::default(),
             session_facts: SessionFactsMode::default(),
             context_widget: ContextWidgetMode::default(),
+            model_widget: ContextWidgetMode::default(),
         }
     }
 }

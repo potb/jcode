@@ -899,6 +899,46 @@ fn every_facts_spelling_is_handled_locally_and_persists() {
         "an unknown context argument should explain the valid ones"
     );
 
+    // The model-card subcommand persists the same way.
+    for (command, expected) in [
+        (
+            "/facts model off",
+            jcode_config_types::ContextWidgetMode::Off,
+        ),
+        ("/facts model on", jcode_config_types::ContextWidgetMode::On),
+        (
+            "/facts model auto",
+            jcode_config_types::ContextWidgetMode::Auto,
+        ),
+    ] {
+        let mut app = create_test_app();
+        assert!(
+            super::commands::handle_facts_command(&mut app, command),
+            "`{}` must be handled locally",
+            command
+        );
+        crate::config::invalidate_config_cache();
+        assert_eq!(
+            crate::config::config().display.model_widget,
+            expected,
+            "`{}` should persist {:?}",
+            command,
+            expected
+        );
+    }
+
+    let mut app = create_test_app();
+    assert!(super::commands::handle_facts_command(
+        &mut app,
+        "/facts model sideways"
+    ));
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|m| m.role == "error" && m.content.contains("Usage: /facts model")),
+        "an unknown model argument should explain the valid ones"
+    );
+
     // A bad argument reports usage instead of silently picking a side.
     let mut app = create_test_app();
     assert!(super::commands::handle_facts_command(

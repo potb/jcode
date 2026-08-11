@@ -280,6 +280,18 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted model-card identity visibility preference.
+    pub fn set_model_widget(mode: jcode_config_types::ContextWidgetMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.model_widget = mode;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.model_widget to config: {}",
+            mode.label()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted pinned-usage preference.
     pub fn set_pin_usage(pin: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load();

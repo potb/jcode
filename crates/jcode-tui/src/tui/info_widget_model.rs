@@ -7,23 +7,36 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
     let Some(model) = &data.model else {
         return Vec::new();
     };
+    // Same gate as the compact overview: `display.model_widget = "auto"` drops
+    // the rows the session-fact stack already reports. The dedicated card and
+    // the overview section restate the same values, so gating only one of them
+    // would leave the duplicate on screen in whichever layout the user has.
+    let show_identity = data.show_model_identity();
 
     let mut lines: Vec<Line> = Vec::new();
 
     let short_name = crate::tui::session_facts::pretty_model(model);
     let max_len = inner.width.saturating_sub(2) as usize;
 
-    let mut spans = vec![
-        Span::styled("⚡ ", Style::default().fg(rgb(140, 180, 255))),
-        Span::styled(
-            truncate_smart(&short_name, max_len.saturating_sub(2)),
-            Style::default().fg(rgb(255, 150, 200)).bold(),
-        ),
-    ];
-
-    append_model_runtime_metadata(&mut spans, data);
-
-    lines.push(Line::from(spans));
+    if show_identity {
+        let mut spans = vec![
+            Span::styled("⚡ ", Style::default().fg(rgb(140, 180, 255))),
+            Span::styled(
+                truncate_smart(&short_name, max_len.saturating_sub(2)),
+                Style::default().fg(rgb(255, 150, 200)).bold(),
+            ),
+        ];
+        append_model_runtime_metadata(&mut spans, data);
+        lines.push(Line::from(spans));
+    } else {
+        // The service tier badge has no equivalent in the stack, so it keeps its
+        // own row rather than disappearing with the model name it hung off.
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        append_model_service_tier(&mut spans, data);
+        if !spans.is_empty() {
+            lines.push(Line::from(spans));
+        }
+    }
 
     if data.session_count.is_some() || data.session_name.is_some() {
         let mut parts = Vec::new();
@@ -84,6 +97,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         .provider_name
         .as_deref()
         .map(str::trim)
+        .filter(|_| show_identity)
         .filter(|s| !s.is_empty())
     {
         let mut provider_spans = vec![
@@ -112,6 +126,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         .connection_type
         .as_deref()
         .map(str::trim)
+        .filter(|_| show_identity)
         .filter(|s| !s.is_empty())
     {
         lines.push(Line::from(vec![
@@ -123,7 +138,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         ]));
     }
 
-    if data.auth_method != AuthMethod::Unknown {
+    if show_identity && data.auth_method != AuthMethod::Unknown {
         let (icon, label, color) = match data.auth_method {
             AuthMethod::ApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
             AuthMethod::AnthropicOAuth => ("🔐", "OAuth", rgb(255, 160, 100)),
@@ -172,23 +187,34 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
     let Some(model) = &data.model else {
         return Vec::new();
     };
+    // `display.model_widget = "auto"` drops the identity rows once the fact
+    // stack beside the input is reporting them. Height and render must agree, so
+    // this decision lives in `InfoWidgetData::show_model_identity` and is read
+    // by `compact_model_height` too.
+    let show_identity = data.show_model_identity();
 
     let short_name = crate::tui::session_facts::pretty_model(model);
     let max_len = inner.width.saturating_sub(2) as usize;
 
-    let mut spans = vec![Span::styled(
-        if short_name.chars().count() > max_len {
-            format!(
-                "{}...",
-                truncate_chars(&short_name, max_len.saturating_sub(3))
-            )
-        } else {
-            short_name
-        },
-        Style::default().fg(rgb(180, 180, 190)).bold(),
-    )];
-
-    append_model_runtime_metadata(&mut spans, data);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if show_identity {
+        spans.push(Span::styled(
+            if short_name.chars().count() > max_len {
+                format!(
+                    "{}...",
+                    truncate_chars(&short_name, max_len.saturating_sub(3))
+                )
+            } else {
+                short_name
+            },
+            Style::default().fg(rgb(180, 180, 190)).bold(),
+        ));
+        append_model_runtime_metadata(&mut spans, data);
+    } else {
+        // The service tier badge has no equivalent in the fact stack, so it is
+        // kept even when the name it used to hang off is gone.
+        append_model_service_tier(&mut spans, data);
+    }
 
     if let Some(mode) = &data.native_compaction_mode {
         let label = if let Some(tokens) = data.native_compaction_threshold_tokens {
@@ -196,11 +222,18 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         } else {
             format!("native {}", mode)
         };
-        spans.push(Span::styled(" ", Style::default()));
+        if !spans.is_empty() {
+            spans.push(Span::styled(" ", Style::default()));
+        }
         spans.push(Span::styled(label, Style::default().fg(rgb(120, 210, 230))));
     }
 
-    let mut lines = vec![Line::from(spans)];
+    // An empty span list would reserve a blank row, which is the gap the height
+    // helpers exist to avoid.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
 
     let has_provider = data
         .provider_name
@@ -210,7 +243,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         .is_some();
     let has_auth = data.auth_method != AuthMethod::Unknown;
 
-    if has_provider || has_auth {
+    if show_identity && (has_provider || has_auth) {
         let mut detail_spans: Vec<Span> = Vec::new();
 
         if let Some(provider) = data
@@ -334,12 +367,20 @@ fn append_model_runtime_metadata(spans: &mut Vec<Span<'static>>, data: &InfoWidg
         ));
     }
 
+    append_model_service_tier(spans, data);
+}
+
+/// The OpenAI service tier badge, which the session-fact stack never reports and
+/// so survives even when the identity rows are gated off.
+fn append_model_service_tier(spans: &mut Vec<Span<'static>>, data: &InfoWidgetData) {
     let is_openai = data
         .provider_name
         .as_deref()
         .is_some_and(|provider| provider.trim().to_ascii_lowercase().starts_with("openai"));
     if is_openai && let Some(tier) = data.service_tier.as_deref().and_then(short_service_tier) {
-        spans.push(Span::styled(" ", Style::default()));
+        if !spans.is_empty() {
+            spans.push(Span::styled(" ", Style::default()));
+        }
         spans.push(Span::styled(
             format!("[{tier}]"),
             Style::default().fg(rgb(200, 140, 255)).bold(),

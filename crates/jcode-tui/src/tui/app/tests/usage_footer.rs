@@ -232,7 +232,82 @@ fn end_to_end_frame_paints_usage_on_the_last_row_at_any_terminal_size() {
              at {width}x{height}, got: {last_row:?}"
         );
     }
+}
 
+/// The pinned usage block and the left-anchored session facts share the bottom
+/// band, so both must land on it without one painting over the other. The facts
+/// hug the left edge, the usage numbers the right.
+#[test]
+fn left_session_facts_and_pinned_usage_share_the_bottom_band() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinUsageEnvGuard::enable();
+    let _runtime = RuntimeProviderGuard::set("openai-compatible");
+    crate::env::set_var("JCODE_SESSION_FACTS", "left");
+    crate::config::invalidate_config_cache();
+    struct FactsCleanup;
+    impl Drop for FactsCleanup {
+        fn drop(&mut self) {
+            crate::env::remove_var("JCODE_SESSION_FACTS");
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _facts = FactsCleanup;
+
+    let mut app = create_named_provider_test_app("bedrock", "test-model");
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
+    app.update_cost_impl();
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: "some transcript content".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let width = 120u16;
+    let height = 30u16;
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|f| crate::tui::ui::draw(f, &app))
+        .expect("shared band frame");
+
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..height)
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+
+    // The usage readout keeps the last row, as it does without the facts.
+    let last_row = rows.last().expect("last row").clone();
+    assert!(
+        last_row.contains('$'),
+        "usage should still paint on the last row, got: {last_row:?}"
+    );
+
+    // The model row is a fact row, and it must sit in the band's left half
+    // rather than overlapping the right-aligned usage text.
+    let model_y = rows
+        .iter()
+        .rposition(|row| row.contains("Test Model"))
+        .unwrap_or_else(|| panic!("no model fact row:\n{}", rows.join("\n")));
+    assert!(
+        model_y >= (height - 4) as usize,
+        "facts should be pinned into the bottom band, model row at {model_y} of {height}:\n{}",
+        rows.join("\n")
+    );
+    let usage_col = last_row.find('$').expect("usage column");
+    let model_col = rows[model_y].find("Test Model").expect("model column");
+    assert!(
+        model_col < usage_col,
+        "facts must stay left of the usage block (model {model_col}, usage {usage_col})"
+    );
 }
 
 /// With the block pinned, the margin/overview usage sections must disappear:
@@ -252,7 +327,9 @@ fn pinning_usage_hides_the_margin_and_overview_copies() {
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert!(
-        data.usage_info.as_ref().is_some_and(|usage| usage.available),
+        data.usage_info
+            .as_ref()
+            .is_some_and(|usage| usage.available),
         "precondition: this provider reports usage"
     );
 
@@ -275,5 +352,4 @@ fn pinning_usage_hides_the_margin_and_overview_copies() {
         !pinned.has_data_for(crate::tui::info_widget::WidgetKind::UsageLimits),
         "with pinning on the margin copy must hide"
     );
-
 }

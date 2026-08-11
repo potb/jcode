@@ -182,6 +182,11 @@ impl Config {
         {
             self.display.context_widget = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_MODEL_WIDGET")
+            && let Some(parsed) = jcode_config_types::ContextWidgetMode::parse(&v)
+        {
+            self.display.model_widget = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_PIN_USAGE")
             && let Some(parsed) = parse_env_bool(&v)
         {

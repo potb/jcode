@@ -3088,39 +3088,53 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // The block is as tall as the provider has windows to report, so ask the
     // renderer rather than assuming one row: a reservation that disagrees with
     // what gets painted either clips the block or leaves a blank gap.
-    let usage_footer_height: u16 = usage_footer::usage_footer_height(app, chat_area.width);
-    // Never let the block take more than a third of a short terminal.
-    let usage_footer_height = usage_footer_height.min(chat_area.height / 3);
-    let usage_footer_area = (usage_footer_height > 0).then(|| Rect {
-        x: chat_area.x,
-        y: chat_area.y + chat_area.height - usage_footer_height,
-        width: chat_area.width,
-        height: usage_footer_height,
-    });
-    let chat_area = if usage_footer_height > 0 {
-        Rect {
-            height: chat_area.height - usage_footer_height,
-            ..chat_area
-        }
-    } else {
-        chat_area
-    };
-    // Session facts anchored to the left edge (`display.session_facts = "left"`)
-    // in left-aligned mode: reserve rows just above the usage footer instead of
-    // compositing into blank cells. Left-aligned rows start at column 0, so
-    // there is no left gutter to composite into at all, and the stack would
-    // otherwise disappear or flip to the right edge.
+    //
+    // Session facts anchored left (`display.session_facts = "left"`) are pinned
+    // the same way, and the two share this one band: facts hug its left edge,
+    // usage hugs its right. Stacking them as two bands instead would push the
+    // facts up off the last line, and the usage block is narrow enough that a
+    // second reserved band would waste rows a short terminal cannot spare.
+    //
+    // The facts are measured first and their columns are withheld from the usage
+    // width, so the usage block tightens rather than overlapping them.
+    let left_facts_width: u16 = input_ui::left_fact_block_width(app, chat_area.width);
+    let usage_width = chat_area.width.saturating_sub(left_facts_width);
+    let usage_footer_height: u16 = usage_footer::usage_footer_height(app, usage_width);
     let left_facts_height: u16 = input_ui::left_fact_block_height(app, chat_area.width);
-    let left_facts_height = left_facts_height.min(chat_area.height / 3);
-    let left_facts_area = (left_facts_height > 0).then(|| Rect {
+    // Never let the shared band take more than a third of a short terminal.
+    let band_height = usage_footer_height
+        .max(left_facts_height)
+        .min(chat_area.height / 3);
+    let band_area = (band_height > 0).then(|| Rect {
         x: chat_area.x,
-        y: chat_area.y + chat_area.height - left_facts_height,
+        y: chat_area.y + chat_area.height - band_height,
         width: chat_area.width,
-        height: left_facts_height,
+        height: band_height,
     });
-    let chat_area = if left_facts_height > 0 {
+    // Both blocks are bottom-anchored within the band, so a one-row usage block
+    // still lands on the very last line when the taller fact stack sets the
+    // band's height.
+    let usage_footer_area = band_area.and_then(|band| {
+        let height = usage_footer_height.min(band.height);
+        (height > 0 && usage_width > 0).then(|| Rect {
+            x: band.x + band.width - usage_width,
+            y: band.bottom() - height,
+            width: usage_width,
+            height,
+        })
+    });
+    let left_facts_area = band_area.and_then(|band| {
+        let height = left_facts_height.min(band.height);
+        (height > 0).then(|| Rect {
+            x: band.x,
+            y: band.bottom() - height,
+            width: left_facts_width.min(band.width),
+            height,
+        })
+    });
+    let chat_area = if band_height > 0 {
         Rect {
-            height: chat_area.height - left_facts_height,
+            height: chat_area.height - band_height,
             ..chat_area
         }
     } else {

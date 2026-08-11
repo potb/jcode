@@ -733,7 +733,17 @@ pub fn todo_widget_visible() -> bool {
 /// no context reading at all.
 static SESSION_FACTS_DREW_CONTEXT: AtomicBool = AtomicBool::new(false);
 
-/// Record whether the fact stack painted a context row this frame.
+/// Whether the session-fact stack painted its provider/model rows on the
+/// previous frame. Same "did it draw" contract as the context flag above.
+static SESSION_FACTS_DREW_MODEL: AtomicBool = AtomicBool::new(false);
+
+/// Record which fact rows the stack painted this frame.
+pub(crate) fn note_session_facts_drawn(context: bool, model: bool) {
+    SESSION_FACTS_DREW_CONTEXT.store(context, Ordering::Relaxed);
+    SESSION_FACTS_DREW_MODEL.store(model, Ordering::Relaxed);
+}
+
+#[cfg(test)]
 pub(crate) fn note_session_facts_context_drawn(drawn: bool) {
     SESSION_FACTS_DREW_CONTEXT.store(drawn, Ordering::Relaxed);
 }
@@ -772,6 +782,18 @@ pub fn context_widget_visible() -> bool {
     mode.visible(SESSION_FACTS_DREW_CONTEXT.load(Ordering::Relaxed))
 }
 
+/// Whether the model card should repeat the model, provider, and access method.
+/// `display.model_widget` is `auto` by default, which drops those rows while the
+/// fact stack beside the input is already reporting them.
+///
+/// Only the duplicated rows are gated. The card's session line, service tier,
+/// and native-compaction badge have no equivalent in the stack, so they keep
+/// rendering either way (see `render_model_info`).
+pub fn model_widget_identity_visible() -> bool {
+    let mode = crate::config::config().display.model_widget;
+    mode.visible(SESSION_FACTS_DREW_MODEL.load(Ordering::Relaxed))
+}
+
 impl InfoWidgetData {
     /// Whether the side todo section should draw. Every todo render and height
     /// path goes through this, so the layout never reserves rows for a section
@@ -787,6 +809,26 @@ impl InfoWidgetData {
             return false;
         }
         self.todos_are_swarm_plan || !self.todo_widget_yields_to_band
+    }
+
+    /// Whether the model card should state the model, effort, provider, and
+    /// access method. Every model render and height path goes through this, so
+    /// the layout never reserves rows for lines that then render nothing.
+    pub fn show_model_identity(&self) -> bool {
+        model_widget_identity_visible()
+    }
+
+    /// Whether the OpenAI service tier badge has something to draw. It survives
+    /// the identity gate, so both height paths have to ask before deciding the
+    /// model card's first row is empty.
+    pub fn has_service_tier_badge(&self) -> bool {
+        self.provider_name
+            .as_deref()
+            .is_some_and(|provider| provider.trim().to_ascii_lowercase().starts_with("openai"))
+            && self
+                .service_tier
+                .as_deref()
+                .is_some_and(|tier| !tier.trim().is_empty())
     }
 
     /// Whether the side context card should draw. Every context render and
@@ -911,7 +953,24 @@ impl InfoWidgetData {
                 .map(|u| u.available)
                 .unwrap_or(false),
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
-            WidgetKind::ModelInfo => self.model.is_some(),
+            // With the identity rows gated off, the card is only worth a
+            // placement when something else still fills it. Otherwise an empty
+            // bordered box floats beside the chat.
+            WidgetKind::ModelInfo => {
+                self.model.is_some()
+                    && (self.show_model_identity()
+                        || self.has_service_tier_badge()
+                        || self.session_count.is_some()
+                        || self
+                            .session_name
+                            .as_deref()
+                            .is_some_and(|name| !name.trim().is_empty())
+                        || self
+                            .working_dir
+                            .as_deref()
+                            .is_some_and(|dir| !dir.trim().is_empty())
+                        || self.usage_info.as_ref().is_some_and(|info| info.available))
+            }
             WidgetKind::Tips => false,
             WidgetKind::GitStatus => self
                 .git_info
@@ -1416,24 +1475,30 @@ pub(crate) fn calculate_widget_height(
             if data.model.is_none() {
                 return 0;
             }
-            let mut h = 1u16; // Model name
-            if data
-                .provider_name
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|s| !s.is_empty())
+            // Mirrors the `show_model_identity` gate in `render_model_widget`:
+            // reserving rows for lines it no longer paints leaves the card
+            // padded out with blanks.
+            let show_identity = data.show_model_identity();
+            let mut h = u16::from(show_identity || data.has_service_tier_badge()); // Model name
+            if show_identity
+                && data
+                    .provider_name
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty())
             {
                 h += 1; // Provider line
             }
-            if data
-                .connection_type
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|s| !s.is_empty())
+            if show_identity
+                && data
+                    .connection_type
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty())
             {
                 h += 1; // Connection line
             }
-            if data.auth_method != AuthMethod::Unknown {
+            if show_identity && data.auth_method != AuthMethod::Unknown {
                 h += 1; // Auth method line
             }
             if data.session_count.is_some() || data.session_name.is_some() {

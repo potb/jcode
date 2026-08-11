@@ -156,6 +156,13 @@ pin_images = true
 # reported twice. Set "on" to keep both.
 # context_widget = "auto"
 
+# Whether the info widget's model card repeats the model, reasoning effort,
+# provider, and access method (auto/on/off, default: auto). "auto" drops those
+# rows while the session-fact stack is reporting the same values, so the
+# identity is not stated twice. The card's session line and its widget-only
+# badges (service tier, native compaction) always render.
+# model_widget = "auto"
+
 # Keep the current provider's usage limits pinned to the last line of the
 # terminal, below the input (default: false). The line adapts to the terminal
 # width: labelled bars when wide, a compact "5h 62% · wk 81%" summary when
@@ -907,6 +914,33 @@ mod tests {
         let template = Config::default_config_file_contents();
         assert!(
             template.contains("context_widget"),
+            "the shipped template should document the setting"
+        );
+    }
+
+    /// End-to-end config wiring for `display.model_widget`, the same knob as
+    /// `context_widget` applied to the model card's identity rows.
+    #[test]
+    fn model_widget_round_trips_through_toml_and_is_documented() {
+        use jcode_config_types::ContextWidgetMode;
+
+        let cfg: Config = toml::from_str("[display]\nmodel_widget = \"on\"\n")
+            .expect("the documented snippet must parse");
+        assert_eq!(cfg.display.model_widget, ContextWidgetMode::On);
+
+        let bare: Config =
+            toml::from_str("[display]\npin_todos = true\n").expect("parse without the key");
+        assert_eq!(
+            bare.display.model_widget,
+            ContextWidgetMode::Auto,
+            "omitting the key must mean auto"
+        );
+        assert!(!bare.display.model_widget.visible(true));
+        assert!(bare.display.model_widget.visible(false));
+
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("model_widget"),
             "the shipped template should document the setting"
         );
     }

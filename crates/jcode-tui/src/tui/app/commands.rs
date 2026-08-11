@@ -3634,6 +3634,53 @@ pub(super) fn handle_facts_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    // `/facts model [auto|on|off]` is the same knob for the model card's
+    // identity rows: model and effort, provider and access method. Grouped with
+    // `context` because both answer "why am I reading this twice".
+    if let Some(model_arg) = arg.strip_prefix("model") {
+        let model_arg = model_arg.trim();
+        let mode = if model_arg.is_empty() {
+            if crate::tui::info_widget::model_widget_identity_visible() {
+                jcode_config_types::ContextWidgetMode::Off
+            } else {
+                jcode_config_types::ContextWidgetMode::On
+            }
+        } else {
+            match jcode_config_types::ContextWidgetMode::parse(model_arg) {
+                Some(mode) => mode,
+                None => {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: /facts model [auto|on|off]".to_string(),
+                    ));
+                    return true;
+                }
+            }
+        };
+        app.set_status_notice(match mode {
+            jcode_config_types::ContextWidgetMode::Auto => "Model card: AUTO",
+            jcode_config_types::ContextWidgetMode::On => "Model card: ON",
+            jcode_config_types::ContextWidgetMode::Off => "Model card: OFF",
+        });
+        match crate::config::Config::set_model_widget(mode) {
+            Ok(()) => app.push_display_message(DisplayMessage::system(
+                match mode {
+                    jcode_config_types::ContextWidgetMode::Auto =>
+                        "Model card set to auto: the model, effort, provider, and access method hide while the session facts report them.",
+                    jcode_config_types::ContextWidgetMode::On =>
+                        "Model card enabled. It repeats the model and provider even alongside the session facts.",
+                    jcode_config_types::ContextWidgetMode::Off =>
+                        "Model card identity disabled. The session line and badges still show.",
+                }
+                .to_string(),
+            )),
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Failed to save display.model_widget: {}",
+                error
+            ))),
+        }
+        return true;
+    }
+
     let mode = if arg.is_empty() {
         // Bare `/facts` toggles sides. When the stack is off, flipping would be
         // invisible, so bring it back on the side it last would have used.
@@ -3648,7 +3695,8 @@ pub(super) fn handle_facts_command(app: &mut App, trimmed: &str) -> bool {
             Some(mode) => mode,
             None => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /facts [left|right|off] or /facts context [auto|on|off]".to_string(),
+                    "Usage: /facts [left|right|off], /facts context [auto|on|off], or /facts model [auto|on|off]"
+                        .to_string(),
                 ));
                 return true;
             }

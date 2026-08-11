@@ -152,7 +152,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/facts",
-        "Move the session facts beside the input (left/right/off, context)",
+        "Move the session facts beside the input (left/right/off, context, model)",
     ),
     RegisteredCommand::public(
         "/productivity",

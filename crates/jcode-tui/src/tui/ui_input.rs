@@ -2321,20 +2321,18 @@ impl FactSide {
     }
 }
 
-/// Whether the left-anchored stack has to be drawn into reserved rows instead
-/// of composited into unused cells.
+/// Whether the left-anchored facts are drawn as a pinned block in reserved rows
+/// rather than composited into unused cells.
 ///
-/// Compositing needs a blank run at the anchoring edge. The right edge always
-/// has one, because that is where content *ends*: a short row leaves a suffix.
-/// The left edge only has one in centered mode, where the composer's content is
-/// inset. In left-aligned mode every row starts at column 0, so probing finds
-/// nothing and the stack would either vanish or silently flip to the right
-/// edge, which reads as a broken setting. Reserve rows there, exactly like the
-/// pinned usage footer does.
+/// Always, when the left edge is configured. Compositing hunts for blank cells,
+/// so the facts land wherever the frame happens to have room: partway up the
+/// transcript on a short conversation, sliding as content grows. "Bottom left"
+/// has to mean the bottom at every content height, which only a reservation can
+/// promise. Centered mode has a left gutter and *could* composite, but placement
+/// that moves with unrelated content is the thing being fixed, not the missing
+/// gutter, so both alignments take the same pinned path.
 fn left_fact_block_active(app: &dyn TuiState) -> bool {
-    FactSide::from_config() == Some(FactSide::Left)
-        && !app.centered_mode()
-        && !app.chat_overscroll_active()
+    FactSide::from_config() == Some(FactSide::Left) && !app.chat_overscroll_active()
 }
 
 /// How many rows the reserved bottom-left fact block needs at `width`. Zero
@@ -2349,6 +2347,30 @@ pub(super) fn left_fact_block_height(app: &dyn TuiState, width: u16) -> u16 {
     u16::try_from(right_fact_lines(app).len()).unwrap_or(0)
 }
 
+/// How many columns the pinned block needs at `width`: its widest row plus the
+/// edge padding and the gap that keeps it clear of whatever shares the band.
+///
+/// The layout uses this to split the bottom band with the pinned usage footer,
+/// which hugs the opposite edge. Measuring the real rows means a long directory
+/// or branch name cannot silently run under the usage numbers.
+pub(super) fn left_fact_block_width(app: &dyn TuiState, width: u16) -> u16 {
+    if !left_fact_block_active(app) || width <= RIGHT_FACT_PAD {
+        return 0;
+    }
+    let widest = right_fact_lines(app)
+        .iter()
+        .map(|line| line.width)
+        .max()
+        .unwrap_or(0);
+    if widest == 0 {
+        return 0;
+    }
+    widest
+        .saturating_add(RIGHT_FACT_PAD)
+        .saturating_add(RIGHT_FACT_GAP)
+        .min(width)
+}
+
 /// Paint the reserved bottom-left fact block. Rows keep the stack's visual
 /// order and are indented by the same edge padding the composited stack uses,
 /// so switching between centered and left-aligned mode does not move the facts
@@ -2360,17 +2382,17 @@ pub(super) fn draw_left_fact_block(
     debug_capture: &mut Option<FrameCaptureBuilder>,
 ) {
     if area.width <= RIGHT_FACT_PAD || area.height == 0 {
-        crate::tui::info_widget::note_session_facts_context_drawn(false);
+        report_drawn_facts(&[]);
         return;
     }
     let lines = right_fact_lines(app);
     if lines.is_empty() {
-        crate::tui::info_widget::note_session_facts_context_drawn(false);
+        report_drawn_facts(&[]);
         return;
     }
 
     let inner_width = area.width - RIGHT_FACT_PAD;
-    let mut context_drawn = false;
+    let mut drawn: Vec<FactRowKind> = Vec::new();
     // Bottom-anchored: the context row sits nearest the input, matching the
     // composited stack. A block taller than its reservation drops rows from the
     // top rather than overflowing into the input.
@@ -2383,9 +2405,7 @@ pub(super) fn draw_left_fact_block(
             inner_width,
             1,
         );
-        if line.is_context {
-            context_drawn = true;
-        }
+        drawn.push(line.kind);
         if let Some(capture) = debug_capture.as_mut() {
             capture.layout.session_fact_placements.push(
                 jcode_tui_visual_debug::SessionFactPlacementCapture {
@@ -2402,38 +2422,67 @@ pub(super) fn draw_left_fact_block(
         let spans = overscroll_truncate_spans(line.spans, inner_width as usize);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     }
-    crate::tui::info_widget::note_session_facts_context_drawn(context_drawn);
+    report_drawn_facts(&drawn);
+}
+
+/// Tell the side cards which facts the stack actually painted this frame.
+///
+/// A single call site per frame, always reached, including the early returns
+/// that draw nothing: a card that stood down for a stack which then failed to
+/// appear would take the reading off screen entirely.
+fn report_drawn_facts(drawn: &[FactRowKind]) {
+    crate::tui::info_widget::note_session_facts_drawn(
+        drawn.contains(&FactRowKind::Context),
+        drawn.contains(&FactRowKind::Model) || drawn.contains(&FactRowKind::Access),
+    );
 }
 
 #[derive(Clone)]
 struct RightFactLine {
     spans: Vec<Span<'static>>,
     width: u16,
-    /// Whether this row is the context reading. Tagged at construction rather
-    /// than sniffed from the text later: the directory row also contains
-    /// slashes and digits, so any content heuristic would eventually
-    /// misidentify it and stand the side context card down for the wrong row.
-    is_context: bool,
+    /// What this row reports. Tagged at construction rather than sniffed from
+    /// the text later: the directory row also contains slashes and digits, so
+    /// any content heuristic would eventually misidentify it and stand the
+    /// wrong side card down.
+    kind: FactRowKind,
+}
+
+/// Which fact a stack row carries. Only the rows a side card can duplicate are
+/// distinguished; everything else is `Other`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FactRowKind {
+    Other,
+    /// Provider and access method, duplicated by the model card's detail line.
+    Access,
+    /// Model name and reasoning effort, duplicated by the model card's title.
+    Model,
+    /// Context usage gauge, duplicated by the context card.
+    Context,
 }
 
 impl RightFactLine {
     fn new(spans: Vec<Span<'static>>) -> Option<Self> {
-        Self::build(spans, false)
+        Self::build(spans, FactRowKind::Other)
     }
 
     fn context(spans: Vec<Span<'static>>) -> Option<Self> {
-        Self::build(spans, true)
+        Self::build(spans, FactRowKind::Context)
     }
 
-    fn build(spans: Vec<Span<'static>>, is_context: bool) -> Option<Self> {
+    fn access(spans: Vec<Span<'static>>) -> Option<Self> {
+        Self::build(spans, FactRowKind::Access)
+    }
+
+    fn model(spans: Vec<Span<'static>>) -> Option<Self> {
+        Self::build(spans, FactRowKind::Model)
+    }
+
+    fn build(spans: Vec<Span<'static>>, kind: FactRowKind) -> Option<Self> {
         use unicode_width::UnicodeWidthStr;
         let width: usize = spans.iter().map(|span| span.content.width()).sum();
         let width = u16::try_from(width).ok()?;
-        (width > 0).then_some(Self {
-            spans,
-            width,
-            is_context,
-        })
+        (width > 0).then_some(Self { spans, width, kind })
     }
 }
 
@@ -2458,14 +2507,13 @@ pub(super) fn draw_right_fact_stack(
     input_cursor: Option<Position>,
     debug_capture: &mut Option<FrameCaptureBuilder>,
 ) {
-    // Every exit reports whether a context row reached the screen, so the side
-    // context card can never stand down for a stack that then drew nothing.
-    // An early return that forgot to report would leave the flag stale from a
-    // previous frame, which is exactly the state where context disappears from
-    // both places at once.
-    let mut context_drawn = false;
-    // The reserved left block already ran this frame and owns the flag. Noting
-    // `false` here would clobber its report, since the stack draws later.
+    // Every exit reports which rows reached the screen, so a side card can
+    // never stand down for a stack that then drew nothing. An early return that
+    // forgot to report would leave the flags stale from a previous frame, which
+    // is exactly the state where a reading disappears from both places at once.
+    let mut drawn: Vec<FactRowKind> = Vec::new();
+    // The reserved left block already ran this frame and owns the flags. Noting
+    // an empty set here would clobber its report, since the stack draws later.
     if left_fact_block_active(app) {
         return;
     }
@@ -2477,9 +2525,9 @@ pub(super) fn draw_right_fact_stack(
         transcript_scrollbar_visible,
         input_cursor,
         debug_capture,
-        &mut context_drawn,
+        &mut drawn,
     );
-    crate::tui::info_widget::note_session_facts_context_drawn(context_drawn);
+    report_drawn_facts(&drawn);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2491,7 +2539,7 @@ fn draw_fact_stack_inner(
     transcript_scrollbar_visible: bool,
     input_cursor: Option<Position>,
     debug_capture: &mut Option<FrameCaptureBuilder>,
-    context_drawn: &mut bool,
+    drawn: &mut Vec<FactRowKind>,
 ) {
     // `session_facts = "off"` suppresses the stack entirely.
     let Some(side) = FactSide::from_config() else {
@@ -2574,7 +2622,7 @@ fn draw_fact_stack_inner(
         placements
     };
 
-    *context_drawn = placements.iter().any(|placement| placement.line.is_context);
+    drawn.extend(placements.iter().map(|placement| placement.line.kind));
     for placement in placements {
         if let Some(capture) = debug_capture.as_mut() {
             capture.layout.session_fact_placements.push(
@@ -2626,7 +2674,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
         }
         access.push(Span::styled(label.to_string(), right_fact_neutral_style()));
     }
-    if let Some(line) = RightFactLine::new(access) {
+    if let Some(line) = RightFactLine::access(access) {
         lines.push(line);
     }
 
@@ -2650,7 +2698,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
                 right_fact_neutral_style(),
             ));
         }
-        if let Some(line) = RightFactLine::new(spans) {
+        if let Some(line) = RightFactLine::model(spans) {
             lines.push(line);
         }
     }

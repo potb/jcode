@@ -128,30 +128,44 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn compact_model_height(data: &InfoWidgetData) -> u16 {
-    if data.model.is_some() {
-        let mut lines = 1u16;
-        let has_provider = data
-            .provider_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-        if has_provider || data.auth_method != AuthMethod::Unknown {
-            lines += 1;
-        }
-        // Mirror render_model_info: a blank session name alone produces no line.
-        let has_session_line = data.session_count.is_some()
-            || data
-                .session_name
-                .as_deref()
-                .is_some_and(|s| !s.trim().is_empty());
-        if has_session_line {
-            lines += 1;
-        }
-        lines
-    } else {
-        0
+    if data.model.is_none() {
+        return 0;
     }
+    // Must mirror `render_model_info` line for line, or the overview clips its
+    // last rows or reserves blank ones.
+    let show_identity = data.show_model_identity();
+    let mut lines = 0u16;
+
+    // First row: the model name when the identity shows, otherwise only the
+    // widget-only badges that survive the gate, and nothing at all if the
+    // snapshot carries none of them.
+    if show_identity
+        || data.has_service_tier_badge()
+        || data.native_compaction_mode.is_some()
+    {
+        lines += 1;
+    }
+
+    let has_provider = data
+        .provider_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if show_identity && (has_provider || data.auth_method != AuthMethod::Unknown) {
+        lines += 1;
+    }
+
+    // Mirror render_model_info: a blank session name alone produces no line.
+    let has_session_line = data.session_count.is_some()
+        || data
+            .session_name
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+    if has_session_line {
+        lines += 1;
+    }
+    lines
 }
 
 fn compact_background_height(data: &InfoWidgetData) -> u16 {

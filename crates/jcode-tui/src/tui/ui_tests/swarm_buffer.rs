@@ -1092,3 +1092,131 @@ fn context_card_can_be_forced_on_alongside_the_stack() {
     let _drew = crate::tui::info_widget::SessionFactsContextDrawnGuard::set(true);
     assert!(crate::tui::info_widget::context_widget_visible());
 }
+
+
+/// Env guard for `display.model_widget` (JCODE_MODEL_WIDGET).
+struct ModelWidgetEnvGuard;
+
+impl ModelWidgetEnvGuard {
+    fn set(mode: &str) -> Self {
+        crate::env::set_var("JCODE_MODEL_WIDGET", mode);
+        crate::config::invalidate_config_cache();
+        Self
+    }
+}
+
+impl Drop for ModelWidgetEnvGuard {
+    fn drop(&mut self) {
+        crate::env::remove_var("JCODE_MODEL_WIDGET");
+        crate::config::invalidate_config_cache();
+    }
+}
+
+/// The user's request: with the model, effort, and provider now pinned bottom
+/// left, the info widget must stop repeating them. What stays is the session
+/// line, which the stack never reports.
+#[test]
+fn model_card_drops_its_identity_rows_once_the_fact_stack_draws_them() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("left");
+    let _model = ModelWidgetEnvGuard::set("auto");
+
+    let mut state = fact_test_state(String::new(), false);
+    state.centered_mode = true;
+    state.suppress_info_widgets = false;
+    state.info_widget_data.session_count = Some(1);
+    state.info_widget_data.session_name = Some("citadel snail".to_string());
+
+    let backend = TestBackend::new(110, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    // First frame primes the drawn flag, second observes the card yielding.
+    for _ in 0..2 {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("model dedupe frame");
+    }
+
+    let rows = buffer_rows(&terminal);
+    // Guard against a vacuous pass: the card yielding only means something if
+    // the stack really painted those rows.
+    let stack_row = rows
+        .iter()
+        .rposition(|row| row.contains("GPT-5.6 Sol high"))
+        .expect("the fact stack must show the model for this test to mean anything");
+    assert!(
+        rows.iter().any(|row| row.contains("1 session")),
+        "the session line has no equivalent in the stack and must survive:\n{}",
+        rows.join("\n")
+    );
+    // Only the card is in scope: the onboarding banner at the top of an empty
+    // transcript also names the model, and it is not a duplicate of the stack.
+    // The card is identified by its border, which is the one region this gate
+    // controls.
+    let card_rows: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.contains('\u{2502}'))
+        .collect();
+    assert!(
+        !card_rows.is_empty(),
+        "precondition: the model card should still be placed:\n{}",
+        rows.join("\n")
+    );
+    for row in &card_rows {
+        assert!(
+            !row.contains("GPT-5.6 Sol") && !row.contains("OAuth") && !row.contains("openai"),
+            "the card must not repeat what the stack reports, got: {row:?}"
+        );
+    }
+    // And the stack row itself is untouched by the gate.
+    assert!(rows[stack_row].contains("GPT-5.6 Sol high"));
+    assert!(!state.info_widget_data.show_model_identity());
+}
+
+/// The gate keys off what the stack actually drew. With the stack off, the card
+/// keeps stating the model: hiding it would take the identity off screen.
+#[test]
+fn model_card_keeps_its_identity_when_the_fact_stack_is_off() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("off");
+    let _model = ModelWidgetEnvGuard::set("auto");
+
+    let mut state = fact_test_state(String::new(), false);
+    state.suppress_info_widgets = false;
+
+    let backend = TestBackend::new(110, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    for _ in 0..2 {
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("model restore frame");
+    }
+
+    let rows = buffer_rows(&terminal);
+    assert!(
+        rows.iter().any(|row| row.contains("GPT-5.6 Sol")),
+        "with the stack off the card must keep stating the model:\n{}",
+        rows.join("\n")
+    );
+    assert!(state.info_widget_data.show_model_identity());
+}
+
+/// `model_widget = "on"` keeps both, for anyone who wants the card unchanged.
+#[test]
+fn model_card_can_be_forced_on_alongside_the_stack() {
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("left");
+    let _model = ModelWidgetEnvGuard::set("on");
+    assert!(crate::tui::info_widget::model_widget_identity_visible());
+}
+
+/// `model_widget = "off"` drops the identity rows even without the stack, which
+/// is the escape hatch for anyone who never wants them in the widget.
+#[test]
+fn model_card_identity_can_be_forced_off_without_the_stack() {
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("off");
+    let _model = ModelWidgetEnvGuard::set("off");
+    assert!(!crate::tui::info_widget::model_widget_identity_visible());
+}
