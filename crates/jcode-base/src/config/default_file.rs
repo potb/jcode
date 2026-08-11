@@ -143,6 +143,11 @@ pin_images = true
 # false to keep saved/injected memory chatter out of the HUD.
 # memory_widget = true
 
+# Show the KV cache hit-rate line ("KV cache: yield … · last … · session …")
+# in the info widget (default: true). Set to false to hide it; /cache stats
+# still reports the same numbers on demand.
+# kv_cache_widget = true
+
 # Which edge of the composer the session-fact stack hugs: provider and access
 # method, model and reasoning effort, working directory and git branch, then
 # the context gauge (right/left/off, default: right). The stack only paints

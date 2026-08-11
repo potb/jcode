@@ -64,6 +64,11 @@ pub struct DisplayConfig {
     /// true). Set to false to hide saved/injected memory chatter from the HUD.
     #[serde(default = "default_true")]
     pub memory_widget: bool,
+    /// Whether the info widget shows the KV cache hit-rate line (default:
+    /// true). Set to false to hide `KV cache: yield … · last … · session …`
+    /// from the HUD; `/cache stats` still works.
+    #[serde(default = "default_true")]
+    pub kv_cache_widget: bool,
     /// Keep the current provider's usage limits pinned to the last line of the
     /// terminal, below the input (default: false). The line adapts to the
     /// terminal width: full labelled bars when wide, a compact
@@ -165,6 +170,7 @@ impl Default for DisplayConfig {
             pin_todos: true,
             todo_widget: TodoWidgetMode::default(),
             memory_widget: true,
+            kv_cache_widget: true,
             pin_usage: false,
             queue_mode: false,
             auto_server_reload: true,
@@ -308,6 +314,21 @@ mod memory_widget_tests {
         assert!(text.contains("memory_widget = false"), "{}", text);
     }
 }
+#[cfg(test)]
+mod kv_cache_widget_tests {
+    use super::DisplayConfig;
+
+    #[test]
+    fn kv_cache_widget_defaults_on_and_parses_off() {
+        let cfg: DisplayConfig = toml::from_str("").unwrap();
+        assert!(cfg.kv_cache_widget);
+        let cfg: DisplayConfig = toml::from_str("kv_cache_widget = false").unwrap();
+        assert!(!cfg.kv_cache_widget);
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("kv_cache_widget = false"), "{}", text);
+    }
+}
+
 #[cfg(test)]
 mod session_facts_mode_tests {
     use super::DisplayConfig;

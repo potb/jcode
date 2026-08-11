@@ -713,6 +713,12 @@ pub fn memory_widget_visible() -> bool {
     crate::config::config().display.memory_widget
 }
 
+/// Whether the KV cache hit-rate line/widget should render at all
+/// (`display.kv_cache_widget`, default true).
+pub fn kv_cache_widget_visible() -> bool {
+    crate::config::config().display.kv_cache_widget
+}
+
 /// Whether the side todo widget should render at all. `display.todo_widget`
 /// is `auto` by default, which hides the side copy while `display.pin_todos`
 /// keeps the full list pinned to the top of the transcript.
@@ -908,7 +914,7 @@ impl InfoWidgetData {
                 {
                     sections += 1;
                 }
-                if self.cache_hit_info.is_some() {
+                if self.cache_hit_info.is_some() && kv_cache_widget_visible() {
                     sections += 1;
                 }
                 if self.compaction_info.is_some() {
@@ -952,7 +958,7 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|u| u.available)
                 .unwrap_or(false),
-            WidgetKind::KvCache => self.cache_hit_info.is_some(),
+            WidgetKind::KvCache => self.cache_hit_info.is_some() && kv_cache_widget_visible(),
             // With the identity rows gated off, the card is only worth a
             // placement when something else still fills it. Otherwise an empty
             // bordered box floats beside the chat.
@@ -1460,7 +1466,11 @@ pub(crate) fn calculate_widget_height(
             }
         }
         WidgetKind::KvCache => {
-            let Some(cache) = data.cache_hit_info.as_ref() else {
+            let Some(cache) = data
+                .cache_hit_info
+                .as_ref()
+                .filter(|_| kv_cache_widget_visible())
+            else {
                 return 0;
             };
             let attribution_lines = if cache.miss_attributions.is_empty() {
@@ -1934,7 +1944,7 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'sta
 }
 
 fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
-    let Some(cache) = data.cache_hit_info.as_ref() else {
+    let Some(cache) = data.cache_hit_info.as_ref().filter(|_| kv_cache_widget_visible()) else {
         return Vec::new();
     };
     let mut lines = vec![render_kv_cache_summary_line(cache)];
@@ -2349,7 +2359,9 @@ pub(crate) fn render_sections(
         lines.extend(render_usage_compact(info, inner.width));
     }
 
-    if let Some(cache) = data.cache_hit_info.as_ref() {
+    if let Some(cache) = data.cache_hit_info.as_ref()
+        && kv_cache_widget_visible()
+    {
         lines.push(render_kv_cache_summary_line(cache));
     }
 

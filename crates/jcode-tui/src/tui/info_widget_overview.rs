@@ -207,7 +207,11 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
-    if data.cache_hit_info.is_some() { 1 } else { 0 }
+    if data.cache_hit_info.is_some() && crate::tui::info_widget::kv_cache_widget_visible() {
+        1
+    } else {
+        0
+    }
 }
 
 fn compact_git_height(data: &InfoWidgetData) -> u16 {
