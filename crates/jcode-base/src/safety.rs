@@ -123,6 +123,13 @@ pub struct AmbientTranscript {
     /// Full conversation transcript (markdown) for email notifications
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// Session ID of the agent that ran the cycle, when known.
+    ///
+    /// `session_id` above is a synthetic `ambient_<timestamp>` label rather than
+    /// a real session, so this is what links a transcript to the session the
+    /// picker lists (issue #26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -236,6 +236,9 @@ impl Tool for EndAmbientCycleTool {
             ended_at: now,
             status: CycleStatus::Complete,
             conversation: None, // populated by the runner after cycle completes
+            // The tool runs inside the cycle agent, so this is the real session
+            // the picker will list for this cycle (issue #26).
+            agent_session_id: Some(ctx.session_id.clone()),
         };
 
         // Store for the ambient runner to pick up

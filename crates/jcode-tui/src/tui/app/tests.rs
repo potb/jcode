@@ -55,6 +55,29 @@ include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
+
+/// The visible ambient path (`ambient.visible = true`) runs a real TUI, so the
+/// ambient marker has to be set and persisted here or only headless cycles
+/// would ever be classified by the session picker (issue #26).
+/// `Session::set_ambient` is memory-only, so this asserts the save too: a cycle
+/// that dies before its first turn-end save must still be marked on disk.
+#[test]
+fn set_ambient_mode_marks_and_persists_the_session_as_ambient() {
+    let mut app = create_test_app();
+    assert!(!app.session.is_ambient);
+
+    app.set_ambient_mode(
+        "ambient system prompt".to_string(),
+        "do a cycle".to_string(),
+    );
+
+    assert!(app.session.is_ambient);
+    let loaded = crate::session::Session::load(&app.session.id).expect("session on disk");
+    assert!(
+        loaded.is_ambient,
+        "visible ambient cycle must persist the marker immediately"
+    );
+}
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![

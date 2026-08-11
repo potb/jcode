@@ -137,6 +137,12 @@ pub struct SessionInfo {
     pub is_canary: bool,
     pub is_debug: bool,
     /// Whether this session was produced by an ambient cycle.
+    ///
+    /// Defaulted for deserialization: the picker's warm-start disk cache
+    /// serializes `SessionInfo` at a fixed schema version, so a cache written
+    /// before this field existed must still load instead of being silently
+    /// discarded on the first `/resume` after an upgrade.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub is_ambient: bool,
     pub saved: bool,
     pub save_label: Option<String>,

@@ -1243,8 +1243,14 @@ impl App {
     pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
         self.ambient_system_prompt = Some(system_prompt);
         // Visible cycles go through the TUI, so mark the session here too or
-        // the picker would only classify headless cycles (issue #26).
+        // the picker would only classify headless cycles (issue #26). Persist
+        // immediately: `Session::set_ambient` only mutates memory, and a cycle
+        // that dies before the first turn-end save would otherwise lose the
+        // marker and reappear as anonymous debug noise.
         self.session.set_ambient(true);
+        if let Err(err) = self.session.save() {
+            crate::logging::error(&format!("Failed to persist ambient session state: {}", err));
+        }
         crate::tool::ambient::register_ambient_session(self.session.id.clone());
         self.queued_messages.push(initial_message);
         self.is_processing = true;

@@ -1339,10 +1339,14 @@ fn ambient_transcripts_backfill_session_ids_for_cycles_predating_the_flag() {
     let transcripts = temp.path().join("ambient").join("transcripts");
     std::fs::create_dir_all(&transcripts).expect("create transcripts dir");
 
+    // Shape taken from a real transcript written by an ambient cycle: the
+    // top-level `session_id` is a synthetic `ambient_<timestamp>` cycle label
+    // and must be ignored, because no such session exists on disk.
     std::fs::write(
-        transcripts.join("cycle_1.json"),
+        transcripts.join("2026-08-11-164311.json"),
         serde_json::to_vec(&serde_json::json!({
-            "session_id": "session_old_ambient",
+            "session_id": "ambient_20260811_164331",
+            "agent_session_id": "session_nautilus_1786466591105_038e0fa2272f86df",
             "started_at": chrono::Utc::now(),
         }))
         .expect("serialize transcript"),
@@ -1350,17 +1354,26 @@ fn ambient_transcripts_backfill_session_ids_for_cycles_predating_the_flag() {
     .expect("write transcript");
     // Blank IDs and non-JSON files must be ignored rather than poisoning the set.
     std::fs::write(
-        transcripts.join("cycle_2.json"),
-        b"{\"session_id\": \"  \"}",
+        transcripts.join("cycle_blank.json"),
+        b"{\"agent_session_id\": \"  \"}",
     )
     .expect("write blank transcript");
+    // Transcripts written before `agent_session_id` existed carry only the
+    // synthetic label, which must not be treated as a session.
+    std::fs::write(
+        transcripts.join("cycle_legacy.json"),
+        b"{\"session_id\": \"ambient_20260101_000000\"}",
+    )
+    .expect("write legacy transcript");
     std::fs::write(transcripts.join("notes.txt"), b"session_not_ambient")
         .expect("write non-json file");
 
     let ids = ambient_session_ids_from_transcripts(&transcripts);
     assert_eq!(
         ids,
-        std::collections::HashSet::from(["session_old_ambient".to_string()])
+        std::collections::HashSet::from([
+            "session_nautilus_1786466591105_038e0fa2272f86df".to_string()
+        ])
     );
 
     // A missing directory is the common case (ambient never ran) and must be empty.

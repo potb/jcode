@@ -1139,6 +1139,7 @@ impl AmbientRunnerHandle {
                         compactions: result.compactions,
                         memories_modified: result.memories_modified,
                         conversation: result.conversation.clone(),
+                        agent_session_id: result.agent_session_id.clone(),
                     };
                     let _ = self.inner.safety.save_transcript(&transcript);
 
@@ -1426,6 +1427,7 @@ impl AmbientRunnerHandle {
                 started_at,
                 ended_at: Utc::now(),
                 conversation: Some(conversation),
+                agent_session_id: Some(ambient_session_id.clone()),
                 ..result
             });
         }
@@ -1453,6 +1455,7 @@ impl AmbientRunnerHandle {
                 started_at,
                 ended_at: Utc::now(),
                 conversation: Some(conversation),
+                agent_session_id: Some(ambient_session_id.clone()),
                 ..result
             });
         }
@@ -1483,6 +1486,7 @@ impl AmbientRunnerHandle {
             ended_at: Utc::now(),
             status: CycleStatus::Incomplete,
             conversation: Some(agent.export_conversation_markdown()),
+            agent_session_id: Some(ambient_session_id.clone()),
         };
         agent.mark_closed();
         Ok(forced)
@@ -1568,6 +1572,9 @@ impl AmbientRunnerHandle {
                     ended_at: Utc::now(),
                     status: CycleStatus::Incomplete,
                     conversation: None,
+                    // The visible cycle runs in a separate process, so its
+                    // session ID is only known from the result file it writes.
+                    agent_session_id: None,
                 })
             }
             Err(e) => {

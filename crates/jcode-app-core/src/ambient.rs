@@ -167,6 +167,13 @@ pub struct AmbientCycleResult {
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub status: CycleStatus,
+    /// Session ID of the agent that ran this cycle.
+    ///
+    /// `AmbientTranscript::session_id` is a synthetic `ambient_<timestamp>` cycle
+    /// label, not a real session, so without this the transcript cannot be
+    /// linked back to the session the picker lists (issue #26).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
     /// Full conversation transcript (markdown) for email notifications
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,

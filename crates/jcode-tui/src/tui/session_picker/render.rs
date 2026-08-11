@@ -201,7 +201,17 @@ impl SessionPicker {
         };
 
         let canary_marker = if session.is_canary { " 🔬" } else { "" };
-        let debug_marker = if session.is_debug { " 🧪" } else { "" };
+        // Ambient cycles are always `is_debug`, and the wordy source badge sits
+        // at the end of the line where a long title truncates it away, so the
+        // moon replaces the test-tube here. Otherwise an ambient row would be
+        // indistinguishable from self-dev noise at normal list widths (#26).
+        let debug_marker = if session.is_ambient {
+            " 🌙"
+        } else if session.is_debug {
+            " 🧪"
+        } else {
+            ""
+        };
         let saved_marker = if session.saved { " 📌" } else { "" };
         let selection_marker = if is_marked { "● " } else { "○ " };
         let selection_style = if is_marked {

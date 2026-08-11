@@ -1074,6 +1074,7 @@ mod tests {
             compactions: 1,
             memories_modified: 3,
             conversation: None,
+            agent_session_id: None,
         };
 
         let body = format_cycle_body_safe(&transcript);
@@ -1100,6 +1101,7 @@ mod tests {
             compactions: 1,
             memories_modified: 3,
             conversation: Some("### User\n\nBegin cycle.\n\n### Assistant\n\nDone.\n".to_string()),
+            agent_session_id: None,
         };
 
         let body = format_cycle_body_detailed(&transcript);
@@ -1128,6 +1130,7 @@ mod tests {
             compactions: 0,
             memories_modified: 0,
             conversation: None,
+            agent_session_id: None,
         };
 
         let safe = format_cycle_body_safe(&transcript);
@@ -1293,6 +1296,7 @@ mod desktop_body_tests {
             compactions: 0,
             memories_modified: 1,
             conversation: conversation.map(str::to_string),
+            agent_session_id: None,
         }
     }
 

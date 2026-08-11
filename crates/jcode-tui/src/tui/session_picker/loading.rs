@@ -623,11 +623,15 @@ fn classify_session_source(
 ///
 /// Cycles that ran before `Session::is_ambient` existed have no flag on disk, so
 /// the transcripts are the only durable record that they were ambient.
+///
+/// Only `agent_session_id` is usable here. A transcript's own `session_id` is a
+/// synthetic `ambient_<timestamp>` cycle label, not a session that exists in
+/// `~/.jcode/sessions`, so matching on it classifies nothing.
 fn ambient_session_ids_from_transcripts(transcripts_dir: &Path) -> HashSet<String> {
     #[derive(Deserialize)]
     struct TranscriptSessionId {
         #[serde(default)]
-        session_id: Option<String>,
+        agent_session_id: Option<String>,
     }
 
     let mut ids = HashSet::new();
@@ -641,7 +645,7 @@ fn ambient_session_ids_from_transcripts(transcripts_dir: &Path) -> HashSet<Strin
         }
         if let Ok(bytes) = std::fs::read(&path)
             && let Ok(parsed) = serde_json::from_slice::<TranscriptSessionId>(&bytes)
-            && let Some(session_id) = parsed.session_id
+            && let Some(session_id) = parsed.agent_session_id
             && !session_id.trim().is_empty()
         {
             ids.insert(session_id);

@@ -238,6 +238,7 @@ fn test_ambient_state_record_cycle() {
         ended_at: Utc::now(),
         status: CycleStatus::Complete,
         conversation: None,
+        agent_session_id: None,
     };
 
     state.record_cycle(&result);
@@ -275,6 +276,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
         ended_at: Utc::now(),
         status: CycleStatus::Complete,
         conversation: None,
+        agent_session_id: None,
     };
 
     state.record_cycle(&result);
