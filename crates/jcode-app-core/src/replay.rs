@@ -490,6 +490,8 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                         } else {
                             None
                         },
+                        // Replay timelines describe events, not measured runs.
+                        duration_ms: None,
                     }),
                 ));
             }

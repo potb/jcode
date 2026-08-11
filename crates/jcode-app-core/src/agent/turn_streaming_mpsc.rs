@@ -629,6 +629,9 @@ impl Agent {
                             } else {
                                 None
                             },
+                            // SDK-executed tools report results through the
+                            // stream; the harness never timed them locally.
+                            duration_ms: None,
                         });
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
@@ -1306,6 +1309,8 @@ impl Agent {
                         name: tc.name.clone(),
                         output: error_msg.clone(),
                         error: Some(error_msg.clone()),
+                        // Rejected before execution, so there is nothing to time.
+                        duration_ms: None,
                     });
                     self.add_message(
                         Role::User,
@@ -1448,6 +1453,7 @@ impl Agent {
                                 name: tc.name.clone(),
                                 output: output.output.clone(),
                                 error: None,
+                                duration_ms: Some(tool_elapsed.as_millis() as u64),
                             });
 
                             let side_pane_images =
@@ -1480,6 +1486,7 @@ impl Agent {
                                 name: tc.name.clone(),
                                 output: error_msg.clone(),
                                 error: Some(error_msg.clone()),
+                                duration_ms: Some(tool_elapsed.as_millis() as u64),
                             });
 
                             self.add_message_with_duration(
@@ -1518,6 +1525,7 @@ impl Agent {
                         } else {
                             None
                         },
+                        duration_ms: Some(tool_elapsed.as_millis() as u64),
                     });
 
                     self.add_message_with_duration(
@@ -1568,6 +1576,7 @@ impl Agent {
                         name: tc.name.clone(),
                         output: bg_msg.clone(),
                         error: None,
+                        duration_ms: Some(tool_elapsed.as_millis() as u64),
                     });
 
                     self.add_message_with_duration(

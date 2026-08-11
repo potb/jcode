@@ -783,6 +783,11 @@ pub enum ServerEvent {
         output: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Wall-clock duration of the tool call. Serde-optional so older
+        /// servers (which never send it) and older clients (which ignore it)
+        /// both keep parsing the frame.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
 
     /// Rendered images produced during the live turn, including image-bearing

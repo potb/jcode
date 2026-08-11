@@ -396,6 +396,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
             name: "webfetch".to_string(),
             output: "page A body".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -416,6 +417,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
             name: "webfetch".to_string(),
             output: "page B body".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -433,4 +435,75 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
         tool_b.input.get("url").and_then(|v| v.as_str()),
         Some("https://example.com/b")
     );
+}
+
+/// A remote server reports how long each tool call took on the ToolDone frame,
+/// so remote sessions can show the same timing badge as local ones (issue #48).
+#[test]
+fn test_remote_tool_done_duration_reaches_display_message() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolExec {
+            id: "tool_timed".to_string(),
+            name: "read".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "tool_timed".to_string(),
+            name: "read".to_string(),
+            output: "1 fn main() {}".to_string(),
+            error: None,
+            duration_ms: Some(340),
+        },
+        &mut remote,
+    );
+
+    let row = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|m| m.tool_data.as_ref().is_some_and(|tc| tc.id == "tool_timed"))
+        .expect("tool row should exist")
+        .clone();
+    assert_eq!(row.tool_duration_ms(), Some(340));
+}
+
+/// Older servers omit `duration_ms`, which must leave the row untimed rather
+/// than failing to parse or showing a bogus zero.
+#[test]
+fn test_remote_tool_done_without_duration_leaves_row_untimed() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let frame = serde_json::json!({
+        "type": "tool_done",
+        "id": "tool_legacy",
+        "name": "read",
+        "output": "1 fn main() {}"
+    });
+    let event: crate::protocol::ServerEvent =
+        serde_json::from_value(frame).expect("legacy frame should still parse");
+
+    app.handle_server_event(event, &mut remote);
+
+    let row = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|m| {
+            m.tool_data
+                .as_ref()
+                .is_some_and(|tc| tc.id == "tool_legacy")
+        })
+        .expect("tool row should exist")
+        .clone();
+    assert_eq!(row.tool_duration_ms(), None);
 }

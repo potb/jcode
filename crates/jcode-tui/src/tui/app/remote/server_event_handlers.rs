@@ -7,6 +7,7 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
+    duration_ms: Option<u64>,
 ) -> bool {
     let display_output = remote.handle_tool_done(&id, &name, &output);
     let display_output = if error.is_some()
@@ -39,7 +40,9 @@ pub(super) fn handle_tool_done(
         role: "tool".to_string(),
         content: display_output,
         tool_calls: vec![],
-        duration_secs: None,
+        // Remote servers report the measured duration on the frame. Older
+        // servers omit it, leaving the row untimed.
+        duration_secs: duration_ms.map(|ms| ms as f32 / 1000.0),
         title: None,
         tool_data: Some(tool_call.clone()),
     });

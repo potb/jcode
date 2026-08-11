@@ -470,6 +470,7 @@ fn run_collects_one_turn() {
                     name: "bash".to_string(),
                     output: "ok".to_string(),
                     error: None,
+                    duration_ms: None,
                 },
                 writer,
             );
