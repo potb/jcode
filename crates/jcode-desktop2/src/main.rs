@@ -136,12 +136,10 @@ struct App {
     /// cancel it, so a synthetic lift is invisible and a real one still
     /// resolves a frame or two later.
     pending_super_release: Option<(std::time::Instant, bool)>,
-    /// Whether holding Super opens the card-strip overview. Benched: the
-    /// workspace now moves like niri itself, so Super+hjkl slides the camera
-    /// between live pages directly and a zoomed-out field of thumbnails is a
-    /// second spatial model fighting the first. The machinery stays behind
-    /// this flag (and the sessions icon) so it can return as a flip rather
-    /// than a revert if the direct motion proves insufficient.
+    /// Whether holding Super opens the card-strip overview. The overview gives
+    /// the spatial workspace a discoverable entry point even when a compositor
+    /// consumes Super+hjkl before the app can see those chords. The sessions
+    /// icon remains the pointer-accessible equivalent.
     super_overview: bool,
     /// Finished session-store scans, from the picker's worker thread.
     ///
@@ -225,7 +223,7 @@ impl Default for App {
             modifiers: winit::keyboard::ModifiersState::empty(),
             super_held_since: None,
             pending_super_release: None,
-            super_overview: false,
+            super_overview: true,
             resume_scans: Some(std::sync::mpsc::channel()),
             clipboard: clipboard::Clipboard::default(),
             pending_images: Vec::new(),
@@ -889,6 +887,72 @@ impl App {
         Some(input.offset_at_point(x - frame.composer_text_left(), y - origin_y))
     }
 
+    /// Session block under the pointer in the compact strip.
+    ///
+    /// The drawn blocks are intentionally tiny, so their mouse target is the
+    /// full strip band and extends halfway into the gap on either side. This
+    /// keeps the geometry scannable without making it fiddly to click.
+    fn strip_session_at(&self, x: f64, y: f64) -> Option<String> {
+        let (top, bottom) = self.frame.strip()?;
+        if y < top || y > bottom {
+            return None;
+        }
+        let extra = layout::STRIP_BAR_GAP / 2.0 + layout::STRIP_FRAME_PAD;
+        crate::strip::layout_items(&self.model.strips, self.frame.left, self.frame.right)
+            .into_iter()
+            .find_map(|item| match item {
+                crate::strip::Item::Panel {
+                    strip,
+                    panel,
+                    x: panel_x,
+                    width,
+                    ..
+                } if x >= panel_x - extra && x <= panel_x + width + extra => self
+                    .model
+                    .strips
+                    .strips()
+                    .get(strip)
+                    .and_then(|group| group.panels.get(panel))
+                    .map(|panel| panel.session_id.clone()),
+                _ => None,
+            })
+    }
+
+    /// Focus and attach the strip session clicked by the user, preserving the
+    /// same spatial slide used by keyboard navigation.
+    fn click_strip_session(&mut self, session_id: &str) -> bool {
+        let old_strip = self.model.strips.strip_index();
+        let old_panel = self.model.strips.panel_index();
+        let (prev_row, prev_focused) = self.focused_row_snapshot();
+        if !self.model.strips.focus_session(session_id) {
+            return false;
+        }
+        let new_strip = self.model.strips.strip_index();
+        let new_panel = self.model.strips.panel_index();
+        if (old_strip, old_panel) == (new_strip, new_panel) {
+            return true;
+        }
+        if old_strip == new_strip {
+            let direction = if new_panel > old_panel {
+                workspace::Direction::Right
+            } else {
+                workspace::Direction::Left
+            };
+            self.begin_workspace_transition(direction);
+        } else {
+            let direction = if new_strip > old_strip {
+                workspace::Direction::Down
+            } else {
+                workspace::Direction::Up
+            };
+            self.begin_row_transition(direction, prev_row, prev_focused);
+        }
+        self.attach_focused_session();
+        self.request_peek();
+        self.request_redraw();
+        true
+    }
+
     fn on_pointer_pressed(&mut self) {
         // The explorer is in window space and sits above session pages. Folder
         // presses therefore resolve before the focused-page coordinate bridge.
@@ -993,6 +1057,13 @@ impl App {
         // at a press: a menu that the click behind it also acted on is a menu
         // you cannot safely dismiss.
         if self.settings_press(x, y) {
+            return;
+        }
+        // Every session block in the always-visible strip is a direct target.
+        // Resolve it before transcript selection because the strip occupies its
+        // own band immediately above the transcript.
+        if let Some(session_id) = self.strip_session_at(x, y) {
+            self.click_strip_session(&session_id);
             return;
         }
         let hit = self.composer_offset_at(x, y);
@@ -1161,8 +1232,23 @@ impl App {
             }
             return;
         }
+        if self.model.overview.is_open() {
+            let wanted = if self.overview_field().hit(x, y).is_some() {
+                winit::window::CursorIcon::Pointer
+            } else {
+                winit::window::CursorIcon::Default
+            };
+            if self.cursor_icon != wanted {
+                self.cursor_icon = wanted;
+                if let Some(state) = self.state.as_ref() {
+                    state.set_cursor_icon(wanted);
+                }
+            }
+            return;
+        }
         let wanted = if self.frame.hits_gear(x, y)
             || self.frame.hits_sessions(x, y)
+            || self.strip_session_at(x, y).is_some()
             || (self.model.model_picker.is_open()
                 && self
                     .frame
@@ -1231,6 +1317,7 @@ impl App {
                     self.request_redraw();
                 }
             }
+            self.update_cursor_icon();
             return;
         }
         if self.model.spin.dragging {
@@ -1649,6 +1736,14 @@ impl App {
             // strip can only walk sessions that already exist, so adding one
             // has to come from a key.
             Action::SessionNew => self.new_session(),
+
+            Action::ToggleOverview => {
+                if self.model.overview.is_visible() {
+                    self.close_overview(false);
+                } else {
+                    self.open_overview();
+                }
+            }
 
             // The overview owns the keyboard while it is up, so these are the
             // only actions that can reach here from that state.
