@@ -3105,6 +3105,27 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         chat_area
     };
+    // Session facts anchored to the left edge (`display.session_facts = "left"`)
+    // in left-aligned mode: reserve rows just above the usage footer instead of
+    // compositing into blank cells. Left-aligned rows start at column 0, so
+    // there is no left gutter to composite into at all, and the stack would
+    // otherwise disappear or flip to the right edge.
+    let left_facts_height: u16 = input_ui::left_fact_block_height(app, chat_area.width);
+    let left_facts_height = left_facts_height.min(chat_area.height / 3);
+    let left_facts_area = (left_facts_height > 0).then(|| Rect {
+        x: chat_area.x,
+        y: chat_area.y + chat_area.height - left_facts_height,
+        width: chat_area.width,
+        height: left_facts_height,
+    });
+    let chat_area = if left_facts_height > 0 {
+        Rect {
+            height: chat_area.height - left_facts_height,
+            ..chat_area
+        }
+    } else {
+        chat_area
+    };
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3542,6 +3563,16 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         }
         clear_area(frame, footer_area);
         usage_footer::draw_usage_footer(frame, app, footer_area);
+    }
+
+    if let Some(facts_area) = left_facts_area {
+        if let Some(ref mut capture) = debug_capture {
+            capture
+                .render_order
+                .push("draw_left_fact_block".to_string());
+        }
+        clear_area(frame, facts_area);
+        input_ui::draw_left_fact_block(frame, app, facts_area, &mut debug_capture);
     }
 
     if donut_height > 0 {

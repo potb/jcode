@@ -2321,6 +2321,90 @@ impl FactSide {
     }
 }
 
+/// Whether the left-anchored stack has to be drawn into reserved rows instead
+/// of composited into unused cells.
+///
+/// Compositing needs a blank run at the anchoring edge. The right edge always
+/// has one, because that is where content *ends*: a short row leaves a suffix.
+/// The left edge only has one in centered mode, where the composer's content is
+/// inset. In left-aligned mode every row starts at column 0, so probing finds
+/// nothing and the stack would either vanish or silently flip to the right
+/// edge, which reads as a broken setting. Reserve rows there, exactly like the
+/// pinned usage footer does.
+fn left_fact_block_active(app: &dyn TuiState) -> bool {
+    FactSide::from_config() == Some(FactSide::Left)
+        && !app.centered_mode()
+        && !app.chat_overscroll_active()
+}
+
+/// How many rows the reserved bottom-left fact block needs at `width`. Zero
+/// when the block does not apply or has nothing to say.
+///
+/// The layout calls this before drawing so the reservation always matches what
+/// gets painted; both sides derive from the same line builder.
+pub(super) fn left_fact_block_height(app: &dyn TuiState, width: u16) -> u16 {
+    if !left_fact_block_active(app) || width <= RIGHT_FACT_PAD {
+        return 0;
+    }
+    u16::try_from(right_fact_lines(app).len()).unwrap_or(0)
+}
+
+/// Paint the reserved bottom-left fact block. Rows keep the stack's visual
+/// order and are indented by the same edge padding the composited stack uses,
+/// so switching between centered and left-aligned mode does not move the facts
+/// horizontally.
+pub(super) fn draw_left_fact_block(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    debug_capture: &mut Option<FrameCaptureBuilder>,
+) {
+    if area.width <= RIGHT_FACT_PAD || area.height == 0 {
+        crate::tui::info_widget::note_session_facts_context_drawn(false);
+        return;
+    }
+    let lines = right_fact_lines(app);
+    if lines.is_empty() {
+        crate::tui::info_widget::note_session_facts_context_drawn(false);
+        return;
+    }
+
+    let inner_width = area.width - RIGHT_FACT_PAD;
+    let mut context_drawn = false;
+    // Bottom-anchored: the context row sits nearest the input, matching the
+    // composited stack. A block taller than its reservation drops rows from the
+    // top rather than overflowing into the input.
+    let visible = lines.len().min(area.height as usize);
+    let skipped = lines.len() - visible;
+    for (index, line) in lines.into_iter().skip(skipped).enumerate() {
+        let row = Rect::new(
+            area.x + RIGHT_FACT_PAD,
+            area.y + index as u16,
+            inner_width,
+            1,
+        );
+        if line.is_context {
+            context_drawn = true;
+        }
+        if let Some(capture) = debug_capture.as_mut() {
+            capture.layout.session_fact_placements.push(
+                jcode_tui_visual_debug::SessionFactPlacementCapture {
+                    side: "left".to_string(),
+                    text: line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>(),
+                    rect: row.into(),
+                },
+            );
+        }
+        let spans = overscroll_truncate_spans(line.spans, inner_width as usize);
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+    }
+    crate::tui::info_widget::note_session_facts_context_drawn(context_drawn);
+}
+
 #[derive(Clone)]
 struct RightFactLine {
     spans: Vec<Span<'static>>,
@@ -2380,6 +2464,11 @@ pub(super) fn draw_right_fact_stack(
     // previous frame, which is exactly the state where context disappears from
     // both places at once.
     let mut context_drawn = false;
+    // The reserved left block already ran this frame and owns the flag. Noting
+    // `false` here would clobber its report, since the stack draws later.
+    if left_fact_block_active(app) {
+        return;
+    }
     draw_fact_stack_inner(
         frame,
         app,
@@ -2413,6 +2502,12 @@ fn draw_fact_stack_inner(
     // changing transcript-tail overlays mid-gesture. Users with overscroll off
     // get the compact stack continuously.
     if app.chat_overscroll_active() || input_area.width == 0 || input_area.height == 0 {
+        return;
+    }
+    // Left-aligned mode gives the facts a reserved row block below the input
+    // (`draw_left_fact_block`), which owns the facts and the context-drawn flag
+    // for that frame. Compositing here too would paint them twice.
+    if left_fact_block_active(app) {
         return;
     }
 

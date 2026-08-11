@@ -113,7 +113,13 @@ fn assert_fact_stack_is_contiguous(rows: &[String]) -> [usize; 4] {
 
 #[test]
 fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order() {
-    let _lock = viewport_snapshot_test_lock();
+    // Pins `display.session_facts` rather than inheriting it. This test asserts
+    // exact rows for the right-anchored stack, so it must not read whatever a
+    // concurrently running sibling test (or the developer's config file) left in
+    // the global config. `facts_test_locks` also serializes it against those
+    // siblings in the one safe lock order.
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("right");
     clear_flicker_frame_history_for_tests();
     let state = fact_test_state(String::new(), true);
     let backend = TestBackend::new(120, 18);
@@ -175,7 +181,13 @@ fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
 
 #[test]
 fn right_fact_stack_shifts_up_when_scheduled_notification_row_is_absent() {
-    let _lock = viewport_snapshot_test_lock();
+    // Pins `display.session_facts = "right"` instead of inheriting the global
+    // config. These tests assert exact rows for the right-anchored stack, so a
+    // sibling test that sets the edge (or a developer config that does) must not
+    // change what they see. `facts_test_locks` serializes them in the one safe
+    // lock order.
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("right");
     clear_flicker_frame_history_for_tests();
     let mut state = fact_test_state(String::new(), false);
     state.display_messages = vec![DisplayMessage::assistant("first line\nsecond line")];
@@ -200,7 +212,13 @@ fn right_fact_stack_shifts_up_when_scheduled_notification_row_is_absent() {
 
 #[test]
 fn right_fact_stack_leaves_fully_used_input_rows_untouched_and_moves_up() {
-    let _lock = viewport_snapshot_test_lock();
+    // Pins `display.session_facts = "right"` instead of inheriting the global
+    // config. These tests assert exact rows for the right-anchored stack, so a
+    // sibling test that sets the edge (or a developer config that does) must not
+    // change what they see. `facts_test_locks` serializes them in the one safe
+    // lock order.
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("right");
     clear_flicker_frame_history_for_tests();
     let input = ["x".repeat(115), "y".repeat(115), "z".repeat(115)].join("\n");
     let state = fact_test_state(input, true);
@@ -230,7 +248,13 @@ fn right_fact_stack_leaves_fully_used_input_rows_untouched_and_moves_up() {
 
 #[test]
 fn right_fact_stack_survives_narrow_widths_without_overwriting_content() {
-    let _lock = viewport_snapshot_test_lock();
+    // Pins `display.session_facts = "right"` instead of inheriting the global
+    // config. These tests assert exact rows for the right-anchored stack, so a
+    // sibling test that sets the edge (or a developer config that does) must not
+    // change what they see. `facts_test_locks` serializes them in the one safe
+    // lock order.
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("right");
     for width in (18_u16..=60).chain([80, 120, 160]) {
         clear_flicker_frame_history_for_tests();
         let state = fact_test_state("typed text".to_string(), width % 2 == 0);
@@ -246,7 +270,13 @@ fn right_fact_stack_survives_narrow_widths_without_overwriting_content() {
 
 #[test]
 fn right_fact_stack_hides_as_a_unit_when_streaming_chrome_cannot_fit_it() {
-    let _lock = viewport_snapshot_test_lock();
+    // Pins `display.session_facts = "right"` instead of inheriting the global
+    // config. These tests assert exact rows for the right-anchored stack, so a
+    // sibling test that sets the edge (or a developer config that does) must not
+    // change what they see. `facts_test_locks` serializes them in the one safe
+    // lock order.
+    let _locks = facts_test_locks();
+    let _facts = SessionFactsEnvGuard::set("right");
     clear_flicker_frame_history_for_tests();
     let mut state = fact_test_state(String::new(), true);
     state.status = ProcessingStatus::Streaming;
@@ -756,7 +786,9 @@ fn fact_cell_start(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16)
     let width = buf.area.width;
     let height = buf.area.height;
     for y in (0..height).rev() {
-        let cells: Vec<String> = (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        let cells: Vec<String> = (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
         for start in 0..width {
             let mut joined = String::new();
             let mut end = start;
@@ -823,11 +855,7 @@ fn session_facts_right_keeps_the_stack_on_the_right_edge() {
     let terminal_width = terminal.backend().buffer().area.width;
     // Full row text, not a prefix: the assertion below is about where each row
     // *ends*, and the context row continues into its gauge.
-    for needle in [
-        "OpenAI · OAuth",
-        "GPT-5.6 Sol high",
-        "74k/256k ▰▰▱▱▱▱ 29%",
-    ] {
+    for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "74k/256k ▰▰▱▱▱▱ 29%"] {
         let (x, end) = fact_cell_start(&terminal, needle);
         assert!(
             x > terminal_width / 2,
@@ -892,11 +920,13 @@ fn left_session_facts_never_overwrite_the_prompt_or_typed_text() {
     }
 }
 
-/// A left anchor needs a free left gutter, and only centered mode has one.
-/// Without it the stack falls back to the right edge rather than vanishing: a
-/// preference the layout cannot honor should degrade, not delete the facts.
+/// Left-aligned mode has no left gutter to composite into, so the facts get
+/// reserved rows below the composer instead. The setting must be honored there
+/// exactly as in centered mode: same order, contiguous, hugging column 1. The
+/// old behavior silently flipped to the right edge, which read as the setting
+/// being ignored.
 #[test]
-fn left_session_facts_fall_back_to_the_right_edge_without_a_left_gutter() {
+fn left_session_facts_use_reserved_rows_without_a_left_gutter() {
     let _locks = facts_test_locks();
     clear_flicker_frame_history_for_tests();
     let _facts = SessionFactsEnvGuard::set("left");
@@ -907,15 +937,50 @@ fn left_session_facts_fall_back_to_the_right_edge_without_a_left_gutter() {
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| crate::tui::ui::draw(frame, &state))
-        .expect("left fallback frame");
+        .expect("left reserved-row frame");
 
     let rows = buffer_rows(&terminal);
-    assert_fact_stack_is_contiguous(&rows);
-    let terminal_width = terminal.backend().buffer().area.width;
-    let (x, _) = fact_cell_start(&terminal, "OpenAI · OAuth");
+    let [oauth_y, model_y, dir_y, context_y] = assert_fact_stack_is_contiguous(&rows);
+    assert!(oauth_y < model_y && model_y < dir_y && dir_y < context_y);
+    for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "74k/256k"] {
+        let (x, _) = fact_cell_start(&terminal, needle);
+        assert_eq!(
+            x, 1,
+            "{needle:?} should hug the left edge in left-aligned mode, got column {x}"
+        );
+    }
+}
+
+/// The reserved rows sit at the very bottom of the chat column, below the
+/// input. Anchoring anywhere else would leave the facts floating mid-screen
+/// whenever the transcript is shorter than the terminal.
+#[test]
+fn left_reserved_facts_sit_below_the_input() {
+    let _locks = facts_test_locks();
+    clear_flicker_frame_history_for_tests();
+    let _facts = SessionFactsEnvGuard::set("left");
+    let typed = "typed text that must survive";
+    let mut state = fact_test_state(typed.to_string(), true);
+    state.centered_mode = false;
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("left reserved-row frame");
+
+    let rows = buffer_rows(&terminal);
+    let input_y = rows
+        .iter()
+        .position(|row| row.contains(typed))
+        .expect("typed input row");
+    let first_fact_y = rows
+        .iter()
+        .position(|row| row.contains("OpenAI · OAuth"))
+        .expect("fact row");
     assert!(
-        x > terminal_width / 2,
-        "without a left gutter the stack should fall back to the right edge, got column {x}"
+        first_fact_y > input_y,
+        "facts should be reserved below the input (input {input_y}, facts {first_fact_y}):\n{}",
+        rows.join("\n")
     );
 }
 
