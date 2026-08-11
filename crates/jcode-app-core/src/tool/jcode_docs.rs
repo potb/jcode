@@ -50,7 +50,10 @@ impl Tool for JcodeDocsTool {
     }
 
     fn description(&self) -> &str {
-        "Search bundled, version-matched Jcode documentation. Use this first for questions about Jcode features, configuration, architecture, tools, or behavior."
+        // ~20-token cap: this is paid on every request, so the "prefer this
+        // over the web" nudge is folded into one sentence instead of the old
+        // enumeration of documented subject areas (which `query` now carries).
+        "Search the bundled, version-matched Jcode docs before the web."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -65,7 +68,7 @@ impl Tool for JcodeDocsTool {
                 },
                 "query": {
                     "type": "string",
-                    "description": "Words or question to search for. Required for search."
+                    "description": "Question about Jcode features, config, or architecture. Required for search."
                 },
                 "path": {
                     "type": "string",

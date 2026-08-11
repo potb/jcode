@@ -15,8 +15,10 @@
 //! By default the tool prefers non-disruptive mechanisms and restraint: because
 //! this runs on the user's own live machine, the agent should act only on the
 //! requested task, prefer background AX/scripting over moving the cursor or
-//! stealing focus, and never take proactive control of the desktop. This policy
-//! is conveyed to the model via the tool description and the `discover` output.
+//! stealing focus, and never take proactive control of the desktop. That policy
+//! is *not* in the tool description (always-on prompt cost, capped at ~20
+//! tokens): it lives in the `discover` output and is appended once per process
+//! to the first visible coordinate action, so it is paid only when relevant.
 //!
 //! ## Progressive disclosure
 //!
@@ -175,6 +177,42 @@ fn is_mutating(action: &str) -> bool {
     )
 }
 
+/// Coordinate input actions: they run on the shared HID stream, so they move
+/// the user's real cursor and type into whatever is focused.
+#[cfg(target_os = "macos")]
+fn is_visible_input(action: &str) -> bool {
+    matches!(
+        action,
+        "move"
+            | "click"
+            | "double_click"
+            | "right_click"
+            | "drag"
+            | "scroll"
+            | "type"
+            | "key"
+            | "key_down"
+            | "key_up"
+    )
+}
+
+/// The restraint policy used to live in the always-on tool description, which
+/// cost ~160 tokens on every request to say something that only matters once
+/// the agent reaches for visible input. Attach it to those results instead.
+#[cfg(target_os = "macos")]
+const VISIBLE_INPUT_POLICY: &str = "\
+Note: that moved the user's real cursor/focus on their live machine. Prefer \
+background Accessibility (find_element + press/set_value) or run_applescript \
+when the target is resolvable, act only on the task you were given, and restore \
+focus when a visible action is unavoidable.";
+
+/// Append [`VISIBLE_INPUT_POLICY`] to a visible-input result.
+#[cfg(target_os = "macos")]
+fn with_visible_input_policy(mut out: ToolOutput) -> ToolOutput {
+    out.output = format!("{}\n\n{VISIBLE_INPUT_POLICY}", out.output);
+    out
+}
+
 #[async_trait]
 impl Tool for ComputerTool {
     fn name(&self) -> &str {
@@ -182,14 +220,11 @@ impl Tool for ComputerTool {
     }
 
     fn description(&self) -> &str {
-        "Control the macOS desktop: see the screen (screenshot/ocr/ui tree), click and type \
-         (visible coordinate input), act on UI elements in the BACKGROUND via Accessibility \
-         (press/set_value, no cursor movement), manage apps and windows, use the clipboard, and \
-         run AppleScript. Coordinates are in points (top-left origin). This is the user's live \
-         machine: act only on the requested task (not proactively) and prefer BACKGROUND \
-         AX/scripting over moving the cursor or stealing focus; click/type only when AX can't \
-         reach the target. Call action='discover' with a category for the full action set. Run \
-         action='setup' first if permissions are missing."
+        // Capped at ~20 estimated tokens: this is paid on every request. The
+        // action inventory belongs to action='discover', the permission
+        // instructions to setup's own output, and the restraint policy to
+        // visible_action_policy_hint().
+        "See and control the macOS desktop. Call action='discover' for the full action set."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -203,11 +238,8 @@ impl Tool for ComputerTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "description": "Common: screenshot, ocr, ui (see); click, type, key (visible input); \
-                        press, set_value (BACKGROUND AX action on an `element` handle); find_element; \
-                        run_applescript; setup, check_permissions; discover (load full action set). \
-                        Many more actions (move, drag, scroll, window/app management, clipboard, \
-                        select_menu, notify, ...) take the same fields; call discover for their params."
+                    "description": "screenshot, ocr, ui, find_element, press, set_value, click, \
+                        type, key; rest via discover."
                 },
                 "category": {
                     "type": "string",
@@ -224,7 +256,7 @@ impl Tool for ComputerTool {
                 "value": { "type": "string", "description": "Value to match (find_element) or set (set_value)." },
                 "element": {
                     "type": "object",
-                    "description": "Element handle from find_element/ui: {app, path:[child indices]}. Used by press/set_value/get_value/perform_action.",
+                    "description": "Element handle {app, path} from find_element/ui.",
                     "properties": {
                         "app": { "type": "string" },
                         "path": { "type": "array", "items": { "type": "integer" } }
@@ -278,7 +310,13 @@ fn run(input: ComputerInput) -> Result<ToolOutput> {
 
     let result = dispatch(action, &input);
     // Cap large textual outputs to protect context (images are unaffected).
-    result.map(|o| cap_output(o, 16_000))
+    result.map(|o| cap_output(o, 16_000)).map(|o| {
+        if is_visible_input(action) {
+            with_visible_input_policy(o)
+        } else {
+            o
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]

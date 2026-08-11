@@ -319,3 +319,72 @@ async fn live_background_set_value() {
     .await
     .ok();
 }
+
+// ---- always-on prompt cost ----
+
+/// The description and its parameter descriptions are sent on every request, so
+/// they are capped (see tool::tests::tool_descriptions_stay_under_token_cap).
+/// This keeps the failure local when someone grows them here.
+#[test]
+fn description_and_params_stay_small() {
+    let tool = ComputerTool::new();
+    let tokens = |s: &str| crate::util::estimate_tokens(s);
+    assert!(
+        tokens(tool.description()) <= 20,
+        "description is ~{} tokens: {}",
+        tokens(tool.description()),
+        tool.description()
+    );
+
+    let schema = tool.parameters_schema();
+    for key in ["action", "element"] {
+        let description = schema["properties"][key]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            tokens(description) <= 25,
+            "{key} description is ~{} tokens: {description}",
+            tokens(description)
+        );
+    }
+}
+
+/// The action inventory the description used to carry has to remain reachable,
+/// otherwise trimming the description just loses the information.
+#[tokio::test]
+async fn discover_covers_what_the_description_dropped() {
+    let out = run_action(json!({ "action": "discover", "category": "all" }))
+        .await
+        .unwrap();
+    for needle in [
+        "get_clipboard",
+        "select_menu",
+        "notify",
+        "check_permissions",
+    ] {
+        assert!(out.output.contains(needle), "discover missing {needle}");
+    }
+    // The restraint policy moved out of the description into discover.
+    assert!(out.output.contains("Prefer background"));
+}
+
+#[test]
+fn visible_input_actions_are_classified() {
+    for action in ["click", "type", "key", "drag", "scroll", "move"] {
+        assert!(is_visible_input(action), "{action} should be visible input");
+    }
+    for action in ["press", "set_value", "run_applescript", "screenshot", "ui"] {
+        assert!(
+            !is_visible_input(action),
+            "{action} is a background action, no policy nag"
+        );
+    }
+}
+
+#[test]
+fn visible_input_results_carry_the_policy() {
+    let out = with_visible_input_policy(ToolOutput::new("clicked at (10, 10)"));
+    assert!(out.output.starts_with("clicked at (10, 10)"));
+    assert!(out.output.contains("Prefer \nbackground") || out.output.contains("Prefer background"));
+    assert!(out.output.contains("find_element"));
+}
