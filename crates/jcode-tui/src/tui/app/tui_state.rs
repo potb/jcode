@@ -1289,10 +1289,12 @@ impl crate::tui::TuiState for App {
 
         let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
         let (todos, todo_goals) =
-            if crate::config::config().display.pin_todos && !todos_are_swarm_plan {
-                // The pinned band is the single source of truth while enabled. Do
-                // not duplicate the same session todos in a margin or overview
-                // info widget.
+            if !crate::tui::info_widget::todo_widget_visible() && !todos_are_swarm_plan {
+                // Ask the widget mode, not `pin_todos` alone. Under `auto` the
+                // pinned band is the single source of truth and the side copy
+                // stands down, but `off` hides the side list regardless, and
+                // `on` is an explicit request to keep both, which a bare
+                // `pin_todos` check silently overrode.
                 (Vec::new(), Vec::new())
             } else if todos_are_swarm_plan {
                 (
@@ -1627,6 +1629,9 @@ impl crate::tui::TuiState for App {
             // The pinned block owns these numbers when enabled, so the margin
             // and overview copies stand down.
             usage_pinned: crate::config::config().display.pin_usage,
+            todo_widget_yields_to_band: !crate::tui::info_widget::todo_widget_visible(),
+            todo_widget_mode_off: crate::config::config().display.todo_widget
+                == jcode_config_types::TodoWidgetMode::Off,
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name

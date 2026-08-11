@@ -677,6 +677,25 @@ pub struct InfoWidgetData {
     /// config here would make `has_data_for` depend on the machine's config
     /// file, which is both untestable and surprising.
     pub usage_pinned: bool,
+    /// True when the pinned band already shows this session's todo list, so the
+    /// side copy should stand down (`display.todo_widget = auto` with
+    /// `display.pin_todos` on).
+    ///
+    /// Same rule as `usage_pinned`: carried as data, not read from global
+    /// config inside the query. `show_todos()` used to call
+    /// `todo_widget_visible()` directly, so a render test's result depended on
+    /// the developer's config file and on whichever sibling test last poked
+    /// JCODE_PIN_TODOS.
+    ///
+    /// Stored as the suppression rather than the visibility so the derived
+    /// `Default` (false) means "draw normally". A field whose zero value hid
+    /// the widget would blank it in every `..Default::default()` construction.
+    pub todo_widget_yields_to_band: bool,
+    /// True when `display.todo_widget = off`, which suppresses the side list
+    /// even for a swarm-plan projection. Distinct from
+    /// `todo_widget_yields_to_band`, which only means the band is already
+    /// showing the same list.
+    pub todo_widget_mode_off: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -764,11 +783,10 @@ impl InfoWidgetData {
         // `off` hides the side todos widget outright, including the swarm-plan
         // projection. `auto` only steps aside for the pinned band, which shows
         // this session's todo list and never the plan.
-        let mode = crate::config::config().display.todo_widget;
-        if mode == jcode_config_types::TodoWidgetMode::Off {
+        if self.todo_widget_mode_off {
             return false;
         }
-        self.todos_are_swarm_plan || todo_widget_visible()
+        self.todos_are_swarm_plan || !self.todo_widget_yields_to_band
     }
 
     /// Whether the side context card should draw. Every context render and

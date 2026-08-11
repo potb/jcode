@@ -197,7 +197,18 @@ struct PinTodosEnvGuard;
 
 impl PinTodosEnvGuard {
     fn enable() -> Self {
-        crate::env::set_var("JCODE_PIN_TODOS", "1");
+        Self::set("1")
+    }
+
+    /// The band is on by default, so a test that wants it off must say so.
+    /// Relying on the default silently coupled these tests to it, and they
+    /// all broke when upstream flipped `display.pin_todos` to true.
+    fn disable() -> Self {
+        Self::set("0")
+    }
+
+    fn set(value: &str) -> Self {
+        crate::env::set_var("JCODE_PIN_TODOS", value);
         // jcode-base's config cache throttles env re-checks (the zero
         // interval under cfg!(test) applies only when jcode-base itself is
         // the crate under test), so force a reload or a sibling test's
@@ -219,11 +230,12 @@ impl Drop for PinTodosEnvGuard {
 #[test]
 fn pinned_todos_payload_stays_empty_when_config_off() {
     let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::disable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", "pin me", "pending")]).unwrap();
 
-    // display.pin_todos defaults to false: no payload, no redraw churn.
+    // Pin explicitly off: no payload, no redraw churn.
     assert!(!app.refresh_pinned_todos_if_needed());
     assert!(app.pinned_todos_payload_ref().is_none());
 
@@ -368,7 +380,10 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.auto_scroll_paused = true;
     let top_text = render_and_snap(&app, &mut terminal);
     assert!(
-        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        top_text
+            .lines()
+            .take(6)
+            .any(|row| row.contains("pinned band item")),
         "pinned todo should remain visible at the top of scrollback, got:\n{}",
         top_text
     );
@@ -445,6 +460,7 @@ fn side_todo_widget_hides_under_auto_when_pinned_band_is_on() {
 
     // Pin off: the side widget is the only place the list shows, so keep it.
     {
+        let _pin_off = PinTodosEnvGuard::disable();
         let _widget = TodoWidgetEnvGuard::set("auto");
         assert!(crate::tui::info_widget::todo_widget_visible());
         assert!(
@@ -473,6 +489,7 @@ fn side_todo_widget_hides_under_auto_when_pinned_band_is_on() {
 
     // Explicit `off` hides the side widget even with no pinned band.
     {
+        let _pin_off = PinTodosEnvGuard::disable();
         let _widget = TodoWidgetEnvGuard::set("off");
         assert!(!crate::tui::info_widget::todo_widget_visible());
         assert!(
@@ -501,11 +518,23 @@ fn todos_status_reports_side_widget_mode() {
     }
 
     {
+        let _pin_off = PinTodosEnvGuard::disable();
         let _widget = TodoWidgetEnvGuard::set("auto");
         let status = super::todos_view::todos_view_status_message(&app);
         assert!(
             status.contains("Side todo widget (display.todo_widget): auto (currently shown)"),
             "auto with pin off should report shown, got:\n{}",
+            status
+        );
+    }
+
+    {
+        let _pin_on = PinTodosEnvGuard::enable();
+        let _widget = TodoWidgetEnvGuard::set("auto");
+        let status = super::todos_view::todos_view_status_message(&app);
+        assert!(
+            status.contains("Side todo widget (display.todo_widget): auto (currently hidden)"),
+            "auto must report hidden while the pinned band shows the list, got:\n{}",
             status
         );
     }
@@ -624,15 +653,19 @@ fn swarm_plan_projection_survives_auto_but_not_off() {
         ..Default::default()
     };
 
+    // `auto` + pinned band: the band already shows the session list, so the
+    // side copy yields. The swarm plan is a different list and must survive.
     {
-        let _pin = PinTodosEnvGuard::enable();
-        let _widget = TodoWidgetEnvGuard::set("auto");
+        let yielding = |plan: bool| crate::tui::info_widget::InfoWidgetData {
+            todo_widget_yields_to_band: true,
+            ..plan_data(plan)
+        };
 
-        let plan = plan_data(true);
+        let plan = yielding(true);
         assert!(plan.show_todos(), "auto must not hide the swarm plan");
         assert!(plan.has_data_for(WidgetKind::Todos));
 
-        let session = plan_data(false);
+        let session = yielding(false);
         assert!(
             !session.show_todos(),
             "auto + pinned band must hide this session's todo list"
@@ -640,9 +673,13 @@ fn swarm_plan_projection_survives_auto_but_not_off() {
         assert!(!session.has_data_for(WidgetKind::Todos));
     }
 
+    // `off` suppresses the side list outright, plan projection included.
     {
-        let _widget = TodoWidgetEnvGuard::set("off");
-        let plan = plan_data(true);
+        let off = |plan: bool| crate::tui::info_widget::InfoWidgetData {
+            todo_widget_mode_off: true,
+            ..plan_data(plan)
+        };
+        let plan = off(true);
         assert!(!plan.show_todos(), "off must hide the plan too");
         assert!(!plan.has_data_for(WidgetKind::Todos));
     }
@@ -674,7 +711,6 @@ fn hidden_todo_widget_is_neither_placed_nor_allocated_height() {
 
     // Shown: the widget takes a placement and a non-zero height.
     {
-        let _widget = TodoWidgetEnvGuard::set("on");
         assert!(calculate_widget_height(WidgetKind::Todos, &data, 40, 20) > 0);
         assert!(
             calculate_placements(area, &margins, &data)
@@ -686,7 +722,10 @@ fn hidden_todo_widget_is_neither_placed_nor_allocated_height() {
 
     // Hidden: no placement, no reserved rows, no rendered lines.
     {
-        let _widget = TodoWidgetEnvGuard::set("off");
+        let data = InfoWidgetData {
+            todo_widget_mode_off: true,
+            ..data.clone()
+        };
         assert_eq!(calculate_widget_height(WidgetKind::Todos, &data, 40, 20), 0);
         assert!(
             !calculate_placements(area, &margins, &data)
@@ -803,9 +842,7 @@ fn every_facts_spelling_is_handled_locally_and_persists() {
             command
         );
         assert!(
-            !app.display_messages
-                .iter()
-                .any(|m| m.role == "error"),
+            !app.display_messages.iter().any(|m| m.role == "error"),
             "`{}` should not produce an error message",
             command
         );
@@ -821,9 +858,18 @@ fn every_facts_spelling_is_handled_locally_and_persists() {
 
     // The context-card subcommand persists too, and toggles from bare form.
     for (command, expected) in [
-        ("/facts context off", jcode_config_types::ContextWidgetMode::Off),
-        ("/facts context on", jcode_config_types::ContextWidgetMode::On),
-        ("/facts context auto", jcode_config_types::ContextWidgetMode::Auto),
+        (
+            "/facts context off",
+            jcode_config_types::ContextWidgetMode::Off,
+        ),
+        (
+            "/facts context on",
+            jcode_config_types::ContextWidgetMode::On,
+        ),
+        (
+            "/facts context auto",
+            jcode_config_types::ContextWidgetMode::Auto,
+        ),
     ] {
         let mut app = create_test_app();
         assert!(
