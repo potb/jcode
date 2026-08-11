@@ -597,10 +597,8 @@ fn a_project_whose_store_is_gone_is_not_reported() {
 
     let manager = crate::memory::MemoryManager::new().with_project_dir(project.path());
     let mut graph = manager.load_project_graph().expect("load");
-    let entry = crate::memory::MemoryEntry::new(
-        crate::memory::MemoryCategory::Fact,
-        "phantom probe",
-    );
+    let entry =
+        crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, "phantom probe");
     graph.memories.insert(entry.id.clone(), entry);
     manager.save_project_graph(&graph).expect("save");
 
@@ -672,7 +670,10 @@ fn project_graph_health_survey_reads_every_project_store() {
 
     // ...but the survey finds both projects and names them.
     let health = crate::ambient::gather_project_graph_health();
-    let named: Vec<String> = health.iter().filter_map(|p| p.working_dir.clone()).collect();
+    let named: Vec<String> = health
+        .iter()
+        .filter_map(|p| p.working_dir.clone())
+        .collect();
     for project in [alpha.path(), beta.path()] {
         let want = project.to_string_lossy().to_string();
         assert!(
@@ -905,9 +906,8 @@ fn ambient_prompt_ranks_configured_priority_projects_above_busier_ones() {
         )
     };
 
-    let prioritized = render(
-        "project_priority = [\"/home/potb/projects/workspace/private_project\", \"/home/potb/jcode\"]\n",
-    );
+    let prioritized =
+        render("project_priority = [\"/home/potb/projects/workspace/private_project\", \"/home/potb/jcode\"]\n");
     let section = prioritized
         .split("## Projects Active Recently")
         .nth(1)
@@ -1098,4 +1098,3 @@ fn ambient_prompt_scopes_the_pr_repo_override_to_its_own_repository() {
     }
     crate::config::invalidate_config_cache();
 }
-

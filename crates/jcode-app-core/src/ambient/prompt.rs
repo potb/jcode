@@ -645,10 +645,7 @@ pub fn build_ambient_system_prompt(
         ranked.sort_by(|a, b| {
             let rank_a = priority_rank(&priority, a.0);
             let rank_b = priority_rank(&priority, b.0);
-            rank_a
-                .cmp(&rank_b)
-                .then(b.1.cmp(&a.1))
-                .then(a.0.cmp(b.0))
+            rank_a.cmp(&rank_b).then(b.1.cmp(&a.1)).then(a.0.cmp(b.0))
         });
         let any_prioritized = ranked
             .iter()

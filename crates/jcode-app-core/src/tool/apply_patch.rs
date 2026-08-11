@@ -259,8 +259,7 @@ impl Tool for ApplyPatchTool {
             // limit is hit, but keep the append for files that already
             // completed.
             const DIAGNOSTICS_MAX_FILES: usize = 5;
-            const DIAGNOSTICS_TOTAL_BUDGET: std::time::Duration =
-                std::time::Duration::from_secs(6);
+            const DIAGNOSTICS_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
             let diagnostics_deadline = tokio::time::Instant::now() + DIAGNOSTICS_TOTAL_BUDGET;
             for diag_path in diagnostics_paths.iter().take(DIAGNOSTICS_MAX_FILES) {
                 let Some(remaining) =

@@ -114,6 +114,43 @@ pub(super) async fn run_debug_message_with_timeout(
     }
 }
 
+/// Push a soft interrupt at a session without waiting on its agent mutex.
+///
+/// `queue_interrupt` exists to be fire-and-forget: the caller wants to hand a
+/// note to a session that is very likely mid-turn. Taking `agent.lock()` to do
+/// that defeats the point, because a running turn holds that mutex for its
+/// whole duration, so the debug command blocks until the turn ends and callers
+/// see a socket timeout instead of "queued". The interrupt context owns an
+/// `Arc<Mutex<Vec<..>>>` view of the very same queue, reachable without the
+/// agent, so prefer it and fall back to the agent only when this session has no
+/// registered control handle (headless//test paths).
+async fn queue_debug_soft_interrupt(
+    agent: &Arc<Mutex<Agent>>,
+    interrupt_context: &Option<DebugInterruptContext>,
+    content: &str,
+    urgent: bool,
+) {
+    if let Some(ctx) = interrupt_context.as_ref()
+        && let Some(control) = ctx.control_handle().await
+    {
+        control.queue_soft_interrupt(
+            content.to_string(),
+            Vec::new(),
+            urgent,
+            SoftInterruptSource::User,
+        );
+        return;
+    }
+
+    let agent = agent.lock().await;
+    agent.queue_soft_interrupt(
+        content.to_string(),
+        Vec::new(),
+        urgent,
+        SoftInterruptSource::User,
+    );
+}
+
 pub(super) async fn execute_debug_command(
     agent: Arc<Mutex<Agent>>,
     command: &str,
@@ -157,13 +194,7 @@ pub(super) async fn execute_debug_command(
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt: requires content"));
         }
-        let agent = agent.lock().await;
-        agent.queue_soft_interrupt(
-            content.to_string(),
-            Vec::new(),
-            false,
-            SoftInterruptSource::User,
-        );
+        queue_debug_soft_interrupt(&agent, &interrupt_context, content, false).await;
         return Ok("queued".to_string());
     }
 
@@ -175,13 +206,7 @@ pub(super) async fn execute_debug_command(
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt_urgent: requires content"));
         }
-        let agent = agent.lock().await;
-        agent.queue_soft_interrupt(
-            content.to_string(),
-            Vec::new(),
-            true,
-            SoftInterruptSource::User,
-        );
+        queue_debug_soft_interrupt(&agent, &interrupt_context, content, true).await;
         return Ok("queued (urgent)".to_string());
     }
 
@@ -811,5 +836,59 @@ mod tests {
         let pending = queue.lock().expect("queue lock should not be poisoned");
         assert_eq!(pending.len(), 1);
         assert!(pending[0].urgent);
+    }
+
+    #[tokio::test]
+    async fn debug_queue_interrupt_does_not_wait_for_busy_agent_lock() {
+        for (command, expect_urgent, expect_output) in [
+            ("queue_interrupt:heads up", false, "queued"),
+            ("queue_interrupt_urgent:stop now", true, "queued (urgent)"),
+        ] {
+            let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+            let registry = Registry::new(provider.clone()).await;
+            let agent = Arc::new(AsyncMutex::new(Agent::new(provider, registry)));
+            let session_id = agent.lock().await.session_id().to_string();
+
+            let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(
+                session_id.clone(),
+                InterruptSignal::new(),
+            )])));
+            let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
+                session_id.clone(),
+                queue.clone(),
+            )])));
+
+            // Stands in for a session that is mid-turn: the turn owns the agent
+            // mutex for its whole duration.
+            let _busy_agent_lock = agent.lock().await;
+            let output = tokio::time::timeout(
+                Duration::from_millis(200),
+                execute_debug_command(
+                    Arc::clone(&agent),
+                    command,
+                    Arc::new(RwLock::new(HashMap::new())),
+                    None,
+                    Some(DebugInterruptContext {
+                        session_id,
+                        shutdown_signals,
+                        soft_interrupt_queues,
+                    }),
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{} should not block on the busy agent lock", command))
+            .unwrap_or_else(|e| panic!("{} should succeed: {}", command, e));
+
+            assert_eq!(output, expect_output, "unexpected output for {}", command);
+            let pending = queue.lock().expect("queue lock should not be poisoned");
+            assert_eq!(
+                pending.len(),
+                1,
+                "expected one queued message for {}",
+                command
+            );
+            assert_eq!(pending[0].urgent, expect_urgent, "urgency for {}", command);
+        }
     }
 }

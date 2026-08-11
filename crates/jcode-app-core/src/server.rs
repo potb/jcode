@@ -1302,9 +1302,11 @@ impl Server {
                     // Best-effort: let any live LSP servers shut down cleanly
                     // (shutdown+exit requests) instead of leaking on process
                     // exit. Bounded so a stuck server can never block exit.
-                    let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(1), jcode_lsp::shutdown_all())
-                            .await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        jcode_lsp::shutdown_all(),
+                    )
+                    .await;
                     std::process::exit(0);
                 }
             });

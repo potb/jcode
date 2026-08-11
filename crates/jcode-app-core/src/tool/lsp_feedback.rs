@@ -43,4 +43,3 @@ pub(crate) async fn diagnostics_after_write(path: &Path) -> Option<String> {
     }
     jcode_lsp::diagnostics_block(path).await
 }
-
