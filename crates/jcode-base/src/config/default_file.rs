@@ -624,6 +624,9 @@ enabled = false
 # provider = "claude"
 # Model override (default: provider's strongest)
 # model = "claude-sonnet-4-20250514"
+# Reasoning effort for ambient cycles (default: the model's own default).
+# Ambient runs unattended, so it can be tuned separately from your session.
+# effort = "low"
 # Allow API key usage (default: false, only OAuth to avoid surprise costs)
 allow_api_keys = false
 # Daily token budget when using API keys (optional)
@@ -643,6 +646,23 @@ work_branch_prefix = "ambient/"
 # to the UPSTREAM repo and fails, stranding the work. Naming your fork here
 # makes the review target explicit. Empty = infer from the origin remote.
 # pr_repo = "you/your-fork"
+#
+# Projects ambient works on, highest priority first. TOML preserves the order
+# of an array of tables, so the order written here IS the priority order.
+# Finding no work in the first project moves ambient to the next one rather
+# than ending the cycle.
+#
+# [[ambient.projects]]
+# path = "/home/you/src/jcode"
+# pr_repo = "you/jcode"              # fork flow: branch and PR both go here
+# instructions = "Always work in a git worktree."
+#
+# [[ambient.projects]]
+# path = "~/projects/private_project"         # no pr_repo: direct push to origin
+# instructions_file = "private_project.md"    # relative to ~/.jcode/ambient/instructions/
+# active_windows = ["weekdays 09:00-19:00"]  # this project only, same format
+#                                            # as the global active_windows;
+#                                            # omit for no schedule of its own
 # Show ambient cycle in a terminal window (default: true)
 # visible = true
 # Auto-approve request_permission calls from ambient cycles instead of queueing
@@ -664,6 +684,8 @@ work_branch_prefix = "ambient/"
 # day crowds out the important one. Listed projects rank above unlisted ones and
 # are surfaced even with no recent activity. Absolute paths ("~" is expanded).
 # project_priority = ["/home/you/work/main-app", "/home/you/src/side-project"]
+# (superseded by [[ambient.projects]] above, which also carries pr_repo and
+# instructions; both forms still work and are merged.)
 
 # Recurring jobs jcode itself runs on a schedule ("jcode cron"), replacing
 # external timers (systemd, cron(8), launchd). Repeat [[cron]] for more jobs.

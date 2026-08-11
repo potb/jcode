@@ -464,30 +464,196 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
     recent
 }
 
-/// The user's configured project priority, highest first, with `~` expanded
-/// and trailing slashes removed so entries compare against session working
-/// directories.
-fn configured_project_priority() -> Vec<String> {
-    crate::config::config()
-        .ambient
-        .project_priority
-        .iter()
-        .filter_map(|p| {
-            let p = p.trim();
-            if p.is_empty() {
-                return None;
-            }
-            let expanded = if let Some(rest) = p.strip_prefix("~/") {
-                match std::env::var("HOME") {
-                    Ok(home) => format!("{}/{}", home.trim_end_matches('/'), rest),
-                    Err(_) => p.to_string(),
+/// One configured project in the ambient rotation, in priority order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedProject {
+    /// Absolute project path, `~` expanded, no trailing slash.
+    pub path: String,
+    /// PR review target as `owner/repo`, empty when the project's own `origin`
+    /// is the right target.
+    pub pr_repo: String,
+    /// Standing instructions declared in config: inline text, a referenced
+    /// file, or both.
+    pub instructions: String,
+    /// Wall-clock window specs during which this project may be worked on.
+    /// Empty means no schedule of its own.
+    pub active_windows: Vec<String>,
+}
+
+/// The user's configured projects, highest priority first.
+///
+/// Order comes from `[[ambient.projects]]`, which TOML preserves, so the order
+/// written in the file is the priority order. The older `project_priority`
+/// list and `pr_repos` map are merged in behind it: an existing config must
+/// keep working, and a project named in both places should not appear twice.
+fn configured_projects() -> Vec<ResolvedProject> {
+    let ambient = &crate::config::config().ambient;
+    let mut out: Vec<ResolvedProject> = Vec::new();
+
+    let mut push = |path: &str, pr_repo: &str, instructions: String, active_windows: Vec<String>| {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        let path = expand_project_path(path);
+        let pr_repo = pr_repo.trim().to_string();
+        match out.iter_mut().find(|p| p.path == path) {
+            // First mention wins the rank; a PR target from a later, less
+            // specific source still fills an empty one.
+            Some(existing) => {
+                if existing.pr_repo.is_empty() {
+                    existing.pr_repo = pr_repo;
                 }
-            } else {
-                p.to_string()
-            };
-            Some(expanded.trim_end_matches('/').to_string())
-        })
+                if existing.instructions.is_empty() {
+                    existing.instructions = instructions;
+                }
+                if existing.active_windows.is_empty() {
+                    existing.active_windows = active_windows;
+                }
+            }
+            None => out.push(ResolvedProject {
+                path,
+                pr_repo,
+                instructions,
+                active_windows,
+            }),
+        }
+    };
+
+    for project in &ambient.projects {
+        push(
+            &project.path,
+            &project.pr_repo,
+            configured_project_instructions(project),
+            project.active_windows.clone(),
+        );
+    }
+    for path in &ambient.project_priority {
+        push(path, "", String::new(), Vec::new());
+    }
+    for (path, repo) in &ambient.pr_repos {
+        push(path, repo, String::new(), Vec::new());
+    }
+
+    // The legacy single `pr_repo` names a repository, not a path, so it can
+    // only fill in a PR target for an already-listed project whose directory
+    // ends with that repo name.
+    let legacy = ambient.pr_repo.trim();
+    if !legacy.is_empty()
+        && let Some(repo_name) = legacy.rsplit('/').next()
+    {
+        for project in out.iter_mut() {
+            if project.pr_repo.is_empty()
+                && project.path.rsplit('/').next() == Some(repo_name)
+            {
+                project.pr_repo = legacy.to_string();
+            }
+        }
+    }
+
+    out
+}
+
+/// Just the project paths, highest priority first.
+fn configured_project_priority() -> Vec<String> {
+    workable_projects()
+        .into_iter()
+        .map(|p| p.path)
         .collect()
+}
+
+/// Standing instructions declared for a project in config: the inline
+/// `instructions`, plus the contents of `instructions_file` when set.
+///
+/// Both are allowed together so a short rule can sit inline while a longer
+/// document lives in a file, without forcing a choice between them.
+fn configured_project_instructions(project: &crate::config::AmbientProject) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    let inline = project.instructions.trim();
+    if !inline.is_empty() {
+        parts.push(inline.to_string());
+    }
+
+    let file = project.instructions_file.trim();
+    if !file.is_empty() {
+        let path = if file.starts_with('/') || file.starts_with("~/") {
+            std::path::PathBuf::from(expand_project_path(file))
+        } else {
+            // A bare name is resolved against the instructions directory, so
+            // `instructions_file = "jcode.md"` keeps working after the file is
+            // moved out of the slug-named layout.
+            match crate::storage::jcode_dir() {
+                Ok(dir) => dir.join("ambient").join(AMBIENT_INSTRUCTIONS_DIR).join(file),
+                Err(_) => std::path::PathBuf::from(file),
+            }
+        };
+        match read_instructions_file(&path) {
+            Some(text) => parts.push(text),
+            // Silence here would look identical to "no instructions", so a
+            // path the user believes is loaded must complain when it is not.
+            None => crate::logging::warn(&format!(
+                "Ambient: instructions_file '{}' for project '{}' could not be read;                  that project's rules are NOT in the prompt",
+                path.display(),
+                project.path
+            )),
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+/// Whether a project's own wall-clock windows are open right now.
+///
+/// Fails OPEN, like the global window check: an unparseable entry must not
+/// silently fence a project off forever. `ignore_active_windows` covers the
+/// per-project schedules too, so the one override still means "run anywhere,
+/// anytime" without deleting a schedule the user tuned.
+fn project_window_open(project: &ResolvedProject) -> bool {
+    if project.active_windows.is_empty() {
+        return true;
+    }
+    if crate::config::config().ambient.ignore_active_windows {
+        return true;
+    }
+    let (windows, bad) = super::schedule_window::parse_windows(&project.active_windows);
+    if !bad.is_empty() {
+        crate::logging::warn(&format!(
+            "Ambient: ignoring unparseable active_windows entries for project '{}': {}",
+            project.path,
+            bad.join(", ")
+        ));
+    }
+    if windows.is_empty() {
+        return true;
+    }
+    super::schedule_window::evaluate(&windows, &chrono::Local::now()).is_open()
+}
+
+/// The projects workable right now: configured order, minus any whose own
+/// window is currently closed.
+///
+/// Filtering here rather than at the point of use keeps one answer to "which
+/// projects may I work on", so the walk order, the PR instructions, and the
+/// per-project instruction sections cannot disagree with each other.
+fn workable_projects() -> Vec<ResolvedProject> {
+    configured_projects()
+        .into_iter()
+        .filter(project_window_open)
+        .collect()
+}
+
+/// Expand a configured project path: `~/` against `HOME`, trailing slash off.
+fn expand_project_path(path: &str) -> String {
+    let expanded = if let Some(rest) = path.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{}/{}", home.trim_end_matches('/'), rest),
+            Err(_) => path.to_string(),
+        }
+    } else {
+        path.to_string()
+    };
+    expanded.trim_end_matches('/').to_string()
 }
 
 /// Whether a session working directory belongs to a configured project.
@@ -938,20 +1104,70 @@ pub fn build_ambient_system_prompt(
     // another project's PR to this fork. It is an override for the repo it
     // names; elsewhere the project's own `origin` is correct.
     let pr_repo = crate::config::config().ambient.pr_repo.trim().to_string();
-    if !pr_repo.is_empty() {
-        let repo_name = pr_repo.rsplit('/').next().unwrap_or(&pr_repo);
-        prompt.push_str(&format!(
+    let projects = workable_projects();
+    let forked: Vec<&ResolvedProject> = projects.iter().filter(|p| !p.pr_repo.is_empty()).collect();
+    let direct: Vec<&ResolvedProject> = projects.iter().filter(|p| p.pr_repo.is_empty()).collect();
+
+    if !projects.is_empty() || !pr_repo.is_empty() {
+        prompt.push_str(
             "\n## Pull Requests\n\
-             For work in the `{repo_name}` repository, open pull requests against \
-             `{pr_repo}` with `gh pr create --repo {pr_repo} --fill`. That is the \
-             user's own fork and the only place they review that project's work; \
-             never open a `{repo_name}` PR against the upstream repository.\n\
-             For any other project, target that project's own `origin` remote \
-             (plain `gh pr create --fill` from its working directory), and check \
-             with `git remote -v` if unsure. Never leave code work as a pushed \
-             branch with no PR: to the user that is indistinguishable from having \
-             done nothing.\n"
-        ));
+             Projects come in two shapes and the difference decides where BOTH \
+             the branch and the PR go. Getting it wrong is not a style issue: \
+             pushing a fork project's branch to upstream fails on permissions, \
+             and a PR opened against upstream from a fork workflow is rejected, \
+             which is how work ends up stranded where the user never sees it.\n",
+        );
+
+        if !forked.is_empty() {
+            prompt.push_str(
+                "\nFORK PROJECTS. The user works through their own fork and \
+                 reviews everything there. Upstream is READ-ONLY to you: never \
+                 push a branch to it and never open a PR against it.\n",
+            );
+            for project in &forked {
+                let repo = &project.pr_repo;
+                let path = &project.path;
+                prompt.push_str(&format!(
+                    "- `{path}`: push the branch to the fork remote for `{repo}` \
+                     (check `git remote -v`; it is usually not `origin`), then \
+                     `gh pr create --repo {repo} --fill`.\n"
+                ));
+            }
+        }
+
+        if !direct.is_empty() {
+            prompt.push_str(
+                "\nDIRECT-ACCESS PROJECTS. The user pushes to these repos \
+                 directly, so there is no fork in the picture:\n",
+            );
+            for project in &direct {
+                prompt.push_str(&format!(
+                    "- `{}`: push the branch to `origin` and open the PR with a \
+                     plain `gh pr create --fill` from that working directory.\n",
+                    project.path
+                ));
+            }
+            prompt.push_str(
+                "Do NOT route these through any fork listed above: a repo named \
+                 for one project is never the right target for another.\n",
+            );
+        }
+
+        if !pr_repo.is_empty() && forked.iter().all(|p| p.pr_repo != pr_repo) {
+            let repo_name = pr_repo.rsplit('/').next().unwrap_or(&pr_repo);
+            prompt.push_str(&format!(
+                "\nFor work in the `{repo_name}` repository, open pull requests \
+                 against `{pr_repo}` with `gh pr create --repo {pr_repo} --fill`; \
+                 never against its upstream.\n"
+            ));
+        }
+
+        prompt.push_str(
+            "\nFor a project not named above, target its own `origin` and check \
+             `git remote -v` if unsure. Never leave code work as a pushed branch \
+             with no PR: to the user that is indistinguishable from having done \
+             nothing.\n",
+        );
     }
 
     // Tell the agent whether proactive work is actually enabled.
@@ -983,6 +1199,69 @@ pub fn build_ambient_system_prompt(
              worth doing, record it in the cycle summary instead of acting on \
              it.\n\n",
         );
+    }
+
+    // Walking the priority list, rather than stopping at the first project
+    // that happens to be quiet.
+    //
+    // Observed: a cycle checked the top-priority repo, found every PR green and
+    // nothing to do, and ended right there. From the user's side that is an
+    // idle cycle even though the second and third projects on their own list
+    // were never looked at. "No work in project 1" is a reason to move to
+    // project 2, not a reason to end the cycle.
+    {
+        let priority = configured_project_priority();
+        if crate::config::config().ambient.proactive_work && !priority.is_empty() {
+            prompt.push_str(
+                "\n## Work Through The Priority List, Do Not Stop At The First Quiet Project\n\n\
+                 The user's configured project list is an ORDER to walk, not a \
+                 single target. Finding no useful work in the highest-priority \
+                 project does NOT end the cycle: it means you move to the next \
+                 project on the list and look there. Only after you have actually \
+                 examined every project below may you end the cycle for lack of \
+                 work.\n\n\
+                 In priority order:\n\n",
+            );
+            for (idx, project) in priority.iter().enumerate() {
+                prompt.push_str(&format!("{}. {}\n", idx + 1, project));
+            }
+            prompt.push_str(
+                "\nFor each one, set it as your working directory and actually look \
+                 before deciding it is quiet: open PRs and their CI state, the \
+                 branch's position against its remote, failing or flaky tests, \
+                 TODOs in recent commits, and dependency or documentation drift. \
+                 \"Everything was green last cycle\" is not a check.\n\n\
+                 When you end the cycle, your summary must say which projects you \
+                 examined and what you found in each, so a cycle that really had \
+                 nothing to do is distinguishable from one that stopped early. \
+                 Stopping at project 1 while later projects went unexamined is the \
+                 specific failure this section exists to prevent.\n\n",
+            );
+
+            // Name the projects held back by their own schedule. Omitting them
+            // silently would read as "that project is finished", and the agent
+            // would have no way to tell a closed window from a project the user
+            // removed.
+            let closed: Vec<ResolvedProject> = configured_projects()
+                .into_iter()
+                .filter(|project| !project_window_open(project))
+                .collect();
+            if !closed.is_empty() {
+                prompt.push_str(
+                    "Outside their configured hours right now, so NOT part of this \
+                     cycle (they are not finished, and not yours to work on until \
+                     their window opens):\n",
+                );
+                for project in &closed {
+                    prompt.push_str(&format!(
+                        "- {} (allowed: {})\n",
+                        project.path,
+                        project.active_windows.join(", ")
+                    ));
+                }
+                prompt.push('\n');
+            }
+        }
     }
 
     // When the user has pre-authorized ambient work, say so explicitly.
@@ -1039,21 +1318,30 @@ pub fn build_ambient_system_prompt(
     // agent picks its own working directory, so it needs these up front rather
     // than after it has already decided where to work.
     {
-        let priority = configured_project_priority();
+        let projects = workable_projects();
         let mut dirs: Vec<String> = Vec::new();
         for dir in recent_sessions.iter().filter_map(|s| s.working_dir.clone()) {
             if !dirs.contains(&dir) {
                 dirs.push(dir);
             }
         }
-        for p in &priority {
-            if !dirs.iter().any(|d| paths_match(d, p)) {
-                dirs.push(p.clone());
+        for project in &projects {
+            if !dirs.iter().any(|d| paths_match(d, &project.path)) {
+                dirs.push(project.path.clone());
             }
         }
         let mut sections = String::new();
         for dir in &dirs {
-            if let Some(text) = project_ambient_instructions(dir) {
+            // Config wins over the slug-named file: an instruction the user can
+            // see in their config must not be silently overridden by a file
+            // they forgot exists.
+            let from_config = projects
+                .iter()
+                .find(|p| paths_match(dir, &p.path))
+                .map(|p| p.instructions.clone())
+                .filter(|text| !text.is_empty());
+            let text = from_config.or_else(|| project_ambient_instructions(dir));
+            if let Some(text) = text {
                 sections.push_str(&format!("### {}\n{}\n\n", dir, text.trim()));
             }
         }

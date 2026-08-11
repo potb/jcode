@@ -589,6 +589,14 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_AMBIENT_MODEL") {
             self.ambient.model = Some(v);
         }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_EFFORT") {
+            let trimmed = v.trim().to_string();
+            self.ambient.effort = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+        }
         if let Ok(v) = std::env::var("JCODE_AMBIENT_MIN_INTERVAL") {
             if let Ok(parsed) = v.trim().parse::<u32>() {
                 self.ambient.min_interval_minutes = parsed;

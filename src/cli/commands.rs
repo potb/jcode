@@ -1563,11 +1563,32 @@ async fn run_ambient_visible() -> Result<()> {
         )
     })?;
 
+    // Visible cycles are the same ambient work as headless ones, so they must
+    // honor the same `[ambient]` model/effort overrides instead of silently
+    // using the auto-selected provider default.
+    let ambient_cfg = crate::config::config().ambient.clone();
+    let ambient_model = ambient_cfg
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+
     let (provider, registry) = super::provider_init::init_provider_and_registry(
         &super::provider_init::ProviderChoice::Auto,
-        None,
+        ambient_model.as_deref(),
     )
     .await?;
+
+    if let Some(effort) = ambient_cfg
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        && let Err(e) = provider.set_reasoning_effort(effort)
+    {
+        eprintln!("Ambient: could not apply ambient.effort '{}': {}", effort, e);
+    }
 
     registry.register_ambient_tools().await;
 

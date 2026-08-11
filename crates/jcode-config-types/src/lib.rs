@@ -1674,6 +1674,14 @@ pub struct AmbientConfig {
     pub provider: Option<String>,
     /// Model override (default: provider's strongest)
     pub model: Option<String>,
+    /// Reasoning-effort override applied to ambient cycles (e.g. "low",
+    /// "medium", "high"). None keeps the model's default effort.
+    ///
+    /// Ambient runs unattended, so its cost/latency tradeoff is independent of
+    /// the interactive session it forks its provider from; without this knob a
+    /// background cycle silently inherits whatever effort the user last chose.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Allow API key usage (default: false, only OAuth)
     pub allow_api_keys: bool,
     /// Daily token budget when using API keys
@@ -1705,6 +1713,25 @@ pub struct AmbientConfig {
     /// `origin` remote.
     #[serde(default)]
     pub pr_repo: String,
+
+    /// Per-project PR targets, as `project path -> owner/repo`.
+    ///
+    /// `pr_repo` names a single repository, which stops working as soon as
+    /// ambient rotates across several projects: there is no one repo every PR
+    /// belongs to, and a rule stated without a project attached will eventually
+    /// send one project's PR to another project's fork. This map states the
+    /// target per project, so each entry is unambiguous.
+    ///
+    /// ```toml
+    /// [ambient.pr_repos]
+    /// "/home/you/src/jcode" = "you/jcode"
+    /// "~/projects/private_project" = "you/private_project"
+    /// ```
+    ///
+    /// A project with no entry uses its own `origin` remote, which is correct
+    /// whenever the user pushes directly rather than through a fork.
+    #[serde(default)]
+    pub pr_repos: std::collections::BTreeMap<String, String>,
     /// Show ambient cycle in a terminal window (default: true)
     pub visible: bool,
     /// Auto-approve `request_permission` calls made by ambient cycles instead of
@@ -1770,6 +1797,84 @@ pub struct AmbientConfig {
     /// listed still appear, ranked by recent activity, after the listed ones.
     #[serde(default)]
     pub project_priority: Vec<String>,
+
+    /// Projects to work on, highest priority first, one table per project.
+    ///
+    /// TOML preserves the order of an array of tables, so the order written in
+    /// the file IS the priority order. This replaces the pair of
+    /// `project_priority` (order, no PR target) and `pr_repos` (PR target, no
+    /// order): keeping a project's rank and its review target in two places
+    /// meant adding a repo required editing both, and a map cannot express
+    /// order at all.
+    ///
+    /// ```toml
+    /// [[ambient.projects]]
+    /// path = "/home/you/src/jcode"   # first = highest priority
+    /// pr_repo = "you/jcode"          # optional; omit to use the origin remote
+    ///
+    /// [[ambient.projects]]
+    /// path = "~/projects/private_project"
+    /// ```
+    ///
+    /// Both older keys still work and are merged in behind these entries.
+    #[serde(default)]
+    pub projects: Vec<AmbientProject>,
+}
+
+/// One project in the ambient rotation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AmbientProject {
+    /// Absolute path to the project (a leading `~` is expanded).
+    pub path: String,
+    /// Where pull requests for this project go, as `owner/repo`. Empty means
+    /// use the project's own `origin` remote.
+    pub pr_repo: String,
+
+    /// Standing instructions for this project, written inline.
+    ///
+    /// Short rules belong next to the project they govern: a file under
+    /// `~/.jcode/ambient/instructions/` named after a flattened path is
+    /// invisible from the config, so users forget the rules exist and cannot
+    /// tell which projects have them.
+    ///
+    /// ```toml
+    /// [[ambient.projects]]
+    /// path = "~/src/api"
+    /// instructions = "Never touch the migrations directory."
+    /// ```
+    #[serde(default)]
+    pub instructions: String,
+
+    /// Path to a file holding this project's standing instructions, for rules
+    /// too long to keep inline. A leading `~` is expanded, and a relative path
+    /// resolves against `~/.jcode/ambient/instructions/`.
+    ///
+    /// When both this and `instructions` are set, both are used: inline first.
+    ///
+    /// Unset, the legacy per-project file is still read from
+    /// `~/.jcode/ambient/instructions/<flattened-path>.md`.
+    #[serde(default)]
+    pub instructions_file: String,
+
+    /// Wall-clock windows during which THIS project may be worked on, in the
+    /// same format as the global `active_windows`.
+    ///
+    /// Projects do not share one schedule: a production repo may only be safe
+    /// to touch during working hours, while a personal one is fine at any time.
+    /// A single global window forces the stricter project's hours onto every
+    /// other project, which silently costs the user every cycle in between.
+    ///
+    /// ```toml
+    /// [[ambient.projects]]
+    /// path = "~/work/api"
+    /// active_windows = ["weekdays 09:00-19:00"]
+    /// ```
+    ///
+    /// Empty (the default) means the project has no schedule of its own and is
+    /// workable whenever ambient runs.
+    #[serde(default)]
+    pub active_windows: Vec<String>,
 }
 
 impl Default for AmbientConfig {
@@ -1778,6 +1883,7 @@ impl Default for AmbientConfig {
             enabled: false,
             provider: None,
             model: None,
+            effort: None,
             allow_api_keys: false,
             api_daily_budget: None,
             min_interval_minutes: 5,
@@ -1786,6 +1892,8 @@ impl Default for AmbientConfig {
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
             pr_repo: String::new(),
+            pr_repos: std::collections::BTreeMap::new(),
+            projects: Vec::new(),
             visible: true,
             auto_approve_permissions: false,
             active_windows: Vec::new(),

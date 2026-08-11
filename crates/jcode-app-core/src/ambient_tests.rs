@@ -470,7 +470,7 @@ fn ambient_prompt_names_the_configured_pull_request_repo() {
         "the prompt must spell out the exact PR command for the fork"
     );
     assert!(
-        configured.contains("never open a `jcode` PR against the upstream repository"),
+        configured.contains("never against its upstream"),
         "the upstream default is the failure mode, so it must be called out"
     );
 
@@ -1085,7 +1085,7 @@ fn ambient_prompt_scopes_the_pr_repo_override_to_its_own_repository() {
     );
     assert!(prompt.contains("gh pr create --repo potb/jcode"));
     assert!(
-        prompt.contains("For any other project, target that project's own `origin`"),
+        prompt.contains("target its own `origin`"),
         "another project's PRs must not be routed to this fork"
     );
     assert!(
@@ -1248,3 +1248,488 @@ fn per_project_instructions_render_for_recently_seen_projects() {
     }
     crate::config::invalidate_config_cache();
 }
+
+/// A quiet top-priority project used to end the whole cycle: the agent checked
+/// project 1, found nothing to do, and stopped while the user's other listed
+/// projects were never examined. The priority list is an order to walk.
+#[test]
+fn ambient_prompt_tells_the_agent_to_walk_down_the_priority_list() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let render = |extra: &str| {
+        std::fs::write(
+            temp.path().join("config.toml"),
+            format!("[ambient]\nenabled = true\n{extra}"),
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let with_priority = render(
+        "proactive_work = true\nproject_priority = [\"/home/potb/jcode\", \
+         \"/home/potb/projects/workspace/private_project\"]\n",
+    );
+    assert!(
+        with_priority.contains("Do Not Stop At The First Quiet Project"),
+        "the walk-the-list rule must reach the prompt, or the agent keeps \
+         ending cycles at project 1"
+    );
+    let walk = with_priority
+        .split("Do Not Stop At The First Quiet Project")
+        .nth(1)
+        .expect("walk section");
+    let first = walk.find("1. /home/potb/jcode").expect("first listed");
+    let second = walk
+        .find("2. /home/potb/projects/workspace/private_project")
+        .expect("second listed");
+    assert!(
+        first < second,
+        "the list must be rendered in the user's configured order"
+    );
+
+    // Garden-only cycles are not supposed to go hunting for code work, so the
+    // walk instruction must not contradict a disabled proactive_work.
+    let garden_only = render(
+        "proactive_work = false\nproject_priority = [\"/home/potb/jcode\"]\n",
+    );
+    assert!(
+        !garden_only.contains("Do Not Stop At The First Quiet Project"),
+        "a garden-only cycle must not be told to hunt for work across projects"
+    );
+
+    // No configured priority means there is no list to walk.
+    let unconfigured = render("proactive_work = true\n");
+    assert!(
+        !unconfigured.contains("Do Not Stop At The First Quiet Project"),
+        "without project_priority there is no order to walk"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// `pr_repo` names one repository, which is wrong as soon as ambient rotates
+/// across projects: without a project attached, one project's PR eventually
+/// goes to another project's fork.
+#[test]
+fn ambient_prompt_names_a_pull_request_target_per_project() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n[ambient.pr_repos]\n\
+         \"/home/potb/jcode\" = \"potb/jcode\"\n\
+         \"/home/potb/projects/workspace/private_project\" = \"potb/private_project\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &[],
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+
+    let section = prompt.split("## Pull Requests").nth(1).expect("PR section");
+    assert!(
+        section.contains("`/home/potb/jcode`") && section.contains("--repo potb/jcode"),
+        "each project must carry its own PR target; got:\n{section}"
+    );
+    assert!(
+        section.contains("`/home/potb/projects/workspace/private_project`")
+            && section.contains("--repo potb/private_project"),
+        "the second project's target must be stated too, or its PRs land in the \
+         first project's fork; got:\n{section}"
+    );
+    assert!(
+        section.contains("origin"),
+        "projects with no entry still need the origin fallback stated"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// `[[ambient.projects]]` is an array of tables, and TOML preserves its order,
+/// so the order written in the file is the priority order. Keeping rank and PR
+/// target in one place means adding a repo is one edit, not two.
+#[test]
+fn ambient_projects_array_sets_priority_order_and_pr_targets() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let render = |config: &str| {
+        std::fs::write(temp.path().join("config.toml"), config).expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    // private_project first, and it has NO pr_repo: the user pushes to it directly, so
+    // its PRs must go to its own origin rather than an invented fork.
+    let prompt = render(
+        "[ambient]\nenabled = true\nproactive_work = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/projects/workspace/private_project\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\npr_repo = \"potb/jcode\"\n",
+    );
+
+    let walk = prompt
+        .split("Do Not Stop At The First Quiet Project")
+        .nth(1)
+        .expect("walk section");
+    let private_project = walk
+        .find("1. /home/potb/projects/workspace/private_project")
+        .expect("private_project first");
+    let jcode = walk.find("2. /home/potb/jcode").expect("jcode second");
+    assert!(
+        private_project < jcode,
+        "file order is the priority order; got:\n{walk}"
+    );
+
+    let prs = prompt.split("## Pull Requests").nth(1).expect("PR section");
+    assert!(
+        prs.contains("`/home/potb/jcode`") && prs.contains("--repo potb/jcode"),
+        "a project's own pr_repo must be used for it; got:\n{prs}"
+    );
+    assert!(
+        !prs.contains("private_project`: push the branch to the fork remote"),
+        "a project with no pr_repo must fall through to its origin, not borrow \
+         another project's fork; got:\n{prs}"
+    );
+
+    // The older split keys keep working, and a project named by both must not
+    // be listed twice.
+    let legacy = render(
+        "[ambient]\nenabled = true\nproactive_work = true\n\
+         project_priority = [\"/home/potb/jcode\"]\n\n\
+         [ambient.pr_repos]\n\"/home/potb/jcode\" = \"potb/jcode\"\n",
+    );
+    let legacy_walk = legacy
+        .split("Do Not Stop At The First Quiet Project")
+        .nth(1)
+        .expect("walk section");
+    assert!(legacy_walk.contains("1. /home/potb/jcode"));
+    assert!(
+        !legacy_walk.contains("2. /home/potb/jcode"),
+        "a project named by both old keys must appear once"
+    );
+    assert!(
+        legacy
+            .split("## Pull Requests")
+            .nth(1)
+            .expect("PR section")
+            .contains("--repo potb/jcode"),
+        "the old pr_repos map must still route PRs"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// The user's real setup: private_project with direct push access, jcode through a fork
+/// where everything must go to the fork and never upstream. The prompt has to
+/// separate the two, since the branch push differs as well as the PR target.
+#[test]
+fn ambient_prompt_separates_fork_projects_from_direct_access_projects() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nproactive_work = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\npr_repo = \"potb/jcode\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/projects/workspace/private_project\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let prompt = build_ambient_system_prompt(
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &[],
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    let prs = prompt.split("## Pull Requests").nth(1).expect("PR section");
+    // Stop at the next section so later prose (which legitimately lists both
+    // projects) cannot satisfy these assertions.
+    let prs = prs.split("\n## ").next().expect("PR section body");
+
+    let fork_idx = prs.find("FORK PROJECTS").expect("fork flow stated");
+    let direct_idx = prs
+        .find("DIRECT-ACCESS PROJECTS")
+        .expect("direct flow stated");
+
+    let fork_block = &prs[fork_idx..direct_idx];
+    assert!(
+        fork_block.contains("/home/potb/jcode") && fork_block.contains("--repo potb/jcode"),
+        "the forked project belongs to the fork flow; got:\n{fork_block}"
+    );
+    assert!(
+        !fork_block.contains("private_project"),
+        "a direct-access project must not be described as a fork project"
+    );
+
+    let direct_block = &prs[direct_idx..];
+    assert!(
+        direct_block.contains("/home/potb/projects/workspace/private_project"),
+        "the direct-access project belongs to the direct flow; got:\n{direct_block}"
+    );
+    assert!(
+        !direct_block.contains("potb/jcode"),
+        "the direct-access project must not be routed through another \
+         project's fork; got:\n{direct_block}"
+    );
+
+    // Branch destination, not just the PR: pushing a fork project's branch to
+    // upstream fails on permissions and strands the work.
+    assert!(
+        fork_block.contains("push the branch to the fork remote"),
+        "the fork flow must say where the BRANCH goes; got:\n{fork_block}"
+    );
+    assert!(
+        direct_block.contains("push the branch to `origin`"),
+        "the direct flow must say where the BRANCH goes; got:\n{direct_block}"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// Per-project instructions lived only in `~/.jcode/ambient/instructions/`
+/// under a flattened-path filename, so nothing in the config revealed they
+/// existed. They must be declarable from config, inline or by file reference.
+#[test]
+fn per_project_instructions_can_be_declared_in_config() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let instructions_dir = temp.path().join("ambient").join("instructions");
+    std::fs::create_dir_all(&instructions_dir).expect("instructions dir");
+    std::fs::write(
+        instructions_dir.join("private_project.md"),
+        "Production SaaS. Never touch migrations.",
+    )
+    .expect("write instructions file");
+
+    let render = |config: &str| {
+        std::fs::write(temp.path().join("config.toml"), config).expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let prompt = render(
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\n\
+         instructions = \"Always work in a git worktree.\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/projects/workspace/private_project\"\n\
+         instructions_file = \"private_project.md\"\n",
+    );
+
+    let section = prompt
+        .split("## Per-Project Standing Instructions")
+        .nth(1)
+        .expect("per-project section");
+    assert!(
+        section.contains("### /home/potb/jcode")
+            && section.contains("Always work in a git worktree."),
+        "inline instructions must reach the prompt; got:\n{section}"
+    );
+    assert!(
+        section.contains("### /home/potb/projects/workspace/private_project")
+            && section.contains("Never touch migrations."),
+        "a referenced instructions file must be loaded; got:\n{section}"
+    );
+
+    // The legacy slug-named file must keep working for projects that have not
+    // been migrated.
+    std::fs::write(
+        instructions_dir.join("home-potb-legacy.md"),
+        "Legacy rules still apply.",
+    )
+    .expect("write legacy file");
+    let legacy = render(
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/legacy\"\n",
+    );
+    assert!(
+        legacy.contains("Legacy rules still apply."),
+        "an unmigrated project must keep its slug-named instructions file"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+
+/// One global `active_windows` forces the strictest project's hours onto every
+/// other project, costing every cycle in between. Windows belong per project.
+#[test]
+fn per_project_active_windows_gate_only_their_own_project() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // A window that is open now, and one that never overlaps it, expressed
+    // against the current local weekday so the test does not depend on when it
+    // runs.
+    let now = chrono::Local::now();
+    let day = match chrono::Datelike::weekday(&now) {
+        chrono::Weekday::Mon => "mon",
+        chrono::Weekday::Tue => "tue",
+        chrono::Weekday::Wed => "wed",
+        chrono::Weekday::Thu => "thu",
+        chrono::Weekday::Fri => "fri",
+        chrono::Weekday::Sat => "sat",
+        chrono::Weekday::Sun => "sun",
+    };
+    let open_spec = format!("{day} 00:00-23:59");
+    let hour = chrono::Timelike::hour(&now);
+    // A one-hour window that cannot contain "now".
+    let closed_start = (hour + 2) % 24;
+    let closed_spec = format!("{day} {closed_start:02}:00-{closed_start:02}:30");
+
+    let render = |config: &str| {
+        std::fs::write(temp.path().join("config.toml"), config).expect("write config");
+        crate::config::invalidate_config_cache();
+        build_ambient_system_prompt(
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &[],
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let prompt = render(&format!(
+        "[ambient]\nenabled = true\nproactive_work = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/private_project\"\n\
+         active_windows = [\"{closed_spec}\"]\n"
+    ));
+
+    let walk = prompt
+        .split("Do Not Stop At The First Quiet Project")
+        .nth(1)
+        .expect("walk section");
+    assert!(
+        walk.contains("1. /home/potb/jcode"),
+        "a project with no window of its own is always workable; got:\n{walk}"
+    );
+    assert!(
+        !walk.contains("2. /home/potb/private_project"),
+        "a project outside its own window must not be offered as work; got:\n{walk}"
+    );
+    assert!(
+        walk.contains("/home/potb/private_project (allowed:"),
+        "a project held back by its schedule must be named as such, or its \
+         absence reads as 'finished'; got:\n{walk}"
+    );
+
+    // Its own window being open puts it back in the rotation.
+    let open_prompt = render(&format!(
+        "[ambient]\nenabled = true\nproactive_work = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/private_project\"\n\
+         active_windows = [\"{open_spec}\"]\n"
+    ));
+    assert!(
+        open_prompt
+            .split("Do Not Stop At The First Quiet Project")
+            .nth(1)
+            .expect("walk section")
+            .contains("2. /home/potb/private_project"),
+        "an open per-project window must not exclude the project"
+    );
+
+    // The global escape hatch covers per-project schedules too, or it would
+    // only half-mean "run anytime".
+    let ignored = render(&format!(
+        "[ambient]\nenabled = true\nproactive_work = true\n\
+         ignore_active_windows = true\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/jcode\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/private_project\"\n\
+         active_windows = [\"{closed_spec}\"]\n"
+    ));
+    assert!(
+        ignored
+            .split("Do Not Stop At The First Quiet Project")
+            .nth(1)
+            .expect("walk section")
+            .contains("2. /home/potb/private_project"),
+        "ignore_active_windows must also ignore per-project windows"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+

@@ -1319,3 +1319,93 @@ async fn starting_ambient_clears_a_persisted_stop_even_with_the_loop_alive() {
     task.abort();
     let _ = task.await;
 }
+
+/// A provider that records model/effort switches, so the ambient override path
+/// can be checked without touching global config or real credentials.
+#[derive(Default)]
+struct RecordingProvider {
+    model: StdMutex<String>,
+    effort: StdMutex<Option<String>>,
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("not used"))
+    }
+
+    fn name(&self) -> &str {
+        "recording"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.effort.lock().unwrap().clone()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        *self.effort.lock().unwrap() = Some(effort.to_string());
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(RecordingProvider {
+            model: StdMutex::new(self.model()),
+            effort: StdMutex::new(self.reasoning_effort()),
+        })
+    }
+}
+
+/// `[ambient] model`/`effort` were accepted by config but never applied to the
+/// provider an ambient cycle runs on, so background cycles silently inherited
+/// the interactive session's model and effort.
+#[test]
+fn ambient_model_and_effort_config_are_applied_to_the_cycle_provider() {
+    let provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
+        model: StdMutex::new("session-model".to_string()),
+        effort: StdMutex::new(None),
+    });
+
+    let ambient = crate::config::AmbientConfig {
+        model: Some("ambient-model".to_string()),
+        effort: Some("low".to_string()),
+        ..Default::default()
+    };
+
+    let applied = super::apply_ambient_model_overrides(Arc::clone(&provider), &ambient);
+
+    assert_eq!(applied.model(), "ambient-model");
+    assert_eq!(applied.reasoning_effort().as_deref(), Some("low"));
+}
+
+/// With no overrides configured, the cycle provider must keep whatever the
+/// forked session already had.
+#[test]
+fn ambient_without_overrides_keeps_the_inherited_model_and_effort() {
+    let provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
+        model: StdMutex::new("session-model".to_string()),
+        effort: StdMutex::new(None),
+    });
+
+    let applied = super::apply_ambient_model_overrides(
+        Arc::clone(&provider),
+        &crate::config::AmbientConfig::default(),
+    );
+
+    assert_eq!(applied.model(), "session-model");
+    assert_eq!(applied.reasoning_effort(), None);
+}

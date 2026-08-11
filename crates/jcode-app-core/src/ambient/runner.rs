@@ -28,6 +28,55 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
+/// Fork the agent provider for an ambient cycle, applying the `[ambient]`
+/// `model`/`effort` overrides.
+///
+/// Ambient forks whatever provider the server session happens to run on, so
+/// without this the configured `ambient.model` was accepted by config and then
+/// silently ignored, and every background cycle inherited the interactive
+/// session's model and reasoning effort.
+fn fork_ambient_provider(provider: &Arc<dyn Provider>) -> Arc<dyn Provider> {
+    apply_ambient_model_overrides(provider.fork(), &config().ambient)
+}
+
+/// Apply `[ambient]` model/effort overrides to an already-forked provider.
+/// Split out from `fork_ambient_provider` so the override logic is testable
+/// without a global config write.
+fn apply_ambient_model_overrides(
+    forked: Arc<dyn Provider>,
+    ambient: &crate::config::AmbientConfig,
+) -> Arc<dyn Provider> {
+    if let Some(model) = ambient
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        && let Err(e) = crate::provider::set_model_with_auth_refresh(forked.as_ref(), model)
+    {
+        logging::warn(&format!(
+            "Ambient: could not apply configured ambient.model '{}': {} (using {})",
+            model,
+            e,
+            forked.model()
+        ));
+    }
+
+    if let Some(effort) = ambient
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        && let Err(e) = forked.set_reasoning_effort(effort)
+    {
+        logging::warn(&format!(
+            "Ambient: could not apply configured ambient.effort '{}': {}",
+            effort, e
+        ));
+    }
+
+    forked
+}
+
 /// Ceiling on how long a closed window may park the runner.
 ///
 /// A window that opens on Monday morning is legitimately days away, but
@@ -1391,7 +1440,7 @@ impl AmbientRunnerHandle {
         // Headless mode: run agent directly
         self.set_running_detail("setting up tools").await;
 
-        let cycle_provider = provider.fork();
+        let cycle_provider = fork_ambient_provider(provider);
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         registry.register_ambient_tools().await;
 
