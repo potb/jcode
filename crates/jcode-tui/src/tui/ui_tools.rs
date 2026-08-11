@@ -902,7 +902,7 @@ pub(crate) fn get_tool_activity_detail(tool: &ToolCall) -> String {
     }
 }
 
-pub(super) fn get_tool_summary_with_budget(
+pub(crate) fn get_tool_summary_with_budget(
     tool: &ToolCall,
     bash_max_chars: usize,
     max_width: Option<usize>,

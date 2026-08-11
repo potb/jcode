@@ -413,6 +413,67 @@ impl App {
                 "display_messages": self.display_messages.len(),
             })
             .to_string()
+        } else if cmd == "multiedit-chip-fixture" {
+            // Debug-only: a real multiedit tool row, so the chip's "(N edits)"
+            // label can be read off a live frame. The label used to render
+            // "(0 edits)" because `push_display_message` compacts live messages
+            // and the multiedit branch dropped the `edits` array it counted.
+            // Pushed through `push_display_message`, not assigned directly:
+            // that is the call that compacts live messages, so it is the only
+            // path that reproduces the "(0 edits)" bug.
+            self.display_messages.clear();
+            self.push_display_message(DisplayMessage::user("apply three edits to demo.rs"));
+            self.push_display_message(DisplayMessage::tool(
+                "Edited /tmp/demo.rs".to_string(),
+                crate::message::ToolCall {
+                    id: "debug_multiedit_chip_1".to_string(),
+                    name: "multiedit".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "/tmp/demo.rs",
+                        "edits": [
+                            { "old_string": "alpha", "new_string": "beta" },
+                            { "old_string": "gamma", "new_string": "delta" },
+                            { "old_string": "epsilon", "new_string": "zeta" },
+                        ],
+                    }),
+                    intent: None,
+                    thought_signature: None,
+                },
+            ));
+            self.bump_display_messages_version();
+            self.scroll_offset = 0;
+            self.auto_scroll_paused = false;
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.set_status_notice("Debug multiedit chip fixture ready");
+            let tool = self
+                .display_messages
+                .last()
+                .and_then(|message| message.tool_data.clone());
+            // Report the label through the same call the chip renders with
+            // (`get_tool_summary_with_budget`, see ui_messages.rs), so this
+            // reads the real rendered text rather than a lookalike.
+            let chip_label = tool
+                .as_ref()
+                .map(|tool| {
+                    crate::tui::ui::tools_ui::get_tool_summary_with_budget(tool, 50, Some(60))
+                })
+                .unwrap_or_default();
+            let summary = tool
+                .as_ref()
+                .map(crate::tui::ui::tools_ui::get_tool_summary)
+                .unwrap_or_default();
+            serde_json::json!({
+                "ok": true,
+                "display_messages": self.display_messages.len(),
+                // Both read back after the live-message compaction that broke this.
+                "chip_label": chip_label,
+                "tool_summary": summary,
+                "edits_field_present": tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.input.get("edits").is_some()),
+            })
+            .to_string()
         } else if cmd == "picker" || cmd == "picker:state" {
             self.debug_picker_state_json(None)
         } else if cmd == "model-picker" || cmd == "model-picker:live" {
