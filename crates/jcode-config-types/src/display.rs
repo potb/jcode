@@ -392,7 +392,12 @@ mod context_widget_mode_tests {
             let cfg: DisplayConfig =
                 toml::from_str(&format!("context_widget = \"{}\"", raw)).expect(raw);
             assert_eq!(cfg.context_widget, expected, "toml value {}", raw);
-            assert_eq!(ContextWidgetMode::parse(raw), Some(expected), "parse {}", raw);
+            assert_eq!(
+                ContextWidgetMode::parse(raw),
+                Some(expected),
+                "parse {}",
+                raw
+            );
         }
 
         let cfg: DisplayConfig = toml::from_str("context_widget = \"nonsense\"").unwrap();
@@ -426,4 +431,3 @@ mod tests {
         assert!(!disabled.pin_todos);
     }
 }
-

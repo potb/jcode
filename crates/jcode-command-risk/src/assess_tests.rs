@@ -563,4 +563,3 @@ fn wrapper_value_flags_and_unbounded_globs_remain_guarded() {
         );
     }
 }
-
