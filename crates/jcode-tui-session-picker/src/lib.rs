@@ -6,6 +6,8 @@ use jcode_session_types::SessionStatus;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SessionSource {
     Jcode,
+    /// A jcode session created by an ambient cycle (headless or visible).
+    Ambient,
     ClaudeCode,
     Codex,
     Pi,
@@ -17,6 +19,7 @@ impl SessionSource {
     pub fn badge(self) -> Option<&'static str> {
         match self {
             Self::Jcode => None,
+            Self::Ambient => Some("🌙 ambient"),
             Self::ClaudeCode => Some("🧵 Claude Code"),
             Self::Codex => Some("🧠 Codex"),
             Self::Pi => Some("π Pi"),
@@ -45,6 +48,8 @@ pub enum SessionFilterMode {
     /// annotated with whether each is still streaming a response or is ready
     /// for input. Backs the opt-in "active sessions manager" view.
     Active,
+    /// Sessions produced by ambient cycles.
+    Ambient,
     ClaudeCode,
     Codex,
     Pi,
@@ -63,7 +68,8 @@ impl SessionFilterMode {
             Self::CurrentDir => Self::CatchUp,
             Self::CatchUp => Self::Saved,
             Self::Saved => Self::Active,
-            Self::Active => Self::ClaudeCode,
+            Self::Active => Self::Ambient,
+            Self::Ambient => Self::ClaudeCode,
             Self::ClaudeCode => Self::Codex,
             Self::Codex => Self::Pi,
             Self::Pi => Self::OpenCode,
@@ -82,7 +88,8 @@ impl SessionFilterMode {
             Self::CatchUp => Self::CurrentDir,
             Self::Saved => Self::CatchUp,
             Self::Active => Self::Saved,
-            Self::ClaudeCode => Self::Active,
+            Self::Ambient => Self::Active,
+            Self::ClaudeCode => Self::Ambient,
             Self::Codex => Self::ClaudeCode,
             Self::Pi => Self::Codex,
             Self::OpenCode => Self::Pi,
@@ -98,6 +105,7 @@ impl SessionFilterMode {
             Self::CatchUp => Some("⏭ catch up"),
             Self::Saved => Some("📌 saved"),
             Self::Active => Some("⚡ active"),
+            Self::Ambient => Some("🌙 ambient"),
             Self::ClaudeCode => Some("🧵 Claude Code"),
             Self::Codex => Some("🧠 Codex"),
             Self::Pi => Some("π Pi"),
@@ -128,6 +136,8 @@ pub struct SessionInfo {
     pub provider_key: Option<String>,
     pub is_canary: bool,
     pub is_debug: bool,
+    /// Whether this session was produced by an ambient cycle.
+    pub is_ambient: bool,
     pub saved: bool,
     pub save_label: Option<String>,
     pub status: SessionStatus,
@@ -192,6 +202,12 @@ pub enum PickerItem {
 
 pub fn session_is_claude_code(source: SessionSource, id: &str) -> bool {
     source == SessionSource::ClaudeCode || id.starts_with("imported_cc_")
+}
+
+/// Ambient sessions are classified by the persisted `is_ambient` flag, with the
+/// source enum as a fallback for entries built from other paths.
+pub fn session_is_ambient(source: SessionSource, is_ambient: bool) -> bool {
+    is_ambient || source == SessionSource::Ambient
 }
 
 pub fn session_is_codex(source: SessionSource, model: Option<&str>) -> bool {

@@ -194,6 +194,7 @@ impl Agent {
         let preserve_canary = self.session.is_canary;
         let preserve_testing_build = self.session.testing_build.clone();
         let preserve_debug = self.session.is_debug;
+        let preserve_ambient = self.session.is_ambient;
         let preserve_working_dir = self.session.working_dir.clone();
 
         self.session.mark_closed();
@@ -206,6 +207,7 @@ impl Agent {
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
+        new_session.is_ambient = preserve_ambient;
         new_session.working_dir = preserve_working_dir;
         new_session.ensure_initial_session_context_message();
 
@@ -308,6 +310,19 @@ impl Agent {
 
     pub fn is_debug(&self) -> bool {
         self.session.is_debug
+    }
+
+    pub fn is_ambient(&self) -> bool {
+        self.session.is_ambient
+    }
+
+    /// Mark this session as an ambient cycle session and persist the flag so
+    /// the session picker can classify it after the process exits.
+    pub fn set_ambient(&mut self, is_ambient: bool) {
+        self.session.set_ambient(is_ambient);
+        if let Err(err) = self.session.save() {
+            logging::error(&format!("Failed to persist ambient session state: {}", err));
+        }
     }
 
     pub fn set_canary(&mut self, build_hash: &str) {

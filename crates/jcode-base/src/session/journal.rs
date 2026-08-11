@@ -31,6 +31,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) last_pid: Option<u32>,
     pub(super) last_active_at: Option<DateTime<Utc>>,
     pub(super) is_debug: bool,
+    #[serde(default)]
+    pub(super) is_ambient: bool,
     pub(super) saved: bool,
     pub(super) save_label: Option<String>,
 }

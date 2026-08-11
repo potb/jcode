@@ -168,6 +168,11 @@ pub struct Session {
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
+    /// Whether this session was created by an ambient cycle (headless or
+    /// visible). Persisted so the session picker can classify ambient work
+    /// after the process that ran it is gone.
+    #[serde(default)]
+    pub is_ambient: bool,
     /// Whether this session has been saved/bookmarked by the user
     #[serde(default)]
     pub saved: bool,
@@ -246,6 +251,8 @@ struct SessionStartupStub {
     last_active_at: Option<DateTime<Utc>>,
     #[serde(default)]
     is_debug: bool,
+    #[serde(default)]
+    is_ambient: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]
@@ -342,6 +349,7 @@ impl Session {
         session.last_pid = stub.last_pid;
         session.last_active_at = stub.last_active_at;
         session.is_debug = stub.is_debug;
+        session.is_ambient = stub.is_ambient;
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.messages.clear();
@@ -377,6 +385,7 @@ impl Session {
         session.last_pid = snapshot.last_pid;
         session.last_active_at = snapshot.last_active_at;
         session.is_debug = snapshot.is_debug;
+        session.is_ambient = snapshot.is_ambient;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
         session.replay_events.clear();
@@ -514,6 +523,7 @@ impl Session {
             last_pid: self.last_pid,
             last_active_at: self.last_active_at,
             is_debug: self.is_debug,
+            is_ambient: self.is_ambient,
             saved: self.saved,
             save_label: self.save_label.clone(),
         }
@@ -715,6 +725,7 @@ impl Session {
         self.last_pid = meta.last_pid;
         self.last_active_at = meta.last_active_at;
         self.is_debug = meta.is_debug;
+        self.is_ambient = meta.is_ambient;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
         self.mark_memory_profile_dirty();
@@ -755,6 +766,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug,
+            is_ambient: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -809,6 +821,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug,
+            is_ambient: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -824,6 +837,11 @@ impl Session {
         };
         session.reset_persist_state(false);
         session
+    }
+
+    /// Mark (or unmark) this session as an ambient cycle session.
+    pub fn set_ambient(&mut self, is_ambient: bool) {
+        self.is_ambient = is_ambient;
     }
 
     /// Mark this session as a debug/test session
@@ -1623,6 +1641,8 @@ struct RemoteStartupSessionSnapshot {
     last_active_at: Option<DateTime<Utc>>,
     #[serde(default)]
     is_debug: bool,
+    #[serde(default)]
+    is_ambient: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]

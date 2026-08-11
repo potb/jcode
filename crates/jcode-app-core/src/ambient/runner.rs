@@ -1396,6 +1396,10 @@ impl AmbientRunnerHandle {
 
         let mut agent = Agent::new(cycle_provider.clone(), registry);
         agent.set_debug(true);
+        // Persisted marker so the session picker can surface ambient cycles
+        // under their own filter instead of lumping them in with self-dev and
+        // swarm debug noise (issue #26).
+        agent.set_ambient(true);
         agent.set_system_prompt(&system_prompt);
         let ambient_session_id = agent.session_id().to_string();
         ambient_tools::register_ambient_session(ambient_session_id.clone());

@@ -599,6 +599,50 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
 }
 
 #[test]
+fn test_ambient_flag_persists_across_save_and_load() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-ambient-flag-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+
+    let session_id = "session_ambient_flag";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    assert!(!session.is_ambient);
+    session.set_ambient(true);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "ambient cycle".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let loaded = Session::load(session_id)?;
+    assert!(loaded.is_ambient);
+
+    // Journal appends must not drop the flag either: the picker reads the
+    // journal meta when a session has unflushed appends.
+    let mut reloaded = loaded;
+    reloaded.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "second turn".to_string(),
+            cache_control: None,
+        }],
+    );
+    reloaded.save()?;
+    assert!(Session::load(session_id)?.is_ambient);
+
+    let stub = Session::load_startup_stub(session_id)?;
+    assert!(stub.is_ambient);
+    Ok(())
+}
+
+#[test]
 fn test_create_marks_debug_when_test_session_env_enabled() {
     let _env_lock = lock_env();
     let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "1");

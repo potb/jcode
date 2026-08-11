@@ -587,6 +587,7 @@ fn classify_session_source(
     id: &str,
     provider_key: Option<&str>,
     model: Option<&str>,
+    is_ambient: bool,
 ) -> SessionSource {
     if id.starts_with("imported_cc_") {
         return SessionSource::ClaudeCode;
@@ -611,7 +612,55 @@ fn classify_session_source(
         return SessionSource::Cursor;
     }
 
+    if is_ambient {
+        return SessionSource::Ambient;
+    }
+
     SessionSource::Jcode
+}
+
+/// Session IDs of ambient cycles recorded under `transcripts_dir`.
+///
+/// Cycles that ran before `Session::is_ambient` existed have no flag on disk, so
+/// the transcripts are the only durable record that they were ambient.
+fn ambient_session_ids_from_transcripts(transcripts_dir: &Path) -> HashSet<String> {
+    #[derive(Deserialize)]
+    struct TranscriptSessionId {
+        #[serde(default)]
+        session_id: Option<String>,
+    }
+
+    let mut ids = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(transcripts_dir) else {
+        return ids;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(parsed) = serde_json::from_slice::<TranscriptSessionId>(&bytes)
+            && let Some(session_id) = parsed.session_id
+            && !session_id.trim().is_empty()
+        {
+            ids.insert(session_id);
+        }
+    }
+    ids
+}
+
+/// Cached view of [`ambient_session_ids_from_transcripts`] for the real home
+/// directory. Loaded once per process because the picker parses thousands of
+/// sessions per open.
+fn ambient_transcript_session_ids() -> &'static HashSet<String> {
+    static IDS: OnceLock<HashSet<String>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        let Ok(dir) = storage::jcode_dir() else {
+            return HashSet::new();
+        };
+        ambient_session_ids_from_transcripts(&dir.join("ambient").join("transcripts"))
+    })
 }
 
 fn collect_files_recursive(root: &Path, extension: &str) -> Vec<PathBuf> {
@@ -1187,6 +1236,8 @@ struct SessionSummary {
     #[serde(default)]
     is_debug: bool,
     #[serde(default)]
+    is_ambient: bool,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
@@ -1489,6 +1540,8 @@ struct SessionJournalSummaryMeta {
     #[serde(default)]
     is_debug: bool,
     #[serde(default)]
+    is_ambient: bool,
+    #[serde(default)]
     saved: Option<bool>,
     #[serde(default)]
     save_label: Option<String>,
@@ -1533,6 +1586,7 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
                     summary.model = entry.meta.model;
                     summary.is_canary = entry.meta.is_canary;
                     summary.is_debug = entry.meta.is_debug;
+                    summary.is_ambient = entry.meta.is_ambient;
                     if let Some(saved) = entry.meta.saved {
                         summary.saved = saved;
                     }
@@ -1656,10 +1710,12 @@ fn parse_jcode_session_info(
 
     let status = session.status.clone();
     let needs_catchup = catchup_seen.needs_catchup(stem, session.updated_at, &status);
+    let is_ambient = session.is_ambient || ambient_transcript_session_ids().contains(stem);
     let source = classify_session_source(
         stem,
         session.provider_key.as_deref(),
         session.model.as_deref(),
+        is_ambient,
     );
 
     let title = session
@@ -1695,6 +1751,7 @@ fn parse_jcode_session_info(
         provider_key: session.provider_key,
         is_canary: session.is_canary,
         is_debug: session.is_debug,
+        is_ambient,
         saved: session.saved,
         save_label: session.save_label,
         status,
@@ -1790,7 +1847,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             });
             for (offset, parsed_session) in parsed.into_iter().enumerate() {
                 if let Some(info) = parsed_session {
-                    if info.is_debug {
+                    if info.is_debug && !info.is_ambient {
                         if debug_session_count < scan_limit {
                             debug_session_count += 1;
                             sessions.push(info);
@@ -1922,6 +1979,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                 provider_key: Some("claude-code".to_string()),
                 is_canary: false,
                 is_debug: false,
+                is_ambient: false,
                 saved: false,
                 save_label: None,
                 status: SessionStatus::Closed,
@@ -2076,6 +2134,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("openai-codex".to_string()),
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2273,6 +2332,7 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("pi".to_string()),
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2437,6 +2497,7 @@ fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key,
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2546,6 +2607,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("opencode".to_string()),
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2696,6 +2758,7 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key,
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2871,6 +2934,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("cursor".to_string()),
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,

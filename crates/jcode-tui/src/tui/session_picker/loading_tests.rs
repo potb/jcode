@@ -116,6 +116,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         provider_key: None,
         is_canary: false,
         is_debug: false,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -1327,6 +1328,43 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
     assert!(!session_matches_picker_query(loaded, "deploy staging"));
     // Empty query matches everything.
     assert!(session_matches_picker_query(loaded, "   "));
+}
+
+#[test]
+fn ambient_transcripts_backfill_session_ids_for_cycles_predating_the_flag() {
+    // Ambient cycles that ran before `Session::is_ambient` existed have no flag
+    // on disk. The transcript files are the only durable record, so the picker
+    // classifies those sessions from them (issue #26).
+    let temp = tempfile::tempdir().expect("temp dir");
+    let transcripts = temp.path().join("ambient").join("transcripts");
+    std::fs::create_dir_all(&transcripts).expect("create transcripts dir");
+
+    std::fs::write(
+        transcripts.join("cycle_1.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "session_id": "session_old_ambient",
+            "started_at": chrono::Utc::now(),
+        }))
+        .expect("serialize transcript"),
+    )
+    .expect("write transcript");
+    // Blank IDs and non-JSON files must be ignored rather than poisoning the set.
+    std::fs::write(
+        transcripts.join("cycle_2.json"),
+        b"{\"session_id\": \"  \"}",
+    )
+    .expect("write blank transcript");
+    std::fs::write(transcripts.join("notes.txt"), b"session_not_ambient")
+        .expect("write non-json file");
+
+    let ids = ambient_session_ids_from_transcripts(&transcripts);
+    assert_eq!(
+        ids,
+        std::collections::HashSet::from(["session_old_ambient".to_string()])
+    );
+
+    // A missing directory is the common case (ambient never ran) and must be empty.
+    assert!(ambient_session_ids_from_transcripts(&temp.path().join("missing")).is_empty());
 }
 
 /// Regression tests for issue #674: the picker must be able to list only

@@ -78,6 +78,7 @@ fn make_session_with_flags(
         provider_key: None,
         is_canary,
         is_debug,
+        is_ambient: false,
         saved: false,
         save_label: None,
         status,
@@ -734,6 +735,41 @@ fn benchmark_resume_search_reports_incremental_timings() {
 }
 
 #[test]
+fn test_ambient_sessions_are_visible_without_test_toggle_and_have_own_filter() {
+    // Ambient cycles set `is_debug` for tooling reasons, so before the ambient
+    // marker existed they were hidden behind the test-session toggle and could
+    // not be browsed at all (issue #26).
+    let mut ambient = make_session("session_ambient", "ambient", true, SessionStatus::Closed);
+    ambient.is_ambient = true;
+    ambient.source = SessionSource::Ambient;
+
+    let selfdev = make_session("session_selfdev", "selfdev", true, SessionStatus::Closed);
+    let normal = make_session("session_normal", "normal", false, SessionStatus::Closed);
+
+    let mut picker = SessionPicker::new(vec![ambient, selfdev, normal]);
+    picker.rebuild_items();
+
+    assert!(!picker.show_test_sessions);
+    let visible: Vec<String> = picker
+        .visible_session_iter()
+        .map(|session| session.id.clone())
+        .collect();
+    assert!(visible.contains(&"session_ambient".to_string()));
+    assert!(!visible.contains(&"session_selfdev".to_string()));
+    // The ambient session is no longer counted as hidden test noise.
+    assert_eq!(picker.hidden_test_count, 1);
+
+    picker.filter_mode = SessionFilterMode::Ambient;
+    picker.rebuild_items();
+    let ambient_only: Vec<String> = picker
+        .visible_session_iter()
+        .map(|session| session.id.clone())
+        .collect();
+    assert_eq!(ambient_only, vec!["session_ambient".to_string()]);
+    assert_eq!(SessionSource::Ambient.badge(), Some("\u{1f319} ambient"));
+}
+
+#[test]
 fn test_filter_mode_cycles_through_requested_session_sources() {
     let mut saved = make_session("session_saved", "saved", false, SessionStatus::Closed);
     saved.saved = true;
@@ -798,6 +834,10 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.filter_mode, SessionFilterMode::Active);
     // No live processes own these synthetic sessions, so the Active view is
     // empty in tests.
+    assert_eq!(picker.visible_sessions.len(), 0);
+
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Ambient);
     assert_eq!(picker.visible_sessions.len(), 0);
 
     picker.cycle_filter_mode();

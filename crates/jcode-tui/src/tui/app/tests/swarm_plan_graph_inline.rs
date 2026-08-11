@@ -1771,6 +1771,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
                 provider_key: None,
                 is_canary: false,
                 is_debug: false,
+                is_ambient: false,
                 saved: false,
                 save_label: None,
                 status: crate::session::SessionStatus::Closed,

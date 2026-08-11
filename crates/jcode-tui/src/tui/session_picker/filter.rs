@@ -72,7 +72,10 @@ impl SessionPicker {
             .copied()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (show_test || !session.is_debug)
+                    // Ambient cycles are marked debug for tooling reasons, but
+                    // they are user-facing work, so they stay visible without
+                    // the test-session toggle (issue #26).
+                    (show_test || !session.is_debug || Self::session_is_ambient(session))
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })
@@ -114,7 +117,9 @@ impl SessionPicker {
         refs.iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .filter(|session| {
-                session.is_debug && self.session_matches_filter_mode(session, filter_mode)
+                session.is_debug
+                    && !Self::session_is_ambient(session)
+                    && self.session_matches_filter_mode(session, filter_mode)
             })
             .count()
     }
@@ -154,6 +159,10 @@ impl SessionPicker {
         jcode_tui_session_picker::session_is_cursor(session.source, session.provider_key.as_deref())
     }
 
+    pub(super) fn session_is_ambient(session: &SessionInfo) -> bool {
+        jcode_tui_session_picker::session_is_ambient(session.source, session.is_ambient)
+    }
+
     fn session_matches_filter_mode(
         &self,
         session: &SessionInfo,
@@ -165,6 +174,7 @@ impl SessionPicker {
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
             SessionFilterMode::Active => self.session_is_live(session),
+            SessionFilterMode::Ambient => Self::session_is_ambient(session),
             SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
             SessionFilterMode::Codex => Self::session_is_codex(session),
             SessionFilterMode::Pi => Self::session_is_pi(session),
