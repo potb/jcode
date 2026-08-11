@@ -649,6 +649,74 @@ const HEAP_RETENTION_CHECK_SECS: u64 = 120;
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
 /// Server state
+/// Why the sleep inhibitor is (or is not) held, used to log a single line per
+/// transition so "why did the machine sleep" stays answerable from the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InhibitReason {
+    /// `[power].prevent_sleep_while_streaming` is off.
+    Disabled,
+    /// Discharging at/below `[power].prevent_sleep_min_battery_percent`.
+    LowBattery { percent: u8, threshold: u8 },
+    /// No streaming session and no running background task.
+    Idle,
+    /// Work is in flight.
+    Working { streaming: bool, background: bool },
+}
+
+impl InhibitReason {
+    fn active(&self) -> bool {
+        matches!(self, Self::Working { .. })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Disabled => "disabled by config".to_string(),
+            Self::LowBattery { percent, threshold } => {
+                format!("on battery at {percent}%, at or below the {threshold}% floor")
+            }
+            Self::Idle => "no streaming sessions, no background tasks".to_string(),
+            Self::Working {
+                streaming,
+                background,
+            } => match (streaming, background) {
+                (true, true) => "streaming sessions and background tasks present".to_string(),
+                (true, false) => "streaming sessions present".to_string(),
+                (false, true) => "background tasks present".to_string(),
+                (false, false) => "working".to_string(),
+            },
+        }
+    }
+}
+
+/// Pure decision for the power inhibitor, separated from I/O so it is testable.
+///
+/// The battery floor wins over any activity: keeping an unplugged laptop awake
+/// until it dies is worse than losing one run.
+fn decide_inhibit_reason(
+    enabled: bool,
+    battery: &crate::battery::BatteryStatus,
+    min_battery_percent: u8,
+    streaming: bool,
+    background: bool,
+) -> InhibitReason {
+    if !enabled {
+        return InhibitReason::Disabled;
+    }
+    if battery.is_draining_below(min_battery_percent) {
+        return InhibitReason::LowBattery {
+            percent: battery.percent.unwrap_or_default(),
+            threshold: min_battery_percent,
+        };
+    }
+    if !streaming && !background {
+        return InhibitReason::Idle;
+    }
+    InhibitReason::Working {
+        streaming,
+        background,
+    }
+}
+
 pub struct Server {
     provider: Arc<dyn Provider>,
     socket_path: PathBuf,
@@ -1861,16 +1929,20 @@ impl Server {
     }
 
     /// Spawn the background loop that keeps the machine awake while any session
-    /// is actively streaming/processing.
+    /// is actively streaming/processing, or while any background task runs.
     ///
     /// The shared daemon owns every session, so a single inhibitor here covers
     /// all of them. We poll the swarm-member map (the authoritative "running"
-    /// signal that also drives Waybar's "N streaming" indicator) on a short
-    /// interval and reconcile a best-effort OS power inhibitor against it. The
-    /// inhibitor blocks automatic system sleep; Linux also blocks lid-switch
-    /// handling. Windows still honors explicit lid/power-button actions from the
-    /// active power plan. The display can turn off. When no session is running,
-    /// the guard is released so normal power management resumes immediately.
+    /// signal that also drives Waybar's "N streaming" indicator) plus the
+    /// background-task status directory on a short interval and reconcile a
+    /// best-effort OS power inhibitor against them. Background tasks count as
+    /// activity because a session awaiting one is not `"running"`, yet losing the
+    /// machine mid-run discards the whole result (#29). The inhibitor blocks
+    /// automatic system sleep; Linux also blocks lid-switch handling. Windows
+    /// still honors explicit lid/power-button actions from the active power plan.
+    /// The display can turn off. When no work is in flight, or when the machine
+    /// is discharging at/below the configured battery floor, the guard is
+    /// released so normal power management resumes immediately.
     fn spawn_power_inhibitor(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
         // Reconcile interval. Short enough that the inhibitor engages promptly
         // when a turn starts and releases promptly when work finishes, but cheap
@@ -1887,32 +1959,61 @@ impl Server {
         }
 
         crate::logging::info(
-            "power_inhibit: monitoring active sessions to prevent sleep while streaming",
+            "power_inhibit: monitoring active sessions and background tasks to prevent sleep while working",
         );
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_active: Option<bool> = None;
+            let mut last_reason: Option<InhibitReason> = None;
             loop {
                 interval.tick().await;
 
                 // Re-evaluate the config each tick so toggling it at runtime
                 // takes effect without restarting the daemon.
-                let enabled = crate::config::config().power.prevent_sleep_while_streaming;
+                let power = crate::config::config().power.clone();
 
-                let active = enabled && Self::any_session_streaming(&swarm_members).await;
-                if last_active != Some(active) {
+                let reason = Self::inhibit_reason(&swarm_members, &power).await;
+                if last_reason.as_ref() != Some(&reason) {
                     crate::logging::info(&format!(
-                        "power_inhibit: {} (streaming sessions {})",
-                        if active { "engaging" } else { "releasing" },
-                        if active { "present" } else { "absent" },
+                        "power_inhibit: {} ({})",
+                        if reason.active() {
+                            "engaging"
+                        } else {
+                            "releasing"
+                        },
+                        reason.describe(),
                     ));
-                    last_active = Some(active);
+                    last_reason = Some(reason.clone());
                 }
-                inhibitor.set_active(active);
+                inhibitor.set_active(reason.active());
             }
         });
+    }
+
+    /// Decide whether the inhibitor should be held, and why.
+    ///
+    /// The battery floor wins over any activity: keeping an unplugged laptop
+    /// awake until it dies is worse than losing one run.
+    async fn inhibit_reason(
+        swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+        power: &crate::config::PowerConfig,
+    ) -> InhibitReason {
+        if !power.prevent_sleep_while_streaming {
+            // Skip the battery read and the scans entirely when disabled.
+            return InhibitReason::Disabled;
+        }
+
+        let battery = crate::battery::detect_cached();
+        let streaming = Self::any_session_streaming(swarm_members).await;
+        let background = crate::background::global().has_running_tasks();
+        decide_inhibit_reason(
+            true,
+            &battery,
+            power.prevent_sleep_min_battery_percent,
+            streaming,
+            background,
+        )
     }
 
     /// Whether at least one session is currently in the "running" state, i.e.

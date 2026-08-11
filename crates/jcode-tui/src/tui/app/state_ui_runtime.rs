@@ -59,13 +59,19 @@ impl App {
         self.is_processing || self.pending_queued_dispatch || self.split_launch_in_flight()
     }
 
-    /// Keep a power inhibitor held while a turn is processing/streaming so the
-    /// machine does not idle-sleep mid-stream. No-op on unsupported platforms
-    /// or when `[power].prevent_sleep_while_streaming` is disabled (#452).
+    /// Keep a power inhibitor held while a turn is processing/streaming or a
+    /// background task is running, so the machine does not idle-sleep mid-stream
+    /// or mid-run. No-op on unsupported platforms, when
+    /// `[power].prevent_sleep_while_streaming` is disabled (#452), or while
+    /// discharging at/below `[power].prevent_sleep_min_battery_percent` (#29).
     pub(super) fn sync_sleep_guard(&mut self) {
-        let enabled = crate::config::config().power.prevent_sleep_while_streaming;
+        let power = &crate::config::config().power;
+        let enabled = power.prevent_sleep_while_streaming;
+        let low_battery = crate::battery::detect_cached()
+            .is_draining_below(power.prevent_sleep_min_battery_percent);
+        let busy = self.is_processing() || crate::background::global().has_running_tasks();
         self.power_inhibitor
-            .set_active(enabled && self.is_processing());
+            .set_active(enabled && !low_battery && busy);
     }
 
     pub fn streaming_text(&self) -> &str {

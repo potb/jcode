@@ -614,7 +614,10 @@ async fn spawn_with_notify_persists_the_full_command_in_the_status_file() -> Res
         sleep(Duration::from_millis(20)).await;
     }
 
-    Err(anyhow!("task {} never reached a terminal status", info.task_id))
+    Err(anyhow!(
+        "task {} never reached a terminal status",
+        info.task_id
+    ))
 }
 
 #[test]
@@ -681,5 +684,68 @@ async fn running_snapshot_for_session_sees_tasks_owned_by_another_process() -> R
     assert_eq!(server_count, 1, "task should be counted exactly once");
 
     drop(info);
+    Ok(())
+}
+
+/// The sleep inhibitor consults `has_running_tasks` across process boundaries
+/// (the daemon owns tasks, the TUI renders them), so it must answer from status
+/// files rather than the in-process map (#29).
+#[tokio::test]
+async fn has_running_tasks_sees_a_live_task_from_a_status_file() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    assert!(
+        !manager.scan_any_running_task(),
+        "an empty task directory means nothing is running"
+    );
+
+    let mut status = running_status_fixture("task-live", "session-live");
+    // No owner metadata: treated as live rather than mislabeled as dead.
+    write_status_fixture(&manager, &status).await;
+    assert!(manager.has_running_tasks());
+
+    status.status = BackgroundTaskStatus::Completed;
+    write_status_fixture(&manager, &status).await;
+    // Bypass the short cache so the state change is observed immediately.
+    assert!(!manager.scan_any_running_task());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn has_running_tasks_ignores_a_task_whose_owner_died() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let mut status = running_status_fixture("task-orphan", "session-orphan");
+    // PID 1 is always alive; a very high unused PID stands in for a dead owner.
+    status.owner_pid = Some(4_194_303);
+    write_status_fixture(&manager, &status).await;
+
+    assert!(
+        !manager.scan_any_running_task(),
+        "a crashed owner must not hold the sleep inhibitor open forever"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn has_running_tasks_caches_within_its_ttl() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let mut status = running_status_fixture("task-cached", "session-cached");
+    write_status_fixture(&manager, &status).await;
+    assert!(manager.has_running_tasks());
+
+    status.status = BackgroundTaskStatus::Completed;
+    write_status_fixture(&manager, &status).await;
+    assert!(
+        manager.has_running_tasks(),
+        "the cached answer is reused inside the TTL so per-frame callers stay cheap"
+    );
+
     Ok(())
 }

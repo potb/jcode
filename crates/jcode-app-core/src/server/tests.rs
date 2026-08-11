@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    FileAccess, Server, SessionInterruptQueues, SwarmMember, dispatch_background_task_completion,
-    file_activity_scope_label, persist_swarm_state_snapshot, remove_session_entry,
+    FileAccess, InhibitReason, Server, SessionInterruptQueues, SwarmMember, decide_inhibit_reason,
+    dispatch_background_task_completion, file_activity_scope_label, persist_swarm_state_snapshot,
+    remove_session_entry,
 };
 use crate::agent::Agent;
 use crate::bus::{
@@ -960,4 +961,93 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     .expect("accept loops should observe runtime cancellation");
 
     Ok(())
+}
+
+/// A background task must hold the sleep inhibitor even though the session that
+/// launched it is idle (awaiting the task, so not `"running"`). This is the
+/// regression from #29, where a 15 minute test run died to idle sleep.
+#[test]
+fn background_tasks_alone_hold_the_sleep_inhibitor() {
+    let battery = crate::battery::BatteryStatus::unknown();
+    let reason = decide_inhibit_reason(true, &battery, 20, false, true);
+    assert!(
+        reason.active(),
+        "background work must keep the machine awake"
+    );
+    assert_eq!(
+        reason,
+        InhibitReason::Working {
+            streaming: false,
+            background: true,
+        }
+    );
+    assert_eq!(reason.describe(), "background tasks present");
+}
+
+#[test]
+fn no_streaming_and_no_background_work_releases_the_inhibitor() {
+    let battery = crate::battery::BatteryStatus::unknown();
+    let reason = decide_inhibit_reason(true, &battery, 20, false, false);
+    assert!(!reason.active());
+    assert_eq!(reason, InhibitReason::Idle);
+}
+
+#[test]
+fn low_battery_while_discharging_releases_even_with_work_in_flight() {
+    let battery = crate::battery::BatteryStatus {
+        percent: Some(18),
+        on_ac: Some(false),
+        status: Some("discharging".to_string()),
+    };
+    let reason = decide_inhibit_reason(true, &battery, 20, true, true);
+    assert!(
+        !reason.active(),
+        "an unplugged laptop must be allowed to sleep"
+    );
+    assert_eq!(
+        reason,
+        InhibitReason::LowBattery {
+            percent: 18,
+            threshold: 20,
+        }
+    );
+    assert!(reason.describe().contains("18%"));
+}
+
+#[test]
+fn low_battery_on_ac_keeps_the_inhibitor_because_it_is_charging_upward() {
+    let battery = crate::battery::BatteryStatus {
+        percent: Some(15),
+        on_ac: Some(true),
+        status: Some("charging".to_string()),
+    };
+    let reason = decide_inhibit_reason(true, &battery, 20, true, false);
+    assert!(reason.active());
+}
+
+#[test]
+fn a_zero_threshold_disables_the_battery_floor() {
+    let battery = crate::battery::BatteryStatus {
+        percent: Some(1),
+        on_ac: Some(false),
+        status: Some("discharging".to_string()),
+    };
+    let reason = decide_inhibit_reason(true, &battery, 0, false, true);
+    assert!(reason.active());
+}
+
+#[test]
+fn an_unreadable_battery_never_gates_the_inhibitor() {
+    // Desktops, VMs and CI report no battery; they must behave as before.
+    let battery = crate::battery::BatteryStatus::unknown();
+    let reason = decide_inhibit_reason(true, &battery, 20, true, false);
+    assert!(reason.active());
+}
+
+#[test]
+fn disabling_the_config_releases_regardless_of_work() {
+    let battery = crate::battery::BatteryStatus::unknown();
+    let reason = decide_inhibit_reason(false, &battery, 20, true, true);
+    assert!(!reason.active());
+    assert_eq!(reason, InhibitReason::Disabled);
 }

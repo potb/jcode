@@ -2029,12 +2029,23 @@ pub struct PowerConfig {
     /// Honored by the shared `jcode serve` daemon. The `JCODE_DISABLE_POWER_INHIBIT`
     /// environment variable forces this off regardless of the config value.
     pub prevent_sleep_while_streaming: bool,
+
+    /// Release the sleep inhibitor when the machine is running on battery at or
+    /// below this percentage, regardless of activity, so an unplugged laptop is
+    /// never kept awake until it dies. `0` disables the check.
+    ///
+    /// The threshold only applies while *discharging*: a plugged-in machine is
+    /// charging upward (or already full) and keeps the inhibitor. Machines whose
+    /// battery cannot be read (desktops, VMs, CI) are never gated on this.
+    /// Default: 20.
+    pub prevent_sleep_min_battery_percent: u8,
 }
 
 impl Default for PowerConfig {
     fn default() -> Self {
         Self {
             prevent_sleep_while_streaming: true,
+            prevent_sleep_min_battery_percent: 20,
         }
     }
 }

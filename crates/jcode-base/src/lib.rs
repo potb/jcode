@@ -20,6 +20,7 @@
 pub mod agent_browser;
 pub mod auth;
 pub mod background;
+pub mod battery;
 pub mod browser;
 pub mod bus;
 pub mod cache_invalidation;

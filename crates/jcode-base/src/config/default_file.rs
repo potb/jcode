@@ -706,9 +706,15 @@ bind_addr = "0.0.0.0"
 # Prevent automatic system sleep while any jcode session is actively working.
 # Linux also blocks lid-switch suspend. Windows still respects explicit lid-close
 # and power-button actions from your active power plan. The display may sleep.
-# The guard is held only for as long as work is in flight. (default: true)
+# The guard is held while a turn is streaming and while any background task is
+# running, so long unattended runs (test suites, builds) are not lost to idle
+# sleep. (default: true)
 # Set JCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
 prevent_sleep_while_streaming = true
+# Stand down when running on battery at or below this percentage, so an unplugged
+# laptop is never kept awake until it dies. Only applies while discharging: a
+# plugged-in machine keeps the guard. 0 disables the check. (default: 20)
+prevent_sleep_min_battery_percent = 20
 
 [safety]
 # Notification settings for ambient mode events
@@ -803,6 +809,31 @@ mod tests {
     fn default_config_template_parses() {
         let template = Config::default_config_file_contents();
         toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+    }
+
+    /// End-to-end config wiring for `power.prevent_sleep_min_battery_percent`
+    /// (#29): the documented key has to parse from `[power]`, an existing config
+    /// without it must keep the 20% default, and the shipped template must
+    /// document it, otherwise the setting is undiscoverable.
+    #[test]
+    fn prevent_sleep_min_battery_percent_round_trips_through_toml() {
+        let cfg: Config = toml::from_str(
+            "[power]\nprevent_sleep_while_streaming = true\nprevent_sleep_min_battery_percent = 35\n",
+        )
+        .expect("the documented snippet must parse");
+        assert_eq!(cfg.power.prevent_sleep_min_battery_percent, 35);
+
+        let bare: Config = toml::from_str("[power]\nprevent_sleep_while_streaming = true\n")
+            .expect("parse without the key");
+        assert_eq!(
+            bare.power.prevent_sleep_min_battery_percent, 20,
+            "omitting the key must keep the documented 20% floor"
+        );
+
+        assert!(
+            Config::default_config_file_contents().contains("prevent_sleep_min_battery_percent"),
+            "the shipped template should document the setting"
+        );
     }
 
     /// End-to-end config wiring for `ambient.auto_approve_permissions`. The

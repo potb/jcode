@@ -739,6 +739,11 @@ impl Config {
                 self.power.prevent_sleep_while_streaming = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_MIN_BATTERY_PERCENT")
+            && let Ok(parsed) = v.trim().parse::<u8>()
+        {
+            self.power.prevent_sleep_min_battery_percent = parsed;
+        }
 
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {

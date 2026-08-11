@@ -617,32 +617,13 @@ fn detect_load() -> (Option<f64>, Option<usize>) {
     }
 }
 
+/// Battery reading for the host snapshot.
+///
+/// Delegates to [`crate::battery`], which the power inhibitor also uses, so both
+/// surfaces agree and macOS is covered rather than reporting nothing.
 fn detect_battery() -> (Option<u8>, Option<String>) {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
-            return (None, None);
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("BAT") {
-                continue;
-            }
-            let percent = std::fs::read_to_string(path.join("capacity"))
-                .ok()
-                .and_then(|value| value.trim().parse::<u8>().ok());
-            let status = std::fs::read_to_string(path.join("status"))
-                .ok()
-                .map(|value| value.trim().to_string());
-            return (percent, status);
-        }
-        (None, None)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        (None, None)
-    }
+    let status = crate::battery::detect_cached();
+    (status.percent, status.status)
 }
 
 fn disk_available_gb(path: &Path) -> Option<f64> {

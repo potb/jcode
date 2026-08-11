@@ -32,6 +32,11 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+/// How long [`BackgroundTaskManager::has_running_tasks`] reuses a scan result.
+/// Short enough that the sleep inhibitor engages promptly when a task starts,
+/// long enough that a per-frame caller does not re-read the status directory.
+const ANY_RUNNING_CACHE_TTL: Duration = Duration::from_millis(1000);
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -40,6 +45,10 @@ pub struct BackgroundTaskManager {
     /// [`BackgroundTaskManager::running_snapshot_for_session`], keyed by
     /// session id and stamped with the time it was taken.
     foreign_running_cache: std::sync::Mutex<Option<(String, Instant, Vec<TaskStatusFile>)>>,
+    /// Cached result of the machine-wide "is anything running" scan used by
+    /// [`BackgroundTaskManager::has_running_tasks`], stamped with the time it
+    /// was taken.
+    any_running_cache: std::sync::Mutex<Option<(Instant, bool)>>,
 }
 
 impl BackgroundTaskManager {
@@ -52,6 +61,7 @@ impl BackgroundTaskManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
             foreign_running_cache: std::sync::Mutex::new(None),
+            any_running_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -1657,6 +1667,53 @@ impl BackgroundTaskManager {
             // assume live rather than mislabel someone else's task as dead.
             None => true,
         }
+    }
+    /// Whether any background task on this machine is still running.
+    ///
+    /// Synchronous and best-effort: it scans the shared status directory rather
+    /// than the in-process task map, so a client process sees tasks owned by the
+    /// daemon and vice versa. `Running` files are only trusted while a live
+    /// process still owns them ([`Self::task_looks_live`]), so a crashed server
+    /// cannot leave a phantom task holding the sleep inhibitor open (#29).
+    /// The result is cached for [`ANY_RUNNING_CACHE_TTL`] because the TUI event
+    /// loop consults it on every iteration.
+    pub fn has_running_tasks(&self) -> bool {
+        if let Ok(cache) = self.any_running_cache.lock()
+            && let Some((fetched_at, running)) = cache.as_ref()
+            && fetched_at.elapsed() < ANY_RUNNING_CACHE_TTL
+        {
+            return *running;
+        }
+
+        let running = self.scan_any_running_task();
+        if let Ok(mut cache) = self.any_running_cache.lock() {
+            *cache = Some((Instant::now(), running));
+        }
+        running
+    }
+
+    fn scan_any_running_task(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
+            return false;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
+                continue;
+            };
+            if self.task_looks_live(&status) {
+                return true;
+            }
+        }
+
+        false
     }
 }
 
