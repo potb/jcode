@@ -485,3 +485,124 @@ fn multiline_command_is_collapsed_to_one_row() {
     }
     assert!(text(&lines).contains("set -e"), "{}", text(&lines));
 }
+
+/// Regression for issue #28: the page exists to read a log, so a long command
+/// must be readable in full rather than clipped at the right edge.
+#[test]
+fn page_wraps_a_long_command_instead_of_truncating_it() {
+    let mut tasks = vec![task("186941p01w", "bash", BgStatus::Running)];
+    let long = "for f in $(git ls-files '*.rs'); do rustfmt --edition 2024 --check \"$f\" || echo \"needs fmt: $f\"; done";
+    tasks[0].command = Some(long.to_string());
+    tasks[0].output_tail = vec![
+        "error[E0308]: mismatched types expected `std::string::String`, found `&str` in a very long diagnostic line that keeps going and going past eighty columns".to_string(),
+    ];
+
+    let out = text(&render_bg_page(&tasks, 0, false, 0, 80, 40));
+    let flat = single_line(&out.replace('│', " ").replace('┆', " "));
+    assert!(flat.contains(long), "command lost:\n{out}");
+    assert!(
+        flat.contains("found `&str` in a very long diagnostic line"),
+        "output tail lost:\n{out}"
+    );
+}
+
+/// A script is readable because of its line structure, so the page keeps the
+/// command's own newlines as row boundaries.
+#[test]
+fn page_renders_a_multiline_command_one_row_per_source_line() {
+    let mut tasks = vec![task("186941p01w", "build", BgStatus::Running)];
+    tasks[0].command = Some("set -euo pipefail\ncargo build\ncargo test".to_string());
+
+    let lines = render_bg_page(&tasks, 0, false, 0, 80, 40);
+    let rows: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        })
+        .collect();
+    for fragment in ["set -euo pipefail", "cargo build", "cargo test"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_end() == format!("   │ {fragment}")
+                    || row.trim_end() == format!("   ┆ {fragment}")),
+            "`{fragment}` did not get its own row: {rows:#?}"
+        );
+    }
+}
+
+/// Wrapping costs rows, so the page must budget in rendered rows. Losing the
+/// newest output line is the worst possible outcome of getting this wrong.
+#[test]
+fn page_keeps_the_newest_output_line_and_respects_its_height() {
+    let mut tasks = vec![task("186941p01w", "bash", BgStatus::Running)];
+    tasks[0].output_tail = (0..20)
+        .map(|i| format!("line {i} {}", "padding ".repeat(20)))
+        .collect();
+
+    for width in 8..120 {
+        for height in [3usize, 6, 12, 40] {
+            let lines = render_bg_page(&tasks, 0, false, 0, width, height);
+            assert!(
+                lines.len() <= height,
+                "page exceeded height at {width}x{height}: {} rows",
+                lines.len()
+            );
+            for line in &lines {
+                let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+                assert!(
+                    disp_w(&rendered) <= width,
+                    "row wider than {width} at height {height}: {rendered:?}"
+                );
+            }
+            if height >= 12 && width >= 40 {
+                let out = text(&lines);
+                assert!(
+                    out.contains("line 19"),
+                    "newest output line dropped at {width}x{height}:\n{out}"
+                );
+            }
+        }
+    }
+}
+
+/// stderr colouring is the signal that a command is failing, so it must not be
+/// confined to the first row of a wrapped line.
+#[test]
+fn wrapped_stderr_continuation_rows_keep_the_stderr_colour() {
+    let mut tasks = vec![task("186941p01w", "bash", BgStatus::Running)];
+    tasks[0].output_tail = vec![format!("[stderr] {}", "failure detail ".repeat(20))];
+
+    let lines = render_bg_page(&tasks, 0, false, 0, 60, 40);
+    let stderr_fg = rgb(230, 150, 150);
+    let text_rows: Vec<&Line<'static>> = lines
+        .iter()
+        .filter(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.style.fg == Some(stderr_fg) && !s.content.trim().is_empty())
+        })
+        .collect();
+    assert!(
+        text_rows.len() > 1,
+        "expected the stderr line to wrap across rows: {}",
+        text(&lines)
+    );
+}
+
+/// The strip sits above the status line with a fixed height contract, so it
+/// must keep truncating: one logical line stays one row.
+#[test]
+fn strip_still_truncates_and_never_wraps() {
+    let mut tasks = vec![task("186941p01w", "bash", BgStatus::Running)];
+    tasks[0].command = Some("a".repeat(400));
+    tasks[0].output_tail = vec!["b".repeat(400), "c".repeat(400)];
+
+    let lines = render_bg_strip(&tasks, 0, true, &hints(), None, 0, 80, 4, 10);
+    assert!(lines.len() <= 10);
+    let out = text(&lines);
+    assert!(out.contains('…'), "strip must ellipsize: {out}");
+    assert!(!out.contains('┆'), "strip must not draw continuation rails");
+}

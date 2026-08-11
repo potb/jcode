@@ -21,7 +21,7 @@ use ratatui::prelude::*;
 
 use jcode_tui_style::color::rgb;
 
-use crate::gallery_text::{clamp_line_to_width, disp_w, single_line, truncate_label};
+use crate::gallery_text::{clamp_line_to_width, disp_w, single_line, truncate_label, wrap_text};
 use crate::swarm_gallery::{STRIP_SPINNER_FRAMES, SwarmStripHint};
 
 /// Lifecycle of a background task, as far as the panel is concerned.
@@ -371,7 +371,7 @@ pub fn render_bg_strip(
     // its row, so the eye does not have to travel to a separate pane.
     if focused && detail_budget > 0 {
         if let (Some(task), Some(at)) = (ordered.get(selected), selected_row_at) {
-            let detail = render_task_detail(task, width, detail_budget);
+            let detail = render_task_detail(task, width, detail_budget, WrapMode::Truncate);
             let insert_at = (at + 1).min(out.len());
             for (offset, line) in detail.into_iter().enumerate() {
                 out.insert(insert_at + offset, line);
@@ -400,34 +400,80 @@ enum RowTail {
     TallyAndHint,
 }
 
+/// How the detail renderer handles text wider than the viewport.
+///
+/// The strip lives above the status line with a fixed height contract, so a
+/// logical line there must stay one row: wrapping would push the transcript
+/// around as output arrives. The full page exists to actually read a log, so
+/// there truncation is pure information loss (issue #28).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WrapMode {
+    Truncate,
+    Wrap,
+}
+
+impl WrapMode {
+    fn wraps(self) -> bool {
+        matches!(self, WrapMode::Wrap)
+    }
+}
+
+/// Rail drawn to the left of every detail row.
+const BAR: &str = "   │ ";
+/// Rail for a row that continues the logical line above it, so a wrapped line
+/// is not misread as a new output line.
+const CONT_BAR: &str = "   ┆ ";
+
+/// Render one logical detail line as one or more rows, respecting `mode`.
+fn detail_rows(text: &str, text_budget: usize, style: Style, mode: WrapMode) -> Vec<Line<'static>> {
+    let rail = |bar: &str| Span::styled(bar.to_string(), Style::default().fg(rgb(80, 80, 90)));
+    if !mode.wraps() {
+        return vec![Line::from(vec![
+            rail(BAR),
+            Span::styled(truncate_label(&single_line(text), text_budget), style),
+        ])];
+    }
+    wrap_text(text, text_budget)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            Line::from(vec![
+                rail(if idx == 0 { BAR } else { CONT_BAR }),
+                Span::styled(row, style),
+            ])
+        })
+        .collect()
+}
+
 /// The selected task's detail: a status/progress header plus the tail of its
 /// combined stdout/stderr, drawn against a rail so it reads as nested under
 /// the task row.
-fn render_task_detail(task: &BgTask, width: usize, budget: usize) -> Vec<Line<'static>> {
+fn render_task_detail(
+    task: &BgTask,
+    width: usize,
+    budget: usize,
+    mode: WrapMode,
+) -> Vec<Line<'static>> {
     if budget == 0 {
         return Vec::new();
     }
-    const BAR: &str = "   │ ";
     let bar_w = disp_w(BAR);
     let text_budget = width.saturating_sub(bar_w).max(4);
     let mut out: Vec<Line<'static>> = Vec::new();
 
     // Command line: the task row shows only the collapsed label, which for a
     // named task ("build", "bash") says nothing about what is running. Skip it
-    // when it would just repeat the label.
-    if let Some(command) = task
-        .command
-        .as_deref()
-        .map(single_line)
-        .filter(|command| !command.trim().is_empty() && command.trim() != task.label.trim())
-    {
-        out.push(Line::from(vec![
-            Span::styled(BAR.to_string(), Style::default().fg(rgb(80, 80, 90))),
-            Span::styled(
-                truncate_label(&command, text_budget),
-                Style::default().fg(rgb(170, 190, 220)),
-            ),
-        ]));
+    // when it would just repeat the label. On the page the command keeps its
+    // own newlines, because a heredoc or `for` loop is readable only that way.
+    if let Some(command) = task.command.as_deref().filter(|command| {
+        !command.trim().is_empty() && single_line(command).trim() != task.label.trim()
+    }) {
+        out.extend(detail_rows(
+            command,
+            text_budget,
+            Style::default().fg(rgb(170, 190, 220)),
+            mode,
+        ));
         if out.len() >= budget {
             out.truncate(budget);
             return out;
@@ -447,13 +493,12 @@ fn render_task_detail(task: &BgTask, width: usize, budget: usize) -> Vec<Line<'s
         meta.push(single_line(error));
     }
     if !meta.is_empty() {
-        out.push(Line::from(vec![
-            Span::styled(BAR.to_string(), Style::default().fg(rgb(80, 80, 90))),
-            Span::styled(
-                truncate_label(&meta.join(" · "), text_budget),
-                Style::default().fg(status_accent(task.status)),
-            ),
-        ]));
+        out.extend(detail_rows(
+            &meta.join(" · "),
+            text_budget,
+            Style::default().fg(status_accent(task.status)),
+            mode,
+        ));
     }
 
     let output_budget = budget.saturating_sub(out.len());
@@ -464,36 +509,51 @@ fn render_task_detail(task: &BgTask, width: usize, budget: usize) -> Vec<Line<'s
 
     if task.output_tail.is_empty() {
         if out.len() < budget {
-            out.push(Line::from(vec![
-                Span::styled(BAR.to_string(), Style::default().fg(rgb(80, 80, 90))),
-                Span::styled(
-                    "no output yet".to_string(),
-                    Style::default().fg(rgb(110, 110, 120)),
-                ),
-            ]));
+            out.extend(detail_rows(
+                "no output yet",
+                text_budget,
+                Style::default().fg(rgb(110, 110, 120)),
+                mode,
+            ));
+            out.truncate(budget);
         }
         return out;
     }
 
-    // Show the newest lines: a build's interesting output is at the end.
-    let start = task.output_tail.len().saturating_sub(output_budget);
-    for line in &task.output_tail[start..] {
+    // Show the newest lines: a build's interesting output is at the end. When
+    // wrapping, one logical line can cost several rows, so the window has to be
+    // measured in rendered rows from the newest line backwards. Filling forwards
+    // and truncating would drop the newest output, the worst thing to lose.
+    let mut rendered: Vec<Vec<Line<'static>>> = Vec::new();
+    let mut rows_used = 0usize;
+    for line in task.output_tail.iter().rev() {
         // stderr is tagged inline by the capture layer; color it so a failing
-        // command is legible at a glance.
+        // command is legible at a glance. Continuation rows inherit the colour.
         let is_stderr = line.trim_start().starts_with("[stderr]");
-        let text = truncate_label(&single_line(line), text_budget);
-        out.push(Line::from(vec![
-            Span::styled(BAR.to_string(), Style::default().fg(rgb(80, 80, 90))),
-            Span::styled(
-                text,
-                Style::default().fg(if is_stderr {
-                    rgb(230, 150, 150)
-                } else {
-                    rgb(180, 180, 190)
-                }),
-            ),
-        ]));
+        let style = Style::default().fg(if is_stderr {
+            rgb(230, 150, 150)
+        } else {
+            rgb(180, 180, 190)
+        });
+        let group = detail_rows(line, text_budget, style, mode);
+        if rows_used + group.len() > output_budget && !rendered.is_empty() {
+            break;
+        }
+        rows_used += group.len();
+        rendered.push(group);
+        if rows_used >= output_budget {
+            break;
+        }
     }
+
+    // The newest line is the one that must survive a partial fit, so when the
+    // oldest kept line does not fit whole, clip it from its top.
+    let mut tail: Vec<Line<'static>> = Vec::new();
+    for group in rendered.into_iter().rev() {
+        tail.extend(group);
+    }
+    let overflow = tail.len().saturating_sub(output_budget);
+    out.extend(tail.into_iter().skip(overflow));
 
     out.truncate(budget);
     out
@@ -643,7 +703,12 @@ pub fn render_bg_page(
     if remaining > 1 {
         out.push(Line::from(""));
         if let Some(task) = ordered.get(selected) {
-            out.extend(render_task_detail(task, width, remaining - 1));
+            out.extend(render_task_detail(
+                task,
+                width,
+                remaining - 1,
+                WrapMode::Wrap,
+            ));
         }
     }
 

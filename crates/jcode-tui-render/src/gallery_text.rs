@@ -83,6 +83,130 @@ pub fn clamp_line_to_width(line: &mut Line<'static>, max_width: usize) {
     line.spans = clamped;
 }
 
+/// Wrap `value` to `width` display columns, returning one string per row.
+///
+/// Embedded newlines start a new row: a multi-line shell command is readable
+/// precisely because of its line structure. Within a line, breaks prefer
+/// whitespace, and a word longer than the whole width is hard-split rather
+/// than allowed to overflow. An empty input yields a single empty row so a
+/// blank output line still occupies its row.
+pub fn wrap_text(value: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for raw in value.split('\n') {
+        let logical = raw.trim_end_matches('\r').replace('\t', "    ");
+        out.extend(wrap_one_line(&logical, width));
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Wrap a single newline-free line. Kept separate so [`wrap_text`] stays a
+/// readable statement about how newlines are treated.
+///
+/// Whitespace between words is a break opportunity and is dropped when a break
+/// happens there, so continuation rows never start with stray spaces. Leading
+/// indentation of the source line is content, not a separator: scripts read by
+/// their indentation.
+fn wrap_one_line(line: &str, width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    let mut pending_space: Option<String> = None;
+
+    for token in tokenize(line) {
+        if token.chars().all(char::is_whitespace) {
+            if current_w == 0 && rows.is_empty() {
+                // Source indentation: keep it, clamped to the row.
+                for chunk in hard_split(&token, width) {
+                    if current_w > 0 {
+                        rows.push(std::mem::take(&mut current));
+                    }
+                    current_w = disp_w(&chunk);
+                    current = chunk;
+                }
+            } else if current_w > 0 {
+                pending_space = Some(token);
+            }
+            continue;
+        }
+
+        let word_w = disp_w(&token);
+        let sep_w = pending_space.as_deref().map(disp_w).unwrap_or(0);
+        if current_w > 0 && current_w + sep_w + word_w > width {
+            rows.push(std::mem::take(&mut current));
+            current_w = 0;
+            pending_space = None;
+        }
+        if let Some(space) = pending_space.take() {
+            current.push_str(&space);
+            current_w += disp_w(&space);
+        }
+        if current_w + word_w <= width {
+            current.push_str(&token);
+            current_w += word_w;
+            continue;
+        }
+        // Word longer than a whole row: hard-split it across rows.
+        for chunk in hard_split(&token, width.saturating_sub(current_w).max(1)) {
+            if current_w + disp_w(&chunk) > width {
+                rows.push(std::mem::take(&mut current));
+                current_w = 0;
+            }
+            current.push_str(&chunk);
+            current_w += disp_w(&chunk);
+        }
+    }
+
+    rows.push(current);
+    rows
+}
+
+/// Split a line into alternating whitespace and non-whitespace runs.
+fn tokenize(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ch in line.chars() {
+        let is_ws = ch.is_whitespace();
+        match out.last_mut() {
+            Some(last) if last.chars().next().is_some_and(char::is_whitespace) == is_ws => {
+                last.push(ch)
+            }
+            _ => out.push(ch.to_string()),
+        }
+    }
+    out
+}
+
+/// Cut `value` into chunks of at most `width` display columns, never splitting
+/// a character. A single character wider than `width` gets a row of its own and
+/// is kept rather than dropped: at that point the viewport is narrower than one
+/// glyph, and the caller's final `clamp_line_to_width` is what enforces the
+/// hard bound.
+fn hard_split(value: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    let mut used = 0usize;
+    for ch in value.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > width && !chunk.is_empty() {
+            out.push(std::mem::take(&mut chunk));
+            used = 0;
+        }
+        chunk.push(ch);
+        used += cw;
+    }
+    if !chunk.is_empty() {
+        out.push(chunk);
+    }
+    out
+}
+
 /// Collapse any run of whitespace (including newlines) into single spaces.
 ///
 /// Background-task display names come from real shell commands, so heredocs
@@ -125,6 +249,41 @@ mod tests {
         assert_eq!(count_digits(9), 1);
         assert_eq!(count_digits(10), 2);
         assert_eq!(count_digits(1234), 4);
+    }
+
+    #[test]
+    fn wrap_text_breaks_on_whitespace_and_keeps_every_character() {
+        let rows = wrap_text("the quick brown fox jumps", 10);
+        assert!(rows.iter().all(|row| disp_w(row) <= 10), "{rows:?}");
+        assert_eq!(rows.join(" "), "the quick brown fox jumps");
+    }
+
+    #[test]
+    fn wrap_text_hard_splits_a_word_longer_than_the_width() {
+        let rows = wrap_text(&"x".repeat(25), 10);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.concat(), "x".repeat(25));
+        assert!(rows.iter().all(|row| disp_w(row) <= 10));
+    }
+
+    #[test]
+    fn wrap_text_keeps_newlines_as_row_boundaries() {
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+        assert_eq!(wrap_text("", 10), vec![String::new()]);
+        assert_eq!(wrap_text("a\r\nb", 10), vec!["a", "b"]);
+    }
+
+    /// Wide glyphs must not straddle a row edge. Width 1 cannot hold a
+    /// two-column glyph at all, so that degenerate case is excluded: see
+    /// [`hard_split`].
+    #[test]
+    fn wrap_text_never_exceeds_width_for_wide_glyphs() {
+        for width in 2..12 {
+            let rows = wrap_text("🐝🐝 abc 🐝🐝🐝", width);
+            for row in &rows {
+                assert!(disp_w(row) <= width, "width {width} exceeded by {row:?}");
+            }
+        }
     }
 
     #[test]
