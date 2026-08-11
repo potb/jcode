@@ -351,6 +351,7 @@ fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
         result.tool_call.id.as_str(),
         result.title.clone(),
         display_output,
+        Some(result.duration_ms),
     );
 
     app.add_provider_message(Message::tool_result_with_duration(

@@ -2463,3 +2463,47 @@ fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
     assert_eq!(after.last().unwrap(), "prompt-6");
     assert_eq!(session.rewind_target_count(), 11);
 }
+
+/// A tool result's measured duration must survive persistence so a resumed
+/// transcript can still show per-call timings (issue #48).
+#[test]
+fn test_render_messages_carries_persisted_tool_duration() {
+    let mut session = Session::create_with_id(
+        "session_render_tool_duration".to_string(),
+        None,
+        Some("tool duration test".to_string()),
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "tool_timed_1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+            thought_signature: None,
+        }],
+    );
+    session.add_message_with_duration(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "tool_timed_1".to_string(),
+            content: "hi".to_string(),
+            is_error: None,
+        }],
+        Some(340),
+    );
+
+    let rendered = render_messages(&session);
+    let tool_row = rendered
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool row should render");
+    assert_eq!(tool_row.tool_duration_ms, Some(340));
+    assert!(
+        rendered
+            .iter()
+            .filter(|m| m.role != "tool")
+            .all(|m| m.tool_duration_ms.is_none()),
+        "only tool rows carry durations: {rendered:?}"
+    );
+}

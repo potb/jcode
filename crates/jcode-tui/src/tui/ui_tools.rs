@@ -39,6 +39,35 @@ pub(crate) mod tests_tool_call_details_override {
     }
 }
 
+/// Whether completed tool rows should show their wall-clock duration next to
+/// the token badge. Off by default so existing transcripts render unchanged.
+#[cfg(not(test))]
+pub(crate) fn show_tool_call_timings() -> bool {
+    crate::config::config().display.tool_call_timings
+}
+
+#[cfg(test)]
+pub(crate) fn show_tool_call_timings() -> bool {
+    tests_tool_call_timings_override::get()
+}
+
+#[cfg(test)]
+pub(crate) mod tests_tool_call_timings_override {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SHOW_TIMINGS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn get() -> bool {
+        SHOW_TIMINGS.with(Cell::get)
+    }
+
+    pub(crate) fn set(value: bool) {
+        SHOW_TIMINGS.with(|cell| cell.set(value));
+    }
+}
+
 fn infer_bg_action_from_intent_for_display(intent: Option<&str>) -> Option<&'static str> {
     let intent = intent?.trim().to_ascii_lowercase();
     if intent.is_empty() {

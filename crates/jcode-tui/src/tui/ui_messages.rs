@@ -3829,6 +3829,7 @@ pub(crate) fn render_tool_message(
 
     let centered = markdown::center_code_blocks();
     let token_badge = tool_output_token_badge(&msg.content);
+    let duration_badge = tool_duration_badge(msg);
 
     // A restored or remotely mirrored transcript can occasionally retain the
     // todo result while losing its paired ToolCall metadata. Recognize the
@@ -3999,7 +4000,10 @@ pub(crate) fn render_tool_message(
     let display_name = tools_ui::resolve_display_tool_name(&tc.name).to_string();
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
-        UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
+        UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str())
+            + duration_badge.as_deref().map_or(0, |duration| {
+                UnicodeWidthStr::width(format!(" · {duration}").as_str())
+            });
     let edit_suffix_width = if is_edit_tool && has_diff_changes {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
@@ -4088,10 +4092,15 @@ pub(crate) fn render_tool_message(
         ));
         tool_line.push(Span::styled(")", Style::default().fg(dim_color())));
     }
-    let token_suffix = Line::from(vec![
+    let mut token_suffix_spans = vec![
         Span::styled(" · ", Style::default().fg(dim_color())),
         Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
-    ]);
+    ];
+    if let Some(duration) = duration_badge {
+        token_suffix_spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        token_suffix_spans.push(Span::styled(duration, Style::default().fg(dim_color())));
+    }
+    let token_suffix = Line::from(token_suffix_spans);
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
@@ -4397,6 +4406,17 @@ pub(crate) fn render_tool_message(
 struct ToolOutputTokenBadge {
     label: String,
     color: Color,
+}
+
+/// Wall-clock duration badge for a completed tool row, e.g. `340ms`.
+/// Returns `None` when timings are disabled or the row has no measured
+/// duration (streaming rows, restored transcripts predating the field).
+fn tool_duration_badge(msg: &DisplayMessage) -> Option<String> {
+    if !tools_ui::show_tool_call_timings() {
+        return None;
+    }
+    msg.tool_duration_ms()
+        .map(crate::message::Message::format_duration)
 }
 
 fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {

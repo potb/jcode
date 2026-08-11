@@ -22,6 +22,7 @@ where
             mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
             show_agentgrep_output: crate::config::config().display.show_agentgrep_output,
             tool_call_details: crate::config::config().display.tool_call_details,
+            tool_call_timings: crate::config::config().display.tool_call_timings,
         },
         render,
     )

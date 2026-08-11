@@ -312,6 +312,11 @@ impl Config {
                 self.display.tool_call_details = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_TOOL_CALL_TIMINGS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.tool_call_timings = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_LATEX_RENDERING")
             && let Some(mode) = LatexRenderingMode::parse(&v)
         {

@@ -52,6 +52,11 @@ pub struct RenderedMessage {
     pub content: String,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
+    /// Wall-clock duration of the tool call this message reports the result of.
+    /// `None` for non-tool messages and for tool results recorded before
+    /// durations were persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
     /// Index of the stored session message this rendered message came from.
     /// `None` for synthetic UI-only messages (e.g. the compacted-history
     /// notice). Used to map user-facing rewind targets back to the stored

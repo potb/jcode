@@ -2883,6 +2883,52 @@ fn handle_tool_call_details_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn handle_tool_call_timings_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/tool-call-timings" && !trimmed.starts_with("/tool-call-timings ") {
+        return false;
+    }
+
+    let rest = trimmed
+        .strip_prefix("/tool-call-timings")
+        .unwrap_or_default()
+        .trim();
+
+    if rest.is_empty() || matches!(rest, "show" | "status") {
+        let current = crate::config::config().display.tool_call_timings;
+        app.push_display_message(DisplayMessage::system(format!(
+            "Tool call timings are currently {}.\n\nWhen on, each completed tool row shows how long the call took next to the token badge, e.g. `bash · Run tests · 1.1k tok · 340ms`.\n\nUse /tool-call-timings on or /tool-call-timings off to change it.",
+            if current { "on" } else { "off" }
+        )));
+        return true;
+    }
+
+    let Some(enabled) = parse_on_off_value(rest) else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /tool-call-timings (show), /tool-call-timings on, or /tool-call-timings off"
+                .to_string(),
+        ));
+        return true;
+    };
+
+    app.set_status_notice(format!(
+        "Tool call timings: {}",
+        if enabled { "on" } else { "off" }
+    ));
+    match crate::config::Config::set_tool_call_timings(enabled) {
+        Ok(()) => app.push_display_message(DisplayMessage::system(format!(
+            "Saved tool call timings: {}. Applied to this session immediately.",
+            if enabled { "on" } else { "off" }
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Applied tool call timings {} for this session, but failed to save it as the default: {}",
+            if enabled { "on" } else { "off" },
+            error
+        ))),
+    }
+
+    true
+}
+
 fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/show-agentgrep-output" && !trimmed.starts_with("/show-agentgrep-output ") {
         return false;
@@ -3302,6 +3348,9 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if handle_tool_call_details_command(app, trimmed) {
+        return true;
+    }
+    if handle_tool_call_timings_command(app, trimmed) {
         return true;
     }
 

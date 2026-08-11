@@ -1226,7 +1226,12 @@ impl App {
                     } else {
                         sdk_content.clone()
                     };
-                    let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    let _ = self.replace_latest_tool_display_message(
+                        &tc.id,
+                        None,
+                        display_output,
+                        None,
+                    );
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
@@ -1441,6 +1446,7 @@ impl App {
                     &tc.id,
                     tool_title.clone(),
                     output.clone(),
+                    Some(tool_duration_ms),
                 );
 
                 self.add_provider_message(Message::tool_result_with_duration(

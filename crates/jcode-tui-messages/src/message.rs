@@ -166,6 +166,35 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a tool message carrying the measured execution duration.
+    pub fn tool_with_duration(
+        content: impl Into<String>,
+        tool_data: ToolCall,
+        tool_duration_ms: u64,
+    ) -> Self {
+        let mut message = Self::tool(content, tool_data);
+        message.set_tool_duration_ms(Some(tool_duration_ms));
+        message
+    }
+
+    /// Wall-clock duration of the tool call this row reports, in milliseconds.
+    /// Tool rows reuse `duration_secs` (the assistant footer field) rather than
+    /// carrying a second duration field, so this converts back to the
+    /// millisecond form used by `Message::format_duration`.
+    pub fn tool_duration_ms(&self) -> Option<u64> {
+        if self.role != "tool" {
+            return None;
+        }
+        self.duration_secs
+            .filter(|secs| secs.is_finite() && *secs >= 0.0)
+            .map(|secs| (f64::from(secs) * 1000.0).round() as u64)
+    }
+
+    /// Record the wall-clock duration of a tool call on this row.
+    pub fn set_tool_duration_ms(&mut self, duration_ms: Option<u64>) {
+        self.duration_secs = duration_ms.map(|ms| ms as f32 / 1000.0);
+    }
+
     /// Create a tool transcript message when the caller only has rendered text.
     pub fn tool_text(content: impl Into<String>) -> Self {
         Self {
@@ -225,7 +254,9 @@ impl DisplayMessage {
             role: item.role,
             content: item.content,
             tool_calls: item.tool_calls,
-            duration_secs: None,
+            duration_secs: item
+                .tool_duration_ms
+                .map(|duration_ms| duration_ms as f32 / 1000.0),
             title: None,
             tool_data: item.tool_data,
         }
@@ -447,12 +478,57 @@ mod tests {
     }
 
     #[test]
+    fn tool_duration_round_trips_through_display_message() {
+        let mut message = DisplayMessage::tool_with_duration(
+            "out",
+            ToolCall {
+                id: "call-1".to_string(),
+                name: "bash".to_string(),
+                input: Value::Null,
+                intent: None,
+                thought_signature: None,
+            },
+            340,
+        );
+        assert_eq!(message.tool_duration_ms(), Some(340));
+
+        message.set_tool_duration_ms(Some(75_000));
+        assert_eq!(message.tool_duration_ms(), Some(75_000));
+
+        message.set_tool_duration_ms(None);
+        assert_eq!(message.tool_duration_ms(), None);
+    }
+
+    /// Turn durations on assistant footers must not be read as tool timings.
+    #[test]
+    fn tool_duration_is_ignored_for_non_tool_roles() {
+        let assistant = DisplayMessage::assistant_with_duration("done", 3.0);
+        assert_eq!(assistant.tool_duration_ms(), None);
+    }
+
+    #[test]
+    fn rendered_tool_duration_reaches_display_message() {
+        let rendered = RenderedMessage {
+            role: "tool".to_string(),
+            content: "out".to_string(),
+            tool_calls: Vec::new(),
+            tool_data: None,
+            tool_duration_ms: Some(1_200),
+            stored_index: None,
+        };
+
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert_eq!(display.tool_duration_ms(), Some(1_200));
+    }
+
+    #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
             role: "assistant".to_string(),
             content: "done".to_string(),
             tool_calls: vec!["read".to_string()],
             tool_data: None,
+            tool_duration_ms: None,
             stored_index: None,
         };
 

@@ -106,6 +106,10 @@ pub struct DisplayConfig {
     /// always fall back to the technical detail.
     #[serde(default)]
     pub tool_call_details: bool,
+    /// Show the wall-clock duration of each completed tool call next to the
+    /// token badge on tool rows (default: false).
+    #[serde(default)]
+    pub tool_call_timings: bool,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
     /// Surface occasional "learn this keybinding" nudges when the user keeps
@@ -195,6 +199,7 @@ impl Default for DisplayConfig {
             copy_badge_alt_label: String::new(),
             show_agentgrep_output: false,
             tool_call_details: false,
+            tool_call_timings: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
             theme: String::new(),

@@ -17,6 +17,7 @@ struct MessageCacheKey {
     mermaid_aspect_bucket: Option<u16>,
     show_agentgrep_output: bool,
     tool_call_details: bool,
+    tool_call_timings: bool,
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ pub struct MessageCacheContext {
     pub mermaid_aspect_bucket: Option<u16>,
     pub show_agentgrep_output: bool,
     pub tool_call_details: bool,
+    pub tool_call_timings: bool,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -117,6 +119,7 @@ where
         mermaid_aspect_bucket: context.mermaid_aspect_bucket,
         show_agentgrep_output: context.show_agentgrep_output,
         tool_call_details: context.tool_call_details,
+        tool_call_timings: context.tool_call_timings,
     };
 
     let mut cache = match message_cache().lock() {

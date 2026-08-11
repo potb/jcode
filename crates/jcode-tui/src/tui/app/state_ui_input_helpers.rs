@@ -114,6 +114,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle dimmed technical details on tool rows with an intent",
     ),
     RegisteredCommand::public(
+        "/tool-call-timings",
+        "Show/toggle per-tool-call durations next to the token badge",
+    ),
+    RegisteredCommand::public(
         "/thinking-display",
         "Show/hide the model's thinking text (off/full/current)",
     ),
@@ -1065,6 +1069,26 @@ impl App {
                     (
                         "/tool-call-details off".into(),
                         "Show only the intent on tool rows that have one",
+                    ),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/tool-call-timings ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/tool-call-timings status".into(),
+                        "Show whether tool rows display call durations",
+                    ),
+                    (
+                        "/tool-call-timings on".into(),
+                        "Show how long each tool call took",
+                    ),
+                    (
+                        "/tool-call-timings off".into(),
+                        "Hide per-tool-call durations",
                     ),
                 ],
             );

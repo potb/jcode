@@ -1350,3 +1350,92 @@ fn test_activity_detail_without_intent_matches_summary() {
     assert_eq!(detail, summary);
     assert!(!detail.is_empty());
 }
+
+/// With `display.tool_call_timings` on, a completed tool row shows the measured
+/// duration after the token badge.
+#[test]
+fn test_render_tool_message_shows_duration_badge_when_enabled() {
+    tools_ui::tests_tool_call_timings_override::set(true);
+    let msg = DisplayMessage::tool_with_duration(
+        "hello\n",
+        ToolCall {
+            id: "call_timing_on".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({ "command": "echo hello" }),
+            intent: Some("Say hello".to_string()),
+            thought_signature: None,
+        },
+        340,
+    );
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    tools_ui::tests_tool_call_timings_override::set(false);
+
+    assert!(
+        rendered[0].contains("340ms"),
+        "duration badge should render: {rendered:?}"
+    );
+    assert!(
+        rendered[0].contains("tok"),
+        "token badge should still render: {rendered:?}"
+    );
+}
+
+/// Default (timings off): the row renders exactly as it did before the flag,
+/// even when a duration was measured.
+#[test]
+fn test_render_tool_message_hides_duration_badge_by_default() {
+    let tool = ToolCall {
+        id: "call_timing_off".to_string(),
+        name: "bash".to_string(),
+        input: serde_json::json!({ "command": "echo hello" }),
+        intent: Some("Say hello".to_string()),
+        thought_signature: None,
+    };
+    let timed = DisplayMessage::tool_with_duration("hello\n", tool.clone(), 340);
+    let untimed = DisplayMessage::tool("hello\n", tool);
+
+    let timed_lines: Vec<String> = render_tool_message(&timed, 120, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect();
+    let untimed_lines: Vec<String> =
+        render_tool_message(&untimed, 120, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+    assert_eq!(timed_lines, untimed_lines);
+    assert!(
+        !timed_lines[0].contains("340ms"),
+        "timings are opt-in: {timed_lines:?}"
+    );
+}
+
+/// A row with a duration but timings disabled must not reserve badge width,
+/// and with timings enabled the badge survives truncation at narrow widths.
+#[test]
+fn test_render_tool_message_duration_badge_survives_narrow_width() {
+    tools_ui::tests_tool_call_timings_override::set(true);
+    let msg = DisplayMessage::tool_with_duration(
+        "hello\n",
+        ToolCall {
+            id: "call_timing_narrow".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({ "command": "echo a-very-long-command-that-will-not-fit" }),
+            intent: Some("Run a command with a fairly long intent line".to_string()),
+            thought_signature: None,
+        },
+        75_000,
+    );
+
+    let lines = render_tool_message(&msg, 48, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    tools_ui::tests_tool_call_timings_override::set(false);
+
+    assert!(
+        rendered[0].contains("1m 15s"),
+        "duration suffix should be preserved when truncating: {rendered:?}"
+    );
+}

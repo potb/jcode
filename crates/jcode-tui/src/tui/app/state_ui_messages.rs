@@ -158,12 +158,24 @@ impl App {
         tool_call_id: &str,
         title: Option<String>,
         content: String,
+        tool_duration_ms: Option<u64>,
     ) -> bool {
         let Some(idx) = self.display_messages.iter().rposition(|message| {
             message.tool_data.as_ref().map(|tool| tool.id.as_str()) == Some(tool_call_id)
         }) else {
             return false;
         };
+
+        // The measured duration must be attached here: the streaming row was
+        // pushed before the tool ran, so this is the first point where it is
+        // known.
+        if let Some(duration_ms) = tool_duration_ms
+            && let Some(message) = self.display_messages.get_mut(idx)
+            && message.tool_duration_ms() != Some(duration_ms)
+        {
+            message.set_tool_duration_ms(Some(duration_ms));
+            self.bump_display_messages_version();
+        }
 
         self.replace_display_message_title_and_content(idx, title, content)
     }

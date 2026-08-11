@@ -399,6 +399,7 @@ pub fn render_messages_and_images_with_compacted_history(
             content,
             tool_calls: Vec::new(),
             tool_data: None,
+            tool_duration_ms: None,
             stored_index: None,
         });
     }
@@ -427,6 +428,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 content: summary.to_string(),
                 tool_calls: Vec::new(),
                 tool_data: None,
+                tool_duration_ms: None,
                 stored_index: Some(stored_index),
             });
             continue;
@@ -501,6 +503,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             content: combined,
                             tool_calls: tool_calls.clone(),
                             tool_data: None,
+                            tool_duration_ms: None,
                             stored_index: Some(stored_index),
                         });
                     }
@@ -521,6 +524,10 @@ pub fn render_messages_and_images_with_compacted_history(
                         content: content.clone(),
                         tool_calls: Vec::new(),
                         tool_data,
+                        // Timing was measured when the tool ran and persisted on
+                        // the stored message; carry it so a resumed transcript
+                        // can still show per-call durations.
+                        tool_duration_ms: msg.tool_duration_ms,
                         stored_index: Some(stored_index),
                     });
                 }
@@ -563,6 +570,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 content: combined,
                 tool_calls,
                 tool_data: None,
+                tool_duration_ms: None,
                 stored_index: Some(stored_index),
             });
         } else if !pending_prompt_image_indices.is_empty() {

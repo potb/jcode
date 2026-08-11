@@ -71,7 +71,9 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         id: "tool-1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
 
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -95,6 +97,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         "tool-1",
         Some("new title".to_string()),
         "final output".to_string(),
+        None,
     ));
     assert_eq!(app.display_messages()[0].content, "placeholder 1");
     assert_eq!(
@@ -113,6 +116,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         "tool-1",
         Some("new title".to_string()),
         "final output".to_string(),
+        None,
     ));
     assert_eq!(app.display_messages_version, after_change);
 }
@@ -421,11 +425,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
         .display_messages()
         .iter()
         .rev()
-        .find(|dm| {
-            dm.tool_data
-                .as_ref()
-                .is_some_and(|td| td.id == "tool_b")
-        })
+        .find(|dm| dm.tool_data.as_ref().is_some_and(|td| td.id == "tool_b"))
         .expect("missing tool_b display message");
     let tool_b = tool_b_msg.tool_data.as_ref().unwrap();
     assert_eq!(tool_b.intent.as_deref(), Some("Fetch page B"));

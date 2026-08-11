@@ -234,6 +234,11 @@ prompt_entry_animation = true
 # technical detail.
 # tool_call_details = false
 
+# Show the wall-clock duration of each completed tool call next to the token
+# badge on tool rows, e.g. `bash · Run tests · 1.1k tok · 340ms` (default:
+# false). Useful for finding which tool call made a turn slow.
+# tool_call_timings = false
+
 # Occasionally surface a "learn this keybinding" nudge (in a distinct color)
 # when you keep doing something the slow way (e.g. /resume) instead of using
 # its configured shortcut. Set false to disable all such hints (default: true).

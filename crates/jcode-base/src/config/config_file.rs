@@ -325,6 +325,18 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted tool-call-timings preference.
+    pub fn set_tool_call_timings(show: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.tool_call_timings = show;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.tool_call_timings to config: {}",
+            show
+        ));
+        Ok(())
+    }
+
     /// Persist the baked global launch-hotkey mapping.
     ///
     /// Auto-import calls this once with the per-repo chord -> directory layout it
