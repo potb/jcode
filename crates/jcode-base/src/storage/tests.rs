@@ -138,3 +138,38 @@ fn write_text_secret_sets_owner_only_modes() {
     assert_eq!(dir_mode, 0o700);
     assert_eq!(file_mode, 0o600);
 }
+
+/// The test-env lock is reentrant per thread.
+///
+/// Before this, `lock_test_env` returned a raw `MutexGuard` over a plain
+/// non-reentrant `Mutex`, so any helper that wanted the lock had to know
+/// whether a caller already held it. Two call sites worked around that with
+/// `try_lock` and with comments saying "do not take this lock here", and the
+/// resulting env-vs-render lock order was left to each test to get right. That
+/// is what deadlocked `cargo test -p jcode-tui --lib` (issue #27).
+#[test]
+fn test_env_lock_is_reentrant_on_one_thread() {
+    let outer = lock_test_env();
+    assert!(test_env_lock_held());
+    {
+        let _inner = lock_test_env();
+        assert!(test_env_lock_held());
+    }
+    // Still held after the nested guard drops: only the outermost releases.
+    assert!(test_env_lock_held());
+    drop(outer);
+    assert!(!test_env_lock_held());
+}
+
+/// The lock still excludes other threads. Reentrancy must not degrade into
+/// "everyone gets in", or the env serialization it exists for is gone.
+#[test]
+fn test_env_lock_still_excludes_other_threads() {
+    let guard = lock_test_env();
+    let contended = std::thread::spawn(|| test_env_lock().try_lock().is_err())
+        .join()
+        .expect("thread");
+    assert!(contended, "another thread acquired the env lock while held");
+    drop(guard);
+    assert!(!test_env_lock_held());
+}

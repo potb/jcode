@@ -555,3 +555,40 @@ mod rendering;
 mod swarm_buffer;
 #[path = "tools.rs"]
 mod tools;
+
+/// The render-state lock must imply the env lock, in that order.
+///
+/// Tests here need both process-global locks and used to take them in whichever
+/// order each file happened to pick. Two threads with opposite orders is an
+/// ABBA deadlock, and neither mutex has a timeout, so `cargo test -p jcode-tui
+/// --lib` hung with no output until a human cancelled it (issue #27).
+/// `render_state_test_lock` now takes the env lock first, which is what makes
+/// the inverted order unrepresentable no matter what a call site writes.
+mod lock_order {
+    #[test]
+    fn render_state_lock_also_holds_the_env_lock() {
+        assert!(
+            !crate::storage::test_env_lock_held(),
+            "env lock leaked into this test from an outer scope"
+        );
+
+        let guard = crate::tui::ui::render_state_test_lock();
+        assert!(
+            crate::storage::test_env_lock_held(),
+            "render_state_test_lock must acquire the env lock first, or the \
+             env-then-render order is not enforced"
+        );
+
+        drop(guard);
+        assert!(!crate::storage::test_env_lock_held());
+    }
+
+    /// The common call pattern is env-first, then render. That must still work
+    /// rather than self-deadlocking on the now-nested env acquisition.
+    #[test]
+    fn env_then_render_still_works() {
+        let _env = crate::storage::lock_test_env();
+        let _render = crate::tui::ui::render_state_test_lock();
+        assert!(crate::storage::test_env_lock_held());
+    }
+}

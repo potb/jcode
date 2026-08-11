@@ -1448,15 +1448,29 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
 /// lock, which serialized nothing between them and produced failures that
 /// appeared only under parallelism (same root cause as issue #593). Both now
 /// delegate here.
+///
+/// It also acquires the process-global test-env lock *first*, and holds it for
+/// the same scope. Tests need both locks and used to take them in either
+/// order, which is an ABBA deadlock: one thread holding env and waiting on
+/// render, another holding render and waiting on env, no timeout on either, so
+/// `cargo test -p jcode-tui --lib` hung silently until a human cancelled it.
+/// Baking env-then-render into this one helper makes the inverted order
+/// unrepresentable regardless of what a call site does. `lock_test_env` is
+/// reentrant per thread, so a test that already holds the env lock (the common
+/// env-then-render pattern) still works unchanged.
 #[cfg(test)]
 pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let env = crate::storage::lock_test_env();
     let guard = LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     RENDER_STATE_LOCK_HELD.with(|held| held.set(true));
-    RenderStateTestGuard { _guard: guard }
+    RenderStateTestGuard {
+        _guard: guard,
+        _env: env,
+    }
 }
 
 /// Guard for [`render_state_test_lock`] that also records ownership on this
@@ -1465,6 +1479,11 @@ pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
 #[cfg(test)]
 pub(crate) struct RenderStateTestGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
+    /// Held for the same scope so the env lock is always the outer one.
+    /// Declared after `_guard` only for readability; drop order within the
+    /// struct releases render first, then env, which is the correct unwind of
+    /// env-then-render.
+    _env: crate::storage::TestEnvGuard,
 }
 
 #[cfg(test)]

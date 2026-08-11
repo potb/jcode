@@ -1111,7 +1111,7 @@ fn gate_ctx(working_dir: &str) -> ToolContext {
 /// assessing against the *other* test's temp home: the deletion target is then
 /// merely "outside the working directory" (Confirm) instead of "is the home
 /// directory" (Catastrophic), and the block assertion fails intermittently.
-fn home_env_lock() -> std::sync::MutexGuard<'static, ()> {
+fn home_env_lock() -> crate::storage::TestEnvGuard {
     crate::storage::lock_test_env()
 }
 

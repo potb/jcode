@@ -346,28 +346,21 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// respect to them. The lock is released on return, which is correct: it only
 /// needs to cover this read-modify-write, not the caller's whole test.
 ///
-/// The lock is acquired with `try_lock`, never blocking: tests like
-/// `with_temp_jcode_home` hold this same non-reentrant mutex for their whole
-/// body and may call `create_*_test_app` inside it, so a blocking lock here
-/// self-deadlocks (this hung CI's TUI test step at the job timeout). When
-/// `try_lock` fails because this thread holds the lock, the caller's own
-/// exclusion already covers the transition; a cross-thread `try_lock` miss
-/// falls back to the pre-serialization benign race for that one call.
+/// `lock_test_env` is reentrant per thread, so blocking here is safe even
+/// though tests like `with_temp_jcode_home` hold the same lock for their whole
+/// body and call `create_*_test_app` inside it. This used to be a `try_lock`
+/// precisely because the mutex was not reentrant, which meant a cross-thread
+/// miss silently fell back to the unserialized race.
 pub(crate) fn ensure_test_jcode_home_if_unset() {
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
 
     // Serialize the unset -> set transition against tests that scope their
-    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
-    // several tests hold it while calling `create_test_app` (e.g. the
-    // pinned-todo-band test), so a blocking `lock_test_env()` here would
-    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
-    // `try_lock` keeps the serialization when the lock is free and degrades
-    // to the caller's own exclusion when this thread already holds it: if
-    // try_lock fails because *we* hold the lock, no other thread can race
-    // this read-modify-write anyway.
-    let _env_lock = crate::storage::test_env_lock().try_lock();
+    // own JCODE_HOME under `lock_test_env`. Reentrant, so a caller that
+    // already holds it (e.g. the pinned-todo-band test calling
+    // `create_test_app`) passes straight through instead of self-deadlocking.
+    let _env_lock = crate::storage::lock_test_env();
 
     if std::env::var_os("JCODE_HOME").is_some() {
         return;

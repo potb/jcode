@@ -742,7 +742,7 @@ fn draw_notification_clips_overwide_notice_at_area_width() {
 /// been running for over 60 seconds" forever). Funnelling both through one
 /// helper makes the order impossible to get wrong per-test.
 struct FactsTestLocks {
-    _env: std::sync::MutexGuard<'static, ()>,
+    _env: crate::storage::TestEnvGuard,
     _viewport: crate::tui::ui::RenderStateTestGuard,
 }
 
@@ -1093,7 +1093,6 @@ fn context_card_can_be_forced_on_alongside_the_stack() {
     assert!(crate::tui::info_widget::context_widget_visible());
 }
 
-
 /// Env guard for `display.model_widget` (JCODE_MODEL_WIDGET).
 struct ModelWidgetEnvGuard;
 
@@ -1153,10 +1152,7 @@ fn model_card_drops_its_identity_rows_once_the_fact_stack_draws_them() {
     // transcript also names the model, and it is not a duplicate of the stack.
     // The card is identified by its border, which is the one region this gate
     // controls.
-    let card_rows: Vec<&String> = rows
-        .iter()
-        .filter(|row| row.contains('\u{2502}'))
-        .collect();
+    let card_rows: Vec<&String> = rows.iter().filter(|row| row.contains('\u{2502}')).collect();
     assert!(
         !card_rows.is_empty(),
         "precondition: the model card should still be placed:\n{}",
