@@ -944,6 +944,7 @@ impl AcpRuntime {
                 images,
                 system_reminder: None,
                 no_reply: false,
+                active_skill: None,
             })
             .await;
         if let Err(err) = send_result {
