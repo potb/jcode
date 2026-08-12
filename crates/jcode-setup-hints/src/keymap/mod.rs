@@ -135,6 +135,7 @@ pub fn collect_snapshot() -> KeymapSnapshot {
     bindings.extend(terminal::read_alacritty_keybinds());
     bindings.extend(terminal::read_wezterm_keybinds());
     bindings.extend(terminal::read_kitty_keybinds());
+    bindings.extend(terminal::read_apple_terminal_keybinds());
     bindings.extend(external::read_external_bindings());
 
     let terminal = detect_terminal_label();

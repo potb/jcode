@@ -26,6 +26,12 @@
 //! compiled in and `kitty --debug-config` prints only the *diff* against them,
 //! so [`read_kitty_keybinds`] encodes the upstream table and layers the user's
 //! `map` directives (including `clear_all_shortcuts` and unbinds) on top.
+//!
+//! Terminal.app is a fourth shape again: it has no config file and no dump
+//! command, but it stores its *user-rebound* keys in the `com.apple.Terminal`
+//! preference domain, so [`read_apple_terminal_keybinds`] reads them live
+//! through the shared plist pipeline. See that function for why only rebound
+//! keys are visible, and why that is the interesting set anyway.
 
 use super::chord::KeyChord;
 use super::source::{AltSide, DiscoveredBinding, KeySource};
@@ -919,9 +925,294 @@ pub fn read_kitty_keybinds() -> Vec<DiscoveredBinding> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Terminal.app
+// ---------------------------------------------------------------------------
+
+/// Map one Terminal.app private-use function-key code point to a key token.
+///
+/// Terminal.app spells non-printable keys with the AppKit `NSxxxFunctionKey`
+/// constants, which live in the Unicode private-use area (`U+F700..`). A raw
+/// `U+F704` in the plist means F1, not an unknown glyph, so these have to be
+/// translated rather than passed through as a literal key name.
+fn apple_terminal_function_key(ch: char) -> Option<&'static str> {
+    Some(match ch as u32 {
+        0xF700 => "up",
+        0xF701 => "down",
+        0xF702 => "left",
+        0xF703 => "right",
+        0xF704 => "f1",
+        0xF705 => "f2",
+        0xF706 => "f3",
+        0xF707 => "f4",
+        0xF708 => "f5",
+        0xF709 => "f6",
+        0xF70A => "f7",
+        0xF70B => "f8",
+        0xF70C => "f9",
+        0xF70D => "f10",
+        0xF70E => "f11",
+        0xF70F => "f12",
+        0xF728 => "delete",
+        0xF729 => "home",
+        0xF72B => "end",
+        0xF72C => "pageup",
+        0xF72D => "pagedown",
+        0xF739 => "clear",
+        _ => return None,
+    })
+}
+
+/// Parse one `keyMapBoundKeys` key, e.g. `"^$\u{F702}"` (Ctrl+Shift+Left).
+///
+/// The format is a run of symbolic modifier prefixes followed by exactly one
+/// key character. Apple's documented prefixes are `^` Control, `~` Option,
+/// `$` Shift and `@` Command; `#` marks the numeric keypad, which jcode has no
+/// vocabulary for.
+///
+/// Returns `None` for anything that is not a usable, representable chord:
+///
+/// * **no modifiers at all** — a bare key rebinding (Terminal.app lets you bind
+///   a plain `F1`) is not an interception of a *chord*, and reporting it would
+///   claim conflicts on unmodified keys;
+/// * a **keypad** (`#`) chord, since `KeyChord` cannot distinguish keypad `1`
+///   from the main-row `1` and would otherwise claim the wrong key is taken;
+/// * anything without exactly one key character left after the prefixes.
+fn parse_apple_terminal_key(spec: &str) -> Option<KeyChord> {
+    let (mut cmd, mut ctrl, mut alt, mut shift) = (false, false, false, false);
+    let mut rest = spec;
+
+    loop {
+        let mut chars = rest.chars();
+        let Some(c) = chars.next() else { break };
+        match c {
+            '^' => ctrl = true,
+            '~' => alt = true,
+            '$' => shift = true,
+            '@' => cmd = true,
+            // Keypad marker: skip the whole chord rather than silently
+            // reporting it as the main-row key of the same name.
+            '#' => return None,
+            _ => break,
+        }
+        rest = chars.as_str();
+    }
+
+    if !(cmd || ctrl || alt || shift) {
+        return None;
+    }
+
+    let mut key_chars = rest.chars();
+    let ch = key_chars.next()?;
+    if key_chars.next().is_some() {
+        return None;
+    }
+
+    let key = match apple_terminal_function_key(ch) {
+        Some(name) => name.to_string(),
+        None => {
+            // A remaining private-use code point is a function key we do not
+            // have a name for; emitting it raw would be an unreadable glyph.
+            if ('\u{F700}'..='\u{F8FF}').contains(&ch) {
+                return None;
+            }
+            ch.to_string()
+        }
+    };
+
+    Some(KeyChord::new(cmd, ctrl, alt, shift, &key))
+}
+
+/// Parse Terminal.app's preferences, as JSON produced by `export_domain_json`.
+///
+/// Bindings are nested per profile: `"Window Settings" -> <profile> ->
+/// "keyMapBoundKeys" -> { "<spec>": "<escape sequence>" }`. Every profile is
+/// scanned rather than only the default one, because the conflict question is
+/// "can this chord reach jcode", and a chord rebound in any profile the user
+/// might open is a chord that can be swallowed.
+///
+/// A binding whose value is an **empty string** is a key the user has bound to
+/// send nothing. That still consumes the keystroke, so it is reported like any
+/// other binding.
+pub fn parse_apple_terminal_keymap(json: &str) -> Vec<DiscoveredBinding> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(profiles) = value.get("Window Settings").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (profile, settings) in profiles {
+        let Some(map) = settings.get("keyMapBoundKeys").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for spec in map.keys() {
+            let Some(chord) = parse_apple_terminal_key(spec) else {
+                continue;
+            };
+            // The same chord rebound in several profiles is one conflict, not
+            // one per profile.
+            if !seen.insert(chord.canonical()) {
+                continue;
+            }
+            out.push(DiscoveredBinding {
+                chord,
+                source: KeySource::Terminal,
+                action: format!("Terminal.app: remapped key ({profile} profile)"),
+                raw: format!("keyMapBoundKeys[{spec:?}] in {profile}"),
+                tool: "Terminal.app".to_string(),
+                alt_side: AltSide::Unspecified,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.chord.canonical().cmp(&b.chord.canonical()));
+    out
+}
+
+/// Effective Terminal.app key remappings for this machine.
+///
+/// Terminal.app has no config file and no way to dump its keymap, but its
+/// *rebound* keys live in the `com.apple.Terminal` preference domain, so they
+/// are read live rather than transcribed — which is why this needs no entry in
+/// [`super::drift`].
+///
+/// Scope limit, stated so a clean report is not over-read: the built-in menu
+/// shortcuts (`Cmd+T`, `Cmd+N`, `Cmd+K`, …) are owned by AppKit and appear
+/// nowhere in the plist, so only keys the user has actually remapped in
+/// Settings → Profiles → Keyboard are visible here. That is a floor, not a
+/// ceiling. It is also the set most likely to surprise: a default Cmd shortcut
+/// is one the user knows about, while a remapping made months ago is exactly
+/// the kind of thing that silently eats a jcode chord.
+///
+/// Returns nothing unless Terminal.app is the active terminal, so an unused
+/// terminal never generates conflict noise.
+pub fn read_apple_terminal_keybinds() -> Vec<DiscoveredBinding> {
+    // Terminal.app sets TERM_PROGRAM=Apple_Terminal in every shell it spawns.
+    if !std::env::var("TERM_PROGRAM")
+        .map(|v| v.eq_ignore_ascii_case("Apple_Terminal"))
+        .unwrap_or(false)
+    {
+        return Vec::new();
+    }
+    match super::macos_hotkeys::export_domain_json("com.apple.Terminal") {
+        Some(json) => parse_apple_terminal_keymap(&json),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A structurally faithful `com.apple.Terminal` export: bindings nested
+    /// per profile under "Window Settings", with function keys written as
+    /// private-use code points.
+    const APPLE_TERMINAL_SAMPLE: &str = "{
+  \"Default Window Settings\": \"Pro\",
+  \"Window Settings\": {
+    \"Basic\": {
+      \"name\": \"Basic\",
+      \"keyMapBoundKeys\": {
+        \"^$\\uF702\": \"\\u001b[1;6D\",
+        \"~\\uF704\": \"\\u001b[1;3P\",
+        \"@k\": \"\"
+      }
+    },
+    \"Pro\": {
+      \"name\": \"Pro\",
+      \"keyMapBoundKeys\": {
+        \"^$\\uF702\": \"\\u001b[1;6D\",
+        \"$\\uF72C\": \"\\u001b[5;2~\"
+      }
+    }
+  }
+}";
+
+    fn chords(binds: &[DiscoveredBinding]) -> Vec<String> {
+        binds.iter().map(|b| b.chord.canonical()).collect()
+    }
+
+    #[test]
+    fn apple_terminal_decodes_modifier_prefixes_and_function_keys() {
+        let binds = parse_apple_terminal_keymap(APPLE_TERMINAL_SAMPLE);
+        let got = chords(&binds);
+        assert!(got.contains(&"ctrl+shift+left".to_string()), "{got:?}");
+        assert!(got.contains(&"alt+f1".to_string()), "{got:?}");
+        assert!(got.contains(&"shift+pageup".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn apple_terminal_reports_binding_that_sends_nothing() {
+        // An empty escape sequence still swallows the keystroke.
+        let binds = parse_apple_terminal_keymap(APPLE_TERMINAL_SAMPLE);
+        assert!(chords(&binds).contains(&"cmd+k".to_string()));
+    }
+
+    #[test]
+    fn apple_terminal_scans_every_profile_but_dedupes_shared_chords() {
+        let binds = parse_apple_terminal_keymap(APPLE_TERMINAL_SAMPLE);
+        let n = chords(&binds)
+            .iter()
+            .filter(|c| *c == "ctrl+shift+left")
+            .count();
+        assert_eq!(n, 1, "chord bound in two profiles is one conflict");
+        // ...but a chord only present in the second profile is still found.
+        assert!(chords(&binds).contains(&"shift+pageup".to_string()));
+    }
+
+    #[test]
+    fn apple_terminal_labels_source_and_tool() {
+        let binds = parse_apple_terminal_keymap(APPLE_TERMINAL_SAMPLE);
+        let b = binds.first().expect("at least one binding");
+        assert_eq!(b.source, KeySource::Terminal);
+        assert_eq!(b.tool, "Terminal.app");
+        assert_eq!(b.alt_side, AltSide::Unspecified);
+    }
+
+    #[test]
+    fn apple_terminal_skips_unmodified_key() {
+        // A bare rebound F1 is not an interception of a chord; reporting it
+        // would claim conflicts on unmodified keys.
+        assert!(parse_apple_terminal_key("\u{F704}").is_none());
+        assert!(parse_apple_terminal_key("a").is_none());
+    }
+
+    #[test]
+    fn apple_terminal_skips_keypad_chords() {
+        // KeyChord cannot tell keypad 1 from main-row 1, so reporting it would
+        // claim the wrong key is taken.
+        assert!(parse_apple_terminal_key("#^1").is_none());
+        assert!(parse_apple_terminal_key("^#1").is_none());
+    }
+
+    #[test]
+    fn apple_terminal_skips_unknown_private_use_key() {
+        // Emitting the raw code point would render as an unreadable glyph.
+        assert!(parse_apple_terminal_key("^\u{F7FF}").is_none());
+    }
+
+    #[test]
+    fn apple_terminal_skips_malformed_specs() {
+        assert!(parse_apple_terminal_key("").is_none());
+        assert!(parse_apple_terminal_key("^").is_none(), "no key char");
+        assert!(parse_apple_terminal_key("^ab").is_none(), "two key chars");
+    }
+
+    #[test]
+    fn apple_terminal_ignores_foreign_json_shapes() {
+        // Rectangle/Raycast-shaped input must not be mistaken for a keymap.
+        assert!(parse_apple_terminal_keymap("{\"raycastGlobalHotkey\":\"Command-49\"}").is_empty());
+        assert!(parse_apple_terminal_keymap("not json").is_empty());
+        assert!(parse_apple_terminal_keymap("{\"Window Settings\":{}}").is_empty());
+    }
+
+    #[test]
+    fn apple_terminal_accepts_all_four_modifier_prefixes() {
+        let chord = parse_apple_terminal_key("@^~$x").expect("full modifier set");
+        assert_eq!(chord.canonical(), "cmd+ctrl+alt+shift+x");
+    }
 
     /// A trimmed but structurally faithful `wezterm show-keys` output.
     const WEZTERM_SAMPLE: &str = "\
