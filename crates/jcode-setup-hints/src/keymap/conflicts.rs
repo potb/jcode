@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use jcode_config_types::KeybindingsConfig;
 
 use super::KeymapSnapshot;
+use super::alt::AltDelivery;
 use super::chord::KeyChord;
-use super::source::{DiscoveredBinding, KeySource};
+use super::source::{AltSide, DiscoveredBinding, KeySource};
 
 /// One configured jcode binding, tied back to its config field.
 #[derive(Debug, Clone)]
@@ -300,10 +301,38 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
 /// Conflicts are deduplicated per `(jcode field, interceptor chord, source)` so
 /// a single overlap is reported once even if the snapshot lists the same chord
 /// multiple times (Ghostty, for example, lists `super+1` and `super+digit_1`).
+/// Whether a discovered binding can actually fire as an Alt chord, given how the
+/// terminal delivers the Option key.
+///
+/// A binding declared on one physical Option key is unreachable when the
+/// terminal only sends the *other* side as Alt: the keystroke either composes a
+/// character or never carries the Alt modifier, so it cannot intercept a jcode
+/// `alt+` chord. Reporting it anyway is a false positive, and a particularly
+/// expensive one: it sends the user looking through their window manager for an
+/// interception that physically cannot happen.
+///
+/// This is deliberately conservative. Suppression requires positive knowledge of
+/// *both* halves — a declaration that named a side, and a terminal state that
+/// names the opposite side. [`AltDelivery::Unknown`] (the state for every
+/// terminal jcode cannot interrogate, and for every pre-existing snapshot) keeps
+/// the conflict, because a missed warning is worse than a redundant one.
+fn side_can_fire(binding: &DiscoveredBinding, delivery: AltDelivery) -> bool {
+    if !binding.chord.alt {
+        return true;
+    }
+    !matches!(
+        (binding.alt_side, delivery),
+        (AltSide::Left, AltDelivery::RightOnly) | (AltSide::Right, AltDelivery::LeftOnly)
+    )
+}
+
 pub fn detect_conflicts(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Vec<Conflict> {
     // Index discovered bindings by chord for O(1) lookup.
     let mut by_chord: HashMap<&KeyChord, Vec<&DiscoveredBinding>> = HashMap::new();
     for b in &snapshot.bindings {
+        if !side_can_fire(b, snapshot.alt_delivery) {
+            continue;
+        }
         by_chord.entry(&b.chord).or_default().push(b);
     }
 
@@ -358,6 +387,7 @@ pub fn conflict_signature(conflicts: &[Conflict]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::alt::AltDelivery;
     use crate::keymap::source::KeySource;
 
     fn term_binding(canonical_keys: &str, action: &str) -> DiscoveredBinding {
@@ -367,6 +397,7 @@ mod tests {
             action: action.to_string(),
             raw: format!("{canonical_keys}={action}"),
             tool: String::new(),
+            alt_side: AltSide::Unspecified,
         }
     }
 
@@ -377,6 +408,7 @@ mod tests {
             action: action.to_string(),
             raw: canonical_keys.to_string(),
             tool: tool.to_string(),
+            alt_side: AltSide::Unspecified,
         }
     }
 
@@ -448,6 +480,99 @@ mod tests {
                 .iter()
                 .all(|c| c.jcode.field.contains("built-in fallback")),
             "prompt-jump fallback fields should be flagged"
+        );
+    }
+
+    fn sided_app_binding(keys: &str, tool: &str, side: AltSide) -> DiscoveredBinding {
+        DiscoveredBinding {
+            alt_side: side,
+            ..app_binding(keys, "focus left", tool)
+        }
+    }
+
+    fn snapshot_with_delivery(
+        bindings: Vec<DiscoveredBinding>,
+        delivery: AltDelivery,
+    ) -> KeymapSnapshot {
+        KeymapSnapshot {
+            alt_delivery: delivery,
+            ..snapshot_with(bindings)
+        }
+    }
+
+    #[test]
+    fn a_right_option_binding_is_not_reported_when_only_left_is_delivered() {
+        // The motivating false positive: on a qwerty-fr layout the WM binds
+        // `ralt`, and the terminal is set to send only the left Option as Alt.
+        // The chord matches jcode's `alt+h` on paper, but the keystroke can
+        // never arrive as Alt, so warning about it sends the user hunting for
+        // an interception that cannot happen.
+        let cfg = KeybindingsConfig::default();
+        let snapshot = snapshot_with_delivery(
+            vec![sided_app_binding("alt+h", "skhd", AltSide::Right)],
+            AltDelivery::LeftOnly,
+        );
+        assert!(
+            detect_conflicts(&cfg, &snapshot).is_empty(),
+            "a right-Option binding cannot fire when only left Option is delivered"
+        );
+    }
+
+    #[test]
+    fn a_left_option_binding_is_still_reported_when_left_is_delivered() {
+        // The mirror case must NOT be suppressed: this is a real conflict.
+        let cfg = KeybindingsConfig::default();
+        let snapshot = snapshot_with_delivery(
+            vec![sided_app_binding("alt+h", "skhd", AltSide::Left)],
+            AltDelivery::LeftOnly,
+        );
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert_eq!(conflicts.len(), 1, "got {conflicts:?}");
+        assert_eq!(conflicts[0].jcode.field, "keybindings.workspace_left");
+    }
+
+    #[test]
+    fn unknown_delivery_keeps_every_sided_conflict() {
+        // Suppression requires positive knowledge of both halves. Every terminal
+        // jcode cannot interrogate reports Unknown, as does every snapshot
+        // written before this field existed, and a missed warning is worse than
+        // a redundant one.
+        let cfg = KeybindingsConfig::default();
+        for delivery in [AltDelivery::Unknown, AltDelivery::Delivered] {
+            let snapshot = snapshot_with_delivery(
+                vec![sided_app_binding("alt+h", "skhd", AltSide::Right)],
+                delivery,
+            );
+            assert_eq!(
+                detect_conflicts(&cfg, &snapshot).len(),
+                1,
+                "delivery {delivery:?} must not suppress anything"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsided_binding_is_never_suppressed() {
+        // Most declarations say plain `alt`, which means either physical key.
+        let cfg = KeybindingsConfig::default();
+        let snapshot = snapshot_with_delivery(
+            vec![sided_app_binding("alt+h", "skhd", AltSide::Unspecified)],
+            AltDelivery::LeftOnly,
+        );
+        assert_eq!(detect_conflicts(&cfg, &snapshot).len(), 1);
+    }
+
+    #[test]
+    fn sidedness_never_suppresses_a_non_alt_chord() {
+        // A stray side on a chord without Alt must not remove a real conflict.
+        let cfg = KeybindingsConfig::default();
+        let mut binding = app_binding("ctrl+tab", "next_tab", "skhd");
+        binding.alt_side = AltSide::Right;
+        let snapshot = snapshot_with_delivery(vec![binding], AltDelivery::LeftOnly);
+        assert!(
+            detect_conflicts(&cfg, &snapshot)
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.model_switch_next")
         );
     }
 

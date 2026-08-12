@@ -101,10 +101,11 @@ fn render_conflict_block(c: &Conflict) -> String {
             } else {
                 c.interceptor.tool.as_str()
             };
+            let side = c.interceptor.alt_side.label();
             if c.interceptor.action.is_empty() {
-                tool.to_string()
+                format!("{tool}{side}")
             } else {
-                format!("{tool}: {}", c.interceptor.action)
+                format!("{tool}: {}{side}", c.interceptor.action)
             }
         }
     };
@@ -264,6 +265,7 @@ mod tests {
             action: action.to_string(),
             raw: format!("{keys}={action}"),
             tool: String::new(),
+            alt_side: Default::default(),
         }
     }
 

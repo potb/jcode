@@ -438,6 +438,7 @@ fn keymap_conflict_hint_full_path_debounces_and_persists_signature() {
             action: action.to_string(),
             raw: format!("{keys}={action}"),
             tool: String::new(),
+            alt_side: Default::default(),
         }
     }
 

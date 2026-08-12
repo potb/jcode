@@ -26,7 +26,7 @@ pub use report::{
     alt_notice_signature, new_conflicts, render_new_conflict_notice, render_report,
     render_status_line,
 };
-pub use source::{DiscoveredBinding, KeySource};
+pub use source::{AltSide, DiscoveredBinding, KeySource};
 
 use serde::{Deserialize, Serialize};
 
@@ -236,6 +236,7 @@ mod tests {
                 action: "clear_screen".to_string(),
                 raw: "super+k=clear_screen".to_string(),
                 tool: String::new(),
+                alt_side: Default::default(),
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();

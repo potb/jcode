@@ -28,7 +28,7 @@
 //! `map` directives (including `clear_all_shortcuts` and unbinds) on top.
 
 use super::chord::KeyChord;
-use super::source::{DiscoveredBinding, KeySource};
+use super::source::{AltSide, DiscoveredBinding, KeySource};
 
 /// Parse a single Ghostty keybind line of the form:
 ///
@@ -67,6 +67,8 @@ pub fn parse_ghostty_keybind_line(line: &str) -> Option<DiscoveredBinding> {
         action: action.to_string(),
         raw: line.to_string(),
         tool: String::new(),
+        // Terminal and system declarations never name an Option side.
+        alt_side: AltSide::Unspecified,
     })
 }
 
@@ -280,6 +282,8 @@ fn alacritty_table_bindings(table: &[(&str, &str)]) -> Vec<DiscoveredBinding> {
                 action: (*action).to_string(),
                 raw: (*chord).to_string(),
                 tool: "Alacritty".to_string(),
+                // Terminal and system declarations never name an Option side.
+                alt_side: AltSide::Unspecified,
             })
         })
         .collect()
@@ -408,6 +412,8 @@ pub fn parse_alacritty_bindings(text: &str) -> (Vec<DiscoveredBinding>, Vec<KeyC
             action: label,
             raw: format!("{mods}+{key}"),
             tool: "Alacritty".to_string(),
+            // Terminal and system declarations never name an Option side.
+            alt_side: AltSide::Unspecified,
         });
     }
 
@@ -504,6 +510,8 @@ fn parse_wezterm_row(line: &str) -> Option<DiscoveredBinding> {
         action: action.to_string(),
         raw: line.trim().to_string(),
         tool: "WezTerm".to_string(),
+        // Terminal and system declarations never name an Option side.
+        alt_side: AltSide::Unspecified,
     })
 }
 
@@ -761,6 +769,8 @@ fn kitty_table_bindings(table: &[(&str, &str)], kitty_mod: &str) -> Vec<Discover
                 action: (*action).to_string(),
                 raw: (*spec).to_string(),
                 tool: "kitty".to_string(),
+                // Terminal and system declarations never name an Option side.
+                alt_side: AltSide::Unspecified,
             })
         })
         .collect()
@@ -852,6 +862,8 @@ pub fn parse_kitty_maps(text: &str) -> (Vec<DiscoveredBinding>, Vec<KeyChord>, b
             action,
             raw: line.to_string(),
             tool: "kitty".to_string(),
+            // Terminal and system declarations never name an Option side.
+            alt_side: AltSide::Unspecified,
         });
     }
 

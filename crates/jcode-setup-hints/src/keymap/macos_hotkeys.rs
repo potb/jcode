@@ -14,7 +14,7 @@
 //! [`read_symbolic_hotkeys`].
 
 use super::chord::KeyChord;
-use super::source::{DiscoveredBinding, KeySource};
+use super::source::{AltSide, DiscoveredBinding, KeySource};
 
 /// NSEvent modifier flag bits used in the symbolic-hotkeys `modmask`.
 const NS_SHIFT: u64 = 0x0002_0000;
@@ -243,6 +243,8 @@ pub fn hotkeys_to_bindings(raw: &[RawHotkey]) -> Vec<DiscoveredBinding> {
             action: action_name(hk.id),
             raw: format!("symbolichotkey #{}", hk.id),
             tool: String::new(),
+            // Terminal and system declarations never name an Option side.
+            alt_side: AltSide::Unspecified,
         });
     }
     out

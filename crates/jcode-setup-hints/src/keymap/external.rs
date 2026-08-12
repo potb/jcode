@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use super::chord::KeyChord;
-use super::source::{DiscoveredBinding, KeySource};
+use super::source::{AltSide, DiscoveredBinding, KeySource};
 
 /// A modifier mask accumulated while parsing a chord, kept separate from the key
 /// token so apps that express the "hyper" key as a bundle of modifiers can be
@@ -26,6 +26,9 @@ struct Mods {
     ctrl: bool,
     alt: bool,
     shift: bool,
+    /// Which physical Option key the declaration named, if any. Accumulated
+    /// alongside the flags so a sided spelling is not lost when `alt` collapses.
+    alt_side: AltSide,
 }
 
 impl Mods {
@@ -35,6 +38,7 @@ impl Mods {
             ctrl: self.ctrl || other.ctrl,
             alt: self.alt || other.alt,
             shift: self.shift || other.shift,
+            alt_side: self.alt_side.merge(other.alt_side),
         }
     }
 }
@@ -56,11 +60,24 @@ impl Mods {
 /// jcode's own chords have no notion of sidedness, so both sides collapse onto
 /// the single `alt`/`cmd`/`ctrl`/`shift` flag. That is the correct comparison:
 /// the terminal reports "alt" regardless of which physical key produced it.
+/// The side is still *recorded* in `mods.alt_side`, because a terminal that
+/// sends only one Option key as Alt makes a binding on the other side
+/// unreachable, and reporting it as a conflict would be a false positive.
+/// Sidedness is only tracked for Option: Cmd/Ctrl/Shift have no equivalent
+/// compose-key ambiguity, so their sided spellings carry no extra information.
 fn apply_modifier(token: &str, mods: &mut Mods, hyper_mods: Mods) -> bool {
     match token.trim().to_ascii_lowercase().as_str() {
         "cmd" | "command" | "super" | "win" | "windows" | "lcmd" | "rcmd" => mods.cmd = true,
         "ctrl" | "control" | "lctrl" | "rctrl" => mods.ctrl = true,
-        "alt" | "opt" | "option" | "lalt" | "ralt" | "lopt" | "ropt" => mods.alt = true,
+        "alt" | "opt" | "option" => mods.alt = true,
+        "lalt" | "lopt" => {
+            mods.alt = true;
+            mods.alt_side = mods.alt_side.merge(AltSide::Left);
+        }
+        "ralt" | "ropt" => {
+            mods.alt = true;
+            mods.alt_side = mods.alt_side.merge(AltSide::Right);
+        }
         "shift" | "lshift" | "rshift" => mods.shift = true,
         // "hyper" is an app-defined alias for some bundle of real modifiers.
         "hyper" => *mods = mods.or(hyper_mods),
@@ -86,11 +103,12 @@ fn parse_hyper_mods(spec: &str) -> Mods {
 
 /// Build a chord from a list of tokens (modifiers + one key), where modifiers and
 /// the key are already separated out. `hyper_mods` expands any `hyper` token.
-/// Returns `None` if no primary key token was found.
+/// Returns the chord plus which physical Option key the declaration named, or
+/// `None` if no primary key token was found.
 fn chord_from_tokens<'a>(
     tokens: impl IntoIterator<Item = &'a str>,
     hyper_mods: Mods,
-) -> Option<KeyChord> {
+) -> Option<(KeyChord, AltSide)> {
     let mut mods = Mods::default();
     let mut key: Option<String> = None;
     for token in tokens {
@@ -104,8 +122,9 @@ fn chord_from_tokens<'a>(
         }
     }
     let key = key?;
-    Some(KeyChord::new(
-        mods.cmd, mods.ctrl, mods.alt, mods.shift, &key,
+    Some((
+        KeyChord::new(mods.cmd, mods.ctrl, mods.alt, mods.shift, &key),
+        mods.alt_side,
     ))
 }
 
@@ -160,13 +179,14 @@ pub fn parse_omniwm(text: &str) -> Vec<DiscoveredBinding> {
             .and_then(|i| i.as_str())
             .unwrap_or("")
             .to_string();
-        if let Some(chord) = chord_from_tokens(binding.split(['+', '-']), hyper_mods) {
+        if let Some((chord, alt_side)) = chord_from_tokens(binding.split(['+', '-']), hyper_mods) {
             out.push(DiscoveredBinding {
                 chord,
                 source: KeySource::ExternalApp,
                 action,
                 raw: binding.to_string(),
                 tool: "OmniWM".to_string(),
+                alt_side,
             });
         }
     }
@@ -212,7 +232,8 @@ pub fn parse_aerospace(text: &str) -> Vec<DiscoveredBinding> {
         };
         for (chord_str, action_val) in bindings {
             // AeroSpace separates modifiers and key with '-'.
-            let Some(chord) = chord_from_tokens(chord_str.split('-'), Mods::default()) else {
+            let Some((chord, alt_side)) = chord_from_tokens(chord_str.split('-'), Mods::default())
+            else {
                 continue;
             };
             let action = aerospace_action_label(action_val);
@@ -222,6 +243,7 @@ pub fn parse_aerospace(text: &str) -> Vec<DiscoveredBinding> {
                 action,
                 raw: chord_str.clone(),
                 tool: "AeroSpace".to_string(),
+                alt_side,
             });
         }
     }
@@ -298,13 +320,14 @@ pub fn parse_skhd(text: &str) -> Vec<DiscoveredBinding> {
             .chain(std::iter::once(key_part))
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        if let Some(chord) = chord_from_tokens(tokens, Mods::default()) {
+        if let Some((chord, alt_side)) = chord_from_tokens(tokens, Mods::default()) {
             out.push(DiscoveredBinding {
                 chord,
                 source: KeySource::ExternalApp,
                 action: action.to_string(),
                 raw: activation.to_string(),
                 tool: "skhd".to_string(),
+                alt_side,
             });
         }
     }
@@ -372,7 +395,9 @@ fn karabiner_modifier(name: &str) -> Option<&'static str> {
     Some(match name {
         "command" | "left_command" | "right_command" => "cmd",
         "control" | "left_control" | "right_control" => "ctrl",
-        "option" | "left_option" | "right_option" => "alt",
+        "option" => "alt",
+        "left_option" => "lalt",
+        "right_option" => "ralt",
         "shift" | "left_shift" | "right_shift" => "shift",
         "fn" => "fn",
         _ => return None,
@@ -475,6 +500,7 @@ pub fn parse_karabiner(text: &str) -> Vec<DiscoveredBinding> {
                 action,
                 raw: key_code.to_string(),
                 tool: "Karabiner-Elements".to_string(),
+                alt_side: mods.alt_side,
             });
         }
     }
@@ -577,6 +603,7 @@ pub fn parse_hammerspoon(text: &str) -> Vec<DiscoveredBinding> {
                 action: "Hammerspoon hotkey".to_string(),
                 raw: line.to_string(),
                 tool: "Hammerspoon".to_string(),
+                alt_side: mods.alt_side,
             });
         }
     }
@@ -889,6 +916,70 @@ cmd + shift - j : yabai -m window --swap south\n\
         // A bare modifier with no key cannot form a chord.
         let binds = parse_skhd("cmd - : noop\n");
         assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn skhd_records_which_option_side_was_declared() {
+        // The modifier flag must still collapse (the terminal reports plain
+        // "alt"), but the declared side is retained so a terminal that only
+        // delivers one Option key can suppress the unreachable half.
+        let binds = parse_skhd(
+            "lalt - h : aerospace focus left\n\
+             ralt - e : echo altgr\n\
+             alt - j : aerospace focus down\n\
+             lalt + ralt - k : both sides\n",
+        );
+        let side = |key: &str| {
+            binds
+                .iter()
+                .find(|b| b.chord.key == key)
+                .unwrap_or_else(|| panic!("no binding for {key}"))
+                .alt_side
+        };
+        assert!(binds.iter().all(|b| b.chord.alt), "alt flag must survive");
+        assert_eq!(side("h"), AltSide::Left);
+        assert_eq!(side("e"), AltSide::Right);
+        assert_eq!(
+            side("j"),
+            AltSide::Unspecified,
+            "unsided spelling stays unsided"
+        );
+        assert_eq!(
+            side("k"),
+            AltSide::Unspecified,
+            "naming both sides is equivalent to side-agnostic"
+        );
+    }
+
+    #[test]
+    fn karabiner_records_which_option_side_was_declared() {
+        let json = r#"{
+          "profiles": [{
+            "selected": true,
+            "complex_modifications": { "rules": [{
+              "description": "left only",
+              "manipulators": [{
+                "type": "basic",
+                "from": { "key_code": "h", "modifiers": { "mandatory": ["left_option"] } }
+              }]
+            }] }
+          }]
+        }"#;
+        let binds = parse_karabiner(json);
+        assert_eq!(binds.len(), 1);
+        assert!(binds[0].chord.alt);
+        assert_eq!(binds[0].alt_side, AltSide::Left);
+    }
+
+    #[test]
+    fn sided_cmd_ctrl_shift_do_not_set_an_option_side() {
+        // Only Option has the compose-key ambiguity. A sided Cmd spelling must
+        // not be mistaken for an Option side, or an unrelated binding would be
+        // silently suppressed.
+        let binds = parse_skhd("lcmd + rshift - h : something\n");
+        assert_eq!(binds.len(), 1);
+        assert!(!binds[0].chord.alt);
+        assert_eq!(binds[0].alt_side, AltSide::Unspecified);
     }
 
     #[test]
