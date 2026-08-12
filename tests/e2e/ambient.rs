@@ -22,6 +22,7 @@ fn test_ambient_state_lifecycle() {
         ended_at: chrono::Utc::now(),
         status: CycleStatus::Complete,
         conversation: None,
+        agent_session_id: None,
     };
 
     state.record_cycle(&result);

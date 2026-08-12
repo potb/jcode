@@ -97,6 +97,7 @@ fn test_safety_transcript() {
         compactions: 0,
         memories_modified: 3,
         conversation: None,
+        agent_session_id: None,
     };
 
     // Should not panic
