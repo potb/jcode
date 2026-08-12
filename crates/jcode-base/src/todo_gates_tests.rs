@@ -198,3 +198,67 @@ fn labels_are_distinct_so_a_stall_names_the_gate() {
         assert_eq!(follow_up.into_message(), "m");
     }
 }
+
+#[test]
+fn ship_actions_are_recognised_by_whole_word() {
+    for action in [
+        "push",
+        "create_pull_request",
+        "open PR",
+        "git-push",
+        "merge_branch",
+        "deploy",
+        "publish release",
+    ] {
+        assert!(is_ship_action(action), "expected ship action: {action}");
+    }
+    // Substrings must not catch unrelated actions: "pr" lives inside plenty of
+    // ordinary words, and blocking an edit or a cache prune would stall the
+    // very work the ownership gate is asking for.
+    for action in [
+        "edit",
+        "prune_cache",
+        "run_command",
+        "write_file",
+        "approve",
+        "compress",
+    ] {
+        assert!(!is_ship_action(action), "not a ship action: {action}");
+    }
+}
+
+#[test]
+fn shipping_is_blocked_while_a_completed_goal_is_unowned() {
+    // The cycle-end gates run too late for this: the PR is already open by the
+    // time they would raise the same complaint.
+    let todos = vec![todo("a", "completed")];
+    let weak = TodoGoal {
+        group: Some("g".to_string()),
+        ..Default::default()
+    };
+    let reason = ship_block_reason(&todos, &[weak]).expect("expected a block");
+    assert!(!reason.is_empty());
+    assert!(ship_block_reason(&todos, &[passing_goal()]).is_none());
+}
+
+#[test]
+fn shipping_mid_cycle_with_open_work_is_not_blocked() {
+    // The branch is normally pushed before the plan is closed out, and open
+    // todos are not evidence of anything wrong yet. Only a group already
+    // *claimed* complete without ownership blocks.
+    let todos = vec![todo("a", "in_progress")];
+    assert!(ship_block_reason(&todos, &[]).is_none());
+    // No plan at all also ships: a read-only cycle keeps no todos, and there is
+    // no assessment to contradict.
+    assert!(ship_block_reason(&[], &[]).is_none());
+}
+
+#[test]
+fn shipping_is_not_blocked_by_weak_completion_confidence_alone() {
+    // Completion confidence describes work already claimed done and is raised
+    // at cycle end; blocking the ship path on it would stop a push for a state
+    // the ownership check says is fine.
+    let mut todo = todo("a", "completed");
+    todo.completion_confidence = Some(ConfidenceState::Speculative);
+    assert!(ship_block_reason(&[todo], &[passing_goal()]).is_none());
+}

@@ -166,6 +166,53 @@ pub fn next_todo_gate_follow_up(
     None
 }
 
+/// Whether a `request_permission` action would make this cycle's work visible
+/// outside the machine: a push, a pull request, a merge, a release, a deploy.
+///
+/// These are the actions issue #22 direction 5 is about. Everything else an
+/// ambient cycle asks permission for (editing a file, running a command) is
+/// reversible and local, and gating it would only stall the work that the
+/// ownership gate wants *more* of.
+///
+/// Matching is on whole words so an unrelated action is not caught by a
+/// substring -- `"pr"` inside `"prune_cache"` is not a pull request.
+pub fn is_ship_action(action: &str) -> bool {
+    const SHIP_WORDS: &[&str] = &[
+        "push", "pr", "pull", "request", "merge", "publish", "release", "deploy", "ship",
+    ];
+    action
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| {
+            let word = word.to_ascii_lowercase();
+            SHIP_WORDS.contains(&word.as_str())
+        })
+}
+
+/// Why a ship action must not proceed yet, or `None` when it may.
+///
+/// An ambient cycle can open a PR at any point in the turn, but the gates only
+/// run when the cycle ends -- so the ownership assessment that would have
+/// challenged the work is made *after* it has already been shipped. This is the
+/// same decision as [`next_todo_gate_follow_up`]'s ownership arm, applied at
+/// ship time instead of at cycle end.
+///
+/// It deliberately checks nothing else. Open todos are normal mid-cycle (the
+/// branch is usually pushed before the plan is closed out), and completion
+/// confidence describes work already claimed done, so raising either here would
+/// block shipping for a state that is not yet wrong.
+pub fn ship_block_reason(todos: &[TodoItem], goals: &[TodoGoal]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    if crate::todo::completed_groups_have_sufficient_delivery(todos, goals) {
+        return None;
+    }
+    Some(crate::todo::build_todo_ownership_continuation_message(
+        todos, goals,
+    ))
+}
+
 #[cfg(test)]
 #[path = "todo_gates_tests.rs"]
 mod todo_gates_tests;

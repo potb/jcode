@@ -651,6 +651,22 @@ impl Tool for RequestPermissionTool {
 
         let params: RequestPermissionInput = serde_json::from_value(input)?;
 
+        // Ship actions are gated on the ownership assessment (issue #22,
+        // direction 5). The cycle-end gates cannot help here: a PR opened
+        // mid-turn is already visible to the user by the time they run, so the
+        // check has to happen at ship time or not at all.
+        if jcode_base::todo_gates::is_ship_action(&params.action)
+            && let Some(reason) = jcode_base::todo_gates::ship_block_reason(
+                &crate::todo::load_todos(&ctx.session_id).unwrap_or_default(),
+                &crate::todo::load_goals(&ctx.session_id).unwrap_or_default(),
+            )
+        {
+            return Ok(ToolOutput::new(format!(
+                "Permission not requested: this work is not ready to ship.\n{reason}"
+            ))
+            .with_title(format!("permission blocked: {}", params.action)));
+        }
+
         let urgency = match params.urgency.as_deref() {
             Some("low") => Urgency::Low,
             Some("high") => Urgency::High,
