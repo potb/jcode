@@ -758,6 +758,132 @@ pub fn read_rectangle() -> Vec<DiscoveredBinding> {
 }
 
 // ---------------------------------------------------------------------------
+// Raycast
+// ---------------------------------------------------------------------------
+
+/// Which Raycast preference keys hold a global hotkey, and what to call them.
+///
+/// Raycast stores per-command hotkeys inside its encrypted application-support
+/// database rather than in the plist, so only the hotkeys it mirrors into
+/// `defaults` are visible here. That is a floor, not a ceiling: a clean report
+/// means these specific chords are free, not that Raycast has no other hotkey.
+const RAYCAST_HOTKEY_KEYS: &[(&str, &str)] = &[
+    ("raycastGlobalHotkey", "open Raycast"),
+    ("emojiPickerHotkey", "emoji picker"),
+    ("clipboardHistoryHotkey", "clipboard history"),
+    ("windowManagementHotkey", "window management"),
+    ("quicklinkHotkey", "quicklink"),
+];
+
+/// Translate one Raycast modifier word into an `NSEventModifierFlags` bit.
+///
+/// Raycast spells the modifiers out rather than storing a mask, so this is a
+/// word table rather than a bit test. `Function` is recognised only so that it
+/// can be detected and the whole chord skipped.
+fn raycast_modifier_bit(word: &str) -> Option<u64> {
+    use super::macos_hotkeys::{NS_COMMAND, NS_CONTROL, NS_FUNCTION, NS_OPTION, NS_SHIFT};
+    match word.trim().to_ascii_lowercase().as_str() {
+        "command" | "cmd" => Some(NS_COMMAND),
+        "control" | "ctrl" => Some(NS_CONTROL),
+        "option" | "alt" => Some(NS_OPTION),
+        "shift" => Some(NS_SHIFT),
+        "function" | "fn" => Some(NS_FUNCTION),
+        _ => None,
+    }
+}
+
+/// Parse one Raycast hotkey string, e.g. `"Command-Shift-49"`.
+///
+/// The format is modifier words joined by `-`, with the macOS virtual keycode
+/// last — the same keycode space the symbolic-hotkeys decoder already maps, so
+/// the keycode table is shared rather than duplicated.
+///
+/// Returns `None` for anything that is not a usable, representable chord:
+///
+/// * an **unrecognised modifier word**, since guessing would fabricate a chord;
+/// * **no modifiers at all**, which is what a cleared hotkey leaves behind and
+///   which cannot be a global hotkey anyway;
+/// * a chord carrying **`fn`**, which [`KeyChord`] cannot represent — dropping
+///   the flag would make `fn+f1` compare equal to a plain `f1` and claim an
+///   unrelated key is taken;
+/// * a keycode outside the table, rather than inventing a key name.
+fn parse_raycast_hotkey(spec: &str) -> Option<KeyChord> {
+    use super::macos_hotkeys::{
+        NS_COMMAND, NS_CONTROL, NS_FUNCTION, NS_OPTION, NS_SHIFT, keycode_to_token,
+    };
+
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<&str> = spec.split('-').filter(|p| !p.trim().is_empty()).collect();
+    let keycode: i64 = parts.pop()?.trim().parse().ok()?;
+
+    let mut mask = 0u64;
+    for word in parts {
+        mask |= raycast_modifier_bit(word)?;
+    }
+
+    if mask & NS_FUNCTION != 0 {
+        return None;
+    }
+    if mask & (NS_COMMAND | NS_CONTROL | NS_OPTION | NS_SHIFT) == 0 {
+        return None;
+    }
+    let key = keycode_to_token(keycode)?;
+
+    Some(KeyChord::new(
+        mask & NS_COMMAND != 0,
+        mask & NS_CONTROL != 0,
+        mask & NS_OPTION != 0,
+        mask & NS_SHIFT != 0,
+        key,
+    ))
+}
+
+/// Parse Raycast's preferences, as JSON produced by [`export_domain_json`].
+///
+/// Each hotkey lives at the top level as a string such as
+/// `"raycastGlobalHotkey": "Command-49"`, unlike Rectangle's nested
+/// `keyCode`/`modifierFlags` dictionary.
+pub fn parse_raycast(json: &str) -> Vec<DiscoveredBinding> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for (key, label) in RAYCAST_HOTKEY_KEYS {
+        let Some(spec) = map.get(*key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(chord) = parse_raycast_hotkey(spec) else {
+            continue;
+        };
+        out.push(DiscoveredBinding {
+            chord,
+            source: KeySource::ExternalApp,
+            action: format!("Raycast: {label}"),
+            raw: format!("{key}: {spec}"),
+            tool: "Raycast".to_string(),
+            alt_side: AltSide::Unspecified,
+        });
+    }
+    out.sort_by(|a, b| a.action.cmp(&b.action));
+    out
+}
+
+/// Read Raycast's live preferences from its binary plist.
+pub fn read_raycast() -> Vec<DiscoveredBinding> {
+    match super::macos_hotkeys::export_domain_json("com.raycast.macos") {
+        Some(json) => parse_raycast(&json),
+        None => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregation
 // ---------------------------------------------------------------------------
 
@@ -775,6 +901,7 @@ pub fn read_external_bindings() -> Vec<DiscoveredBinding> {
     out.extend(read_karabiner());
     out.extend(read_hammerspoon());
     out.extend(read_rectangle());
+    out.extend(read_raycast());
     out
 }
 
@@ -1239,6 +1366,77 @@ rctrl - g : echo right ctrl\n\
             parse_rectangle(r#"{"shortcuts": {"x": {"keyCode": 9999, "modifierFlags": 786432}}}"#)
                 .is_empty()
         );
+    }
+
+    /// A trimmed but faithful sample of `defaults export com.raycast.macos`:
+    /// hotkeys are flat top-level strings, mixed in with unrelated settings.
+    const RAYCAST_SAMPLE: &str = r#"{
+        "raycastGlobalHotkey": "Command-49",
+        "emojiPickerHotkey": "Command-Control-49",
+        "clipboardHistoryHotkey": "Command-Shift-9",
+        "mainWindow_isMonitoringGlobalHotkeys": true,
+        "onboardingCompleted": 1
+    }"#;
+
+    #[test]
+    fn parses_raycast_hotkeys() {
+        let binds = parse_raycast(RAYCAST_SAMPLE);
+        assert_eq!(binds.len(), 3);
+
+        let clip = binds
+            .iter()
+            .find(|b| b.action == "Raycast: clipboard history")
+            .expect("clipboard history hotkey");
+        assert_eq!(clip.chord, KeyChord::new(true, false, false, true, "v"));
+
+        let open = binds
+            .iter()
+            .find(|b| b.action == "Raycast: open Raycast")
+            .expect("global hotkey");
+        assert_eq!(
+            open.chord,
+            KeyChord::new(true, false, false, false, "space")
+        );
+
+        let emoji = binds
+            .iter()
+            .find(|b| b.action == "Raycast: emoji picker")
+            .expect("emoji hotkey");
+        assert_eq!(
+            emoji.chord,
+            KeyChord::new(true, true, false, false, "space")
+        );
+
+        for b in &binds {
+            assert_eq!(b.tool, "Raycast");
+            assert_eq!(b.source, KeySource::ExternalApp);
+            assert_eq!(b.alt_side, AltSide::Unspecified);
+        }
+    }
+
+    #[test]
+    fn raycast_skips_unmodified_and_fn_chords() {
+        // A cleared hotkey leaves a bare keycode behind; reporting it would
+        // claim `space` itself is globally taken.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": "49"}"#).is_empty());
+        // `fn` is skipped whole rather than having the flag dropped, which
+        // would make fn+F1 compare equal to a plain F1.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": "Function-49"}"#).is_empty());
+    }
+
+    #[test]
+    fn raycast_tolerates_missing_and_malformed_input() {
+        assert!(parse_raycast("not json").is_empty());
+        // A preferences domain carrying no hotkey keys at all.
+        assert!(parse_raycast(r#"{"onboardingCompleted": 1}"#).is_empty());
+        // An unrecognised modifier word is skipped rather than guessed at.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": "Hyper-49"}"#).is_empty());
+        // A non-numeric trailing field is not a keycode.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": "Command-Space"}"#).is_empty());
+        // An unmapped keycode is skipped rather than invented.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": "Command-9999"}"#).is_empty());
+        // Empty and whitespace-only specs.
+        assert!(parse_raycast(r#"{"raycastGlobalHotkey": ""}"#).is_empty());
     }
 
     #[test]
