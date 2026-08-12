@@ -13,6 +13,7 @@
 pub mod alt;
 pub mod chord;
 pub mod conflicts;
+pub mod drift;
 pub mod external;
 pub mod macos_hotkeys;
 pub mod report;
@@ -22,6 +23,7 @@ pub mod terminal;
 pub use alt::AltDelivery;
 pub use chord::KeyChord;
 pub use conflicts::{Conflict, JcodeBinding, conflict_signature, detect_conflicts, jcode_bindings};
+pub use drift::{TableDrift, ToolVersion};
 pub use report::{
     alt_notice_signature, new_conflicts, render_new_conflict_notice, render_report,
     render_status_line,
@@ -50,6 +52,11 @@ pub struct KeymapSnapshot {
     /// jcode stays silent instead of claiming Alt is dead.
     #[serde(default)]
     pub alt_delivery: AltDelivery,
+    /// Versions of the tools whose default keymaps jcode encodes by hand, used
+    /// to detect that a transcribed table has gone stale. Empty in snapshots
+    /// written before this field existed, which reads as "no drift known".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_versions: Vec<ToolVersion>,
     /// All discovered bindings, across every source.
     pub bindings: Vec<DiscoveredBinding>,
 }
@@ -58,6 +65,23 @@ impl KeymapSnapshot {
     /// Bindings originating from a particular source.
     pub fn from_source(&self, source: KeySource) -> impl Iterator<Item = &DiscoveredBinding> {
         self.bindings.iter().filter(move |b| b.source == source)
+    }
+
+    /// Encoded default tables that disagree with the installed tool version.
+    ///
+    /// Computed at read time rather than stored, so re-verifying a table and
+    /// bumping its pin takes effect immediately instead of waiting for the next
+    /// machine scan. Only tools that actually contributed bindings are
+    /// considered: a drift note about a table that had no influence on this
+    /// report would be noise.
+    pub fn table_drift(&self) -> Vec<TableDrift> {
+        let contributing: Vec<ToolVersion> = self
+            .tool_versions
+            .iter()
+            .filter(|v| self.bindings.iter().any(|b| b.tool == v.tool))
+            .cloned()
+            .collect();
+        drift::detect_drift(&contributing)
     }
 }
 
@@ -121,6 +145,7 @@ pub fn collect_snapshot() -> KeymapSnapshot {
         alt_delivery: alt::detect_alt_delivery(&terminal),
         terminal,
         terminal_version: std::env::var("TERM_PROGRAM_VERSION").unwrap_or_default(),
+        tool_versions: drift::detect_tool_versions(),
         bindings,
     }
 }
@@ -230,6 +255,7 @@ mod tests {
             terminal: "Ghostty".to_string(),
             terminal_version: "1.3.1".to_string(),
             alt_delivery: AltDelivery::Unknown,
+            tool_versions: Vec::new(),
             bindings: vec![DiscoveredBinding {
                 chord: KeyChord::new(true, false, false, false, "k"),
                 source: KeySource::Terminal,

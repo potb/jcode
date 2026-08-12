@@ -60,6 +60,12 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
         out.push_str(&format!("\n⚠ {note}\n"));
     }
 
+    // Drift sits with the Alt notice, before the conflict list: it is a caveat
+    // on how much the list below can be trusted, so it has to be read first.
+    for drift in snapshot.table_drift() {
+        out.push_str(&format!("\n⚠ {}\n", super::drift::explain(&drift)));
+    }
+
     let conflicts = detect_conflicts(cfg, snapshot);
     out.push('\n');
     if conflicts.is_empty() {
@@ -254,6 +260,7 @@ mod tests {
             terminal: "Ghostty".to_string(),
             terminal_version: "1.3.1".to_string(),
             alt_delivery: crate::keymap::AltDelivery::Unknown,
+            tool_versions: Vec::new(),
             bindings,
         }
     }
@@ -267,6 +274,45 @@ mod tests {
             tool: String::new(),
             alt_side: Default::default(),
         }
+    }
+
+    #[test]
+    fn report_warns_when_an_encoded_table_has_drifted() {
+        let cfg = KeybindingsConfig::default();
+        let mut snap = snapshot_with(vec![DiscoveredBinding {
+            chord: KeyChord::parse("ctrl+shift+c").unwrap(),
+            source: KeySource::Terminal,
+            action: "Copy".to_string(),
+            raw: "ctrl+shift+c".to_string(),
+            tool: "Alacritty".to_string(),
+            alt_side: Default::default(),
+        }]);
+        snap.tool_versions = vec![crate::keymap::ToolVersion {
+            tool: "Alacritty".to_string(),
+            version: "9.9.0".to_string(),
+        }];
+        let report = render_report(&cfg, &snap);
+        assert!(
+            report.contains("9.9.0"),
+            "report should surface the drift: {report}"
+        );
+    }
+
+    #[test]
+    fn report_stays_silent_when_the_drifted_tool_contributed_nothing() {
+        // A version detected for a terminal that produced no bindings must not
+        // caveat a report it had no influence on.
+        let cfg = KeybindingsConfig::default();
+        let mut snap = snapshot_with(vec![term("ctrl+tab", "next_tab")]);
+        snap.tool_versions = vec![crate::keymap::ToolVersion {
+            tool: "Alacritty".to_string(),
+            version: "9.9.0".to_string(),
+        }];
+        let report = render_report(&cfg, &snap);
+        assert!(
+            !report.contains("9.9.0"),
+            "should not warn about an uninvolved table: {report}"
+        );
     }
 
     #[test]

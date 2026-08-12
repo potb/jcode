@@ -1020,6 +1020,7 @@ rctrl - g : echo right ctrl\n\
 
         let snapshot = KeymapSnapshot {
             alt_delivery: Default::default(),
+            tool_versions: Vec::new(),
             version: 1,
             captured_at: String::new(),
             os: "macos".to_string(),

@@ -415,6 +415,7 @@ mod tests {
     fn snapshot_with(bindings: Vec<DiscoveredBinding>) -> KeymapSnapshot {
         KeymapSnapshot {
             alt_delivery: Default::default(),
+            tool_versions: Vec::new(),
             version: 1,
             captured_at: "0".to_string(),
             os: "macos".to_string(),
@@ -496,6 +497,7 @@ mod tests {
     ) -> KeymapSnapshot {
         KeymapSnapshot {
             alt_delivery: delivery,
+            tool_versions: Vec::new(),
             ..snapshot_with(bindings)
         }
     }

@@ -1158,6 +1158,7 @@ keybind = super+enter=new_window
 
         let snapshot = KeymapSnapshot {
             alt_delivery: Default::default(),
+            tool_versions: Vec::new(),
             version: 1,
             captured_at: String::new(),
             os: "linux".to_string(),
@@ -1240,6 +1241,7 @@ action = "ReceiveChar"
 
         let snapshot = KeymapSnapshot {
             alt_delivery: Default::default(),
+            tool_versions: Vec::new(),
             version: 1,
             captured_at: String::new(),
             os: "macos".to_string(),
@@ -1424,6 +1426,7 @@ action = "ReceiveChar"
 
         let snapshot = KeymapSnapshot {
             alt_delivery: Default::default(),
+            tool_versions: Vec::new(),
             version: 1,
             captured_at: String::new(),
             os: "linux".to_string(),
