@@ -22,7 +22,10 @@ pub mod terminal;
 pub use alt::AltDelivery;
 pub use chord::KeyChord;
 pub use conflicts::{Conflict, JcodeBinding, conflict_signature, detect_conflicts, jcode_bindings};
-pub use report::{alt_notice_signature, render_report, render_status_line};
+pub use report::{
+    alt_notice_signature, new_conflicts, render_new_conflict_notice, render_report,
+    render_status_line,
+};
 pub use source::{DiscoveredBinding, KeySource};
 
 use serde::{Deserialize, Serialize};
@@ -162,6 +165,42 @@ pub fn snapshot_cached_or_refresh() -> KeymapSnapshot {
         return existing;
     }
     refresh_and_save()
+}
+
+/// Parse the `[keybindings]` table out of a config file's text.
+///
+/// `KeybindingsConfig` is `#[serde(default)]`, so a missing or partial table
+/// yields the defaults, which is exactly right: an unset binding is still an
+/// active binding, and a default chord can be intercepted just as easily as an
+/// explicitly configured one. Unparseable text also falls back to defaults,
+/// matching how `Config::load` treats a broken file.
+pub fn keybindings_from_config_text(text: &str) -> jcode_config_types::KeybindingsConfig {
+    text.parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.get("keybindings").cloned())
+        .and_then(|table| table.try_into().ok())
+        .unwrap_or_default()
+}
+
+/// Warn about keybinding conflicts a config write just introduced, given the
+/// file's text before and after the write.
+///
+/// Startup detection is debounced on a conflict signature and only runs at
+/// launch, so binding an action onto an already-occupied chord goes unreported
+/// until the next start. This closes that loop at the moment the mistake is
+/// made.
+///
+/// Returns `None` when the edit left `[keybindings]` semantically unchanged, so
+/// an unrelated config write does no work and produces no noise. The machine
+/// snapshot is the cached one, so the common path does not shell out.
+pub fn new_conflict_notice_for_config_edit(before: &str, after: &str) -> Option<String> {
+    let before_keys = keybindings_from_config_text(before);
+    let after_keys = keybindings_from_config_text(after);
+    if before_keys == after_keys {
+        return None;
+    }
+    let snapshot = snapshot_cached_or_refresh();
+    render_new_conflict_notice(&before_keys, &after_keys, &snapshot)
 }
 
 fn snapshot_is_stale(snapshot: &KeymapSnapshot) -> bool {

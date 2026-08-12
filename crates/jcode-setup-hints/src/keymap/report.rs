@@ -171,6 +171,74 @@ pub fn alt_notice_signature(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) 
     })
 }
 
+/// Conflicts that exist under `after` but did not exist under `before`.
+///
+/// Startup already reports the conflicts a user's config has; the interesting
+/// event when the config is *written* is the one the write just created. So
+/// this diffs the two conflict sets and keeps only what is new, which keeps a
+/// user who edits an unrelated setting from being re-told about a conflict
+/// they already chose to live with.
+///
+/// Identity is `(jcode field, jcode chord, interceptor chord)`, matching
+/// [`super::conflicts::conflict_signature`]: rebinding a conflicting action
+/// onto a different but still-occupied chord is genuinely a new conflict and
+/// must be reported.
+pub fn new_conflicts(
+    before: &KeybindingsConfig,
+    after: &KeybindingsConfig,
+    snapshot: &KeymapSnapshot,
+) -> Vec<Conflict> {
+    let existing: std::collections::HashSet<(String, String, String)> =
+        detect_conflicts(before, snapshot)
+            .iter()
+            .map(conflict_identity)
+            .collect();
+    detect_conflicts(after, snapshot)
+        .into_iter()
+        .filter(|c| !existing.contains(&conflict_identity(c)))
+        .collect()
+}
+
+fn conflict_identity(c: &Conflict) -> (String, String, String) {
+    (
+        c.jcode.field.clone(),
+        c.jcode.chord.canonical(),
+        c.interceptor.chord.canonical(),
+    )
+}
+
+/// Report for a config write that introduced keybinding conflicts, or `None`
+/// when the edit created none.
+///
+/// Deliberately quiet about pre-existing conflicts and about Alt delivery: the
+/// startup hint owns those, and repeating them on every unrelated config write
+/// is how a useful warning becomes noise that gets ignored.
+pub fn render_new_conflict_notice(
+    before: &KeybindingsConfig,
+    after: &KeybindingsConfig,
+    snapshot: &KeymapSnapshot,
+) -> Option<String> {
+    let conflicts = new_conflicts(before, after, snapshot);
+    if conflicts.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "WARNING: this config edit introduced {} keybinding conflict{}:\n\n",
+        conflicts.len(),
+        if conflicts.len() == 1 { "" } else { "s" }
+    );
+    for c in &conflicts {
+        out.push_str(&render_conflict_block(c));
+        out.push('\n');
+    }
+    out.push_str(
+        "These keys may be captured by your terminal, macOS, or another app before jcode\n\
+         sees them, so the binding you just set may do nothing. Pick a different chord,\n\
+         or change the conflicting shortcut in the other app. Run /keys for the full report.",
+    );
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +357,104 @@ mod tests {
         assert!(alt_warning_applies(AltDelivery::Never, true));
         assert!(!alt_warning_applies(AltDelivery::Delivered, true));
         assert!(!alt_warning_applies(AltDelivery::Unknown, true));
+    }
+
+    #[test]
+    fn an_edit_onto_an_occupied_chord_is_reported_as_new() {
+        // The whole point of gap 6: the user binds an action to a chord the
+        // terminal already owns, and finds out now rather than at next launch.
+        let snap = snapshot_with(vec![term("ctrl+tab", "next_tab")]);
+        let before = KeybindingsConfig {
+            model_switch_next: "ctrl+shift+m".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        let after = KeybindingsConfig {
+            model_switch_next: "ctrl+tab".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        let notice = render_new_conflict_notice(&before, &after, &snap)
+            .expect("binding onto an occupied chord must be reported");
+        assert!(notice.contains("keybindings.model_switch_next"), "{notice}");
+        assert!(notice.contains("Ctrl+Tab"), "{notice}");
+        assert!(notice.contains("next_tab"), "{notice}");
+    }
+
+    #[test]
+    fn a_preexisting_conflict_is_not_re_reported() {
+        // Startup already told the user about this one. Repeating it on an
+        // unrelated keybinding edit is exactly the noise that trains people to
+        // ignore the warning.
+        let snap = snapshot_with(vec![term("ctrl+tab", "next_tab")]);
+        let before = KeybindingsConfig::default();
+        let after = KeybindingsConfig {
+            scroll_up: "ctrl+y".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        assert!(!detect_conflicts(&before, &snap).is_empty());
+        assert!(
+            render_new_conflict_notice(&before, &after, &snap).is_none(),
+            "only conflicts introduced by this edit should be reported"
+        );
+    }
+
+    #[test]
+    fn resolving_a_conflict_reports_nothing() {
+        let snap = snapshot_with(vec![term("ctrl+tab", "next_tab")]);
+        let before = KeybindingsConfig::default();
+        let after = KeybindingsConfig {
+            model_switch_next: "ctrl+shift+m".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        assert!(render_new_conflict_notice(&before, &after, &snap).is_none());
+    }
+
+    #[test]
+    fn moving_a_conflict_onto_a_different_occupied_chord_is_new() {
+        // The conflicting field is the same, so a field-only identity would
+        // treat this as "already known" and stay silent, even though the user
+        // just jumped out of one frying pan into another.
+        let snap = snapshot_with(vec![term("ctrl+tab", "next_tab"), term("cmd+t", "new_tab")]);
+        let before = KeybindingsConfig::default();
+        let after = KeybindingsConfig {
+            model_switch_next: "cmd+t".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        let notice = render_new_conflict_notice(&before, &after, &snap)
+            .expect("a move onto a different occupied chord is a new conflict");
+        assert!(notice.contains("new_tab"), "{notice}");
+    }
+
+    #[test]
+    fn config_edit_entry_point_ignores_non_keybinding_edits() {
+        // Must not even consult the machine snapshot for an unrelated setting.
+        assert!(
+            crate::keymap::new_conflict_notice_for_config_edit(
+                "[ui]\ntheme = \"dark\"\n",
+                "[ui]\ntheme = \"light\"\n",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn config_text_keybindings_fall_back_to_defaults() {
+        let parsed = crate::keymap::keybindings_from_config_text("[ui]\ntheme = \"dark\"\n");
+        assert_eq!(parsed, KeybindingsConfig::default());
+
+        // A partial table keeps defaults for everything it does not mention,
+        // so an unmentioned binding is still checked for conflicts.
+        let partial =
+            crate::keymap::keybindings_from_config_text("[keybindings]\nscroll_up = \"ctrl+y\"\n");
+        assert_eq!(partial.scroll_up, "ctrl+y");
+        assert_eq!(
+            partial.model_switch_next,
+            KeybindingsConfig::default().model_switch_next
+        );
+
+        // Broken TOML must not panic; defaults match Config::load's behaviour.
+        assert_eq!(
+            crate::keymap::keybindings_from_config_text("[keybindings"),
+            KeybindingsConfig::default()
+        );
     }
 }

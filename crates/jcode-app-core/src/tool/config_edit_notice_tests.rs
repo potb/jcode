@@ -240,3 +240,77 @@ async fn apply_patch_reports_config_changes() {
 
     restore_jcode_home(prev);
 }
+
+/// Write a keymap snapshot into the temp jcode home claiming the terminal owns
+/// `ctrl+tab`, so conflict detection has something deterministic to find
+/// without depending on whatever the real machine happens to be running.
+fn plant_keymap_snapshot_owning_ctrl_tab() {
+    let path = jcode_setup_hints::keymap::snapshot_path().expect("snapshot path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let snapshot = serde_json::json!({
+        "version": 2,
+        "captured_at": now.to_string(),
+        "os": "macos",
+        "terminal": "Ghostty",
+        "terminal_version": "1.3.1",
+        "alt_delivery": "unknown",
+        "bindings": [{
+            "chord": { "ctrl": true, "alt": false, "shift": false, "cmd": false, "key": "tab" },
+            "source": "terminal",
+            "action": "next_tab",
+            "raw": "ctrl+tab=next_tab",
+            "tool": ""
+        }]
+    });
+    std::fs::write(&path, serde_json::to_string(&snapshot).expect("serialize")).expect("write");
+}
+
+#[test]
+fn binding_onto_a_chord_the_terminal_owns_warns_in_the_tool_output() {
+    let _guard = crate::storage::lock_test_env();
+    let (_dir, prev) = temp_jcode_home();
+    plant_keymap_snapshot_owning_ctrl_tab();
+
+    let path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+    let before = "[keybindings]\nmodel_switch_next = \"ctrl+shift+m\"\n";
+    let after = "[keybindings]\nmodel_switch_next = \"ctrl+tab\"\n";
+    std::fs::write(&path, after).expect("write");
+
+    let notice = config_edit_notice(&path, before, after).expect("report expected");
+
+    // The change report still comes first; the conflict warning is additive.
+    assert!(notice.contains("keybindings.model_switch_next"), "{notice}");
+    assert!(
+        notice.contains("introduced 1 keybinding conflict"),
+        "the write must be told it just created a conflict: {notice}"
+    );
+    assert!(notice.contains("next_tab"), "{notice}");
+
+    restore_jcode_home(prev);
+}
+
+#[test]
+fn a_clean_keybinding_edit_adds_no_conflict_warning() {
+    let _guard = crate::storage::lock_test_env();
+    let (_dir, prev) = temp_jcode_home();
+    plant_keymap_snapshot_owning_ctrl_tab();
+
+    let path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+    let before = "[keybindings]\nscroll_up = \"ctrl+k\"\n";
+    let after = "[keybindings]\nscroll_up = \"ctrl+y\"\n";
+    std::fs::write(&path, after).expect("write");
+
+    let notice = config_edit_notice(&path, before, after).expect("report expected");
+    assert!(
+        !notice.contains("keybinding conflict"),
+        "an unoccupied chord must not be warned about: {notice}"
+    );
+
+    restore_jcode_home(prev);
+}

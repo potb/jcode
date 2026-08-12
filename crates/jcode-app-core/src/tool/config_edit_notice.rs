@@ -58,7 +58,26 @@ pub fn config_edit_notice(path: &Path, before: &str, after: &str) -> Option<Stri
     }
 
     let summary = crate::config::change_report::summarize_toml_change(before, after)?;
-    Some(format!("\n\n{summary}"))
+    let mut out = format!("\n\n{summary}");
+    if let Some(conflicts) = keybinding_conflict_notice(before, after) {
+        out.push_str("\n\n");
+        out.push_str(&conflicts);
+    }
+    Some(out)
+}
+
+/// Warn about keybinding conflicts this edit just created.
+///
+/// Startup detection is debounced on a conflict signature and only runs at
+/// launch, so binding an action onto an already-occupied chord goes unreported
+/// until the next start. Checking here closes that loop at the moment the
+/// mistake is made.
+///
+/// Skipped entirely when the edit did not touch `[keybindings]`, so an
+/// unrelated config write pays no cost and produces no noise. The machine
+/// snapshot is the cached one, so this does not shell out on the common path.
+fn keybinding_conflict_notice(before: &str, after: &str) -> Option<String> {
+    jcode_setup_hints::keymap::new_conflict_notice_for_config_edit(before, after)
 }
 
 /// Append [`config_edit_notice`] to a tool output body when applicable.
