@@ -17,6 +17,10 @@
 //!
 //! Whether the terminal delivers the Option/Alt modifier *at all* is a separate
 //! question, answered by the sibling [`super::alt`] module.
+//!
+//! WezTerm sits with Ghostty rather than Alacritty: `wezterm show-keys` prints
+//! the effective key tables (defaults merged with the user's Lua config), so we
+//! ask it instead of encoding a table that would drift.
 
 use super::chord::KeyChord;
 use super::source::{DiscoveredBinding, KeySource};
@@ -426,9 +430,217 @@ pub fn read_alacritty_keybinds() -> Vec<DiscoveredBinding> {
     apply_alacritty_user_config(alacritty_unix_default_bindings())
 }
 
+// ---------------------------------------------------------------------------
+// WezTerm
+// ---------------------------------------------------------------------------
+
+/// Translate a WezTerm key name onto jcode's vocabulary.
+///
+/// WezTerm accepts `phys:` (physical position) and `mapped:` (post-layout)
+/// prefixes on key names; both denote the same physical chord for our purposes,
+/// so the prefix is stripped. Its arrow spellings (`UpArrow`) and `Escape` are
+/// mapped onto the names [`KeyChord::normalize_key`] already understands.
+fn wezterm_key_name(raw: &str) -> String {
+    let key = raw
+        .strip_prefix("phys:")
+        .or_else(|| raw.strip_prefix("mapped:"))
+        .unwrap_or(raw);
+    match key.to_ascii_lowercase().as_str() {
+        "uparrow" => "up".to_string(),
+        "downarrow" => "down".to_string(),
+        "leftarrow" => "left".to_string(),
+        "rightarrow" => "right".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Parse one binding row of `wezterm show-keys` output, e.g.
+///
+/// ```text
+///     SHIFT | CTRL         Tab              ->   ActivateTabRelative(-1)
+/// ```
+///
+/// The row is `[modifiers] key -> action`, where modifiers are `|`-separated
+/// and may be absent. Returns `None` for rows that are not single-chord
+/// bindings.
+fn parse_wezterm_row(line: &str) -> Option<DiscoveredBinding> {
+    let (trigger, action) = line.split_once("->")?;
+    let action = action.trim();
+    if action.is_empty() {
+        return None;
+    }
+
+    let mut cmd = false;
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut key: Option<String> = None;
+
+    for token in trigger.split_whitespace() {
+        if token == "|" {
+            continue;
+        }
+        match token.to_ascii_uppercase().as_str() {
+            "SUPER" | "CMD" | "WIN" => cmd = true,
+            "CTRL" => ctrl = true,
+            "ALT" | "OPT" => alt = true,
+            "SHIFT" => shift = true,
+            // A LEADER prefix makes this a multi-key sequence, which we do not
+            // model: the chord alone never reaches jcode as a single press.
+            "LEADER" => return None,
+            _ => key = Some(token.to_string()),
+        }
+    }
+
+    let key = key?;
+    Some(DiscoveredBinding {
+        chord: KeyChord::new(cmd, ctrl, alt, shift, &wezterm_key_name(&key)),
+        source: KeySource::Terminal,
+        action: action.to_string(),
+        raw: line.trim().to_string(),
+        tool: "WezTerm".to_string(),
+    })
+}
+
+/// Parse the output of `wezterm show-keys`.
+///
+/// Only the "Default key table" section is read. The `copy_mode` and
+/// `search_mode` tables apply solely while WezTerm is in those modes, which a
+/// running TUI session is not, so including them would manufacture conflicts
+/// that can never fire — the same rationale that excludes Alacritty's Vi-mode
+/// bindings. The `Mouse` section is not key input at all.
+pub fn parse_wezterm_keys(output: &str) -> Vec<DiscoveredBinding> {
+    let mut bindings = Vec::new();
+    let mut in_default_table = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.chars().all(|c| c == '-') {
+            continue;
+        }
+        // Section headers are unindented; binding rows are always indented.
+        if !line.starts_with([' ', '\t']) {
+            in_default_table = trimmed.eq_ignore_ascii_case("Default key table");
+            continue;
+        }
+        if !in_default_table {
+            continue;
+        }
+        if let Some(binding) = parse_wezterm_row(line) {
+            bindings.push(binding);
+        }
+    }
+
+    bindings
+}
+
+/// Effective WezTerm bindings for this machine, via `wezterm show-keys`, which
+/// merges the compiled-in defaults with the user's Lua config. Returns nothing
+/// when WezTerm is not the active terminal, so an unused terminal never
+/// generates conflict noise.
+///
+/// Asking the binary beats encoding a table: WezTerm's default key set is large
+/// and configured in Lua, which we could not evaluate anyway.
+pub fn read_wezterm_keybinds() -> Vec<DiscoveredBinding> {
+    use std::process::Command;
+
+    if !std::env::var("TERM_PROGRAM").is_ok_and(|v| v.eq_ignore_ascii_case("WezTerm")) {
+        return Vec::new();
+    }
+    let Ok(output) = Command::new("wezterm").arg("show-keys").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() || output.stdout.is_empty() {
+        return Vec::new();
+    }
+    parse_wezterm_keys(&String::from_utf8_lossy(&output.stdout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trimmed but structurally faithful `wezterm show-keys` output.
+    const WEZTERM_SAMPLE: &str = "\
+Default key table
+-----------------
+\tCTRL                 Tab                ->   ActivateTabRelative(1)
+\tSHIFT | CTRL         Tab                ->   ActivateTabRelative(-1)
+\tSUPER                c                  ->   CopyTo(Clipboard)
+\t                     F11                ->   ToggleFullScreen
+\tSHIFT | CTRL         UpArrow            ->   ScrollByLine(-1)
+\tLEADER | CTRL        a                  ->   SendKey
+
+Key Table: copy_mode
+--------------------
+\t                     Tab                ->   CopyMode(MoveForwardWord)
+\tCTRL                 q                  ->   CopyMode(Close)
+
+Mouse
+-----
+\tSHIFT                Down { streak: 1 }  ->   ExtendSelectionToMouseCursor(None)
+";
+
+    fn wezterm_chords(text: &str) -> Vec<String> {
+        parse_wezterm_keys(text)
+            .iter()
+            .map(|b| b.chord.canonical())
+            .collect()
+    }
+
+    #[test]
+    fn parses_wezterm_default_table() {
+        let chords = wezterm_chords(WEZTERM_SAMPLE);
+        assert!(chords.contains(&"ctrl+tab".to_string()), "{chords:?}");
+        assert!(chords.contains(&"ctrl+shift+tab".to_string()), "{chords:?}");
+        assert!(chords.contains(&"cmd+c".to_string()), "{chords:?}");
+        // A binding with no modifiers at all is still a real interception.
+        assert!(chords.contains(&"f11".to_string()), "{chords:?}");
+    }
+
+    #[test]
+    fn wezterm_arrow_names_are_normalized() {
+        let chords = wezterm_chords(WEZTERM_SAMPLE);
+        assert!(chords.contains(&"ctrl+shift+up".to_string()), "{chords:?}");
+    }
+
+    #[test]
+    fn wezterm_skips_copy_and_search_mode_tables() {
+        // `CTRL q` only exists in the copy_mode table, which cannot fire during
+        // a normal TUI session; reporting it would be a phantom conflict.
+        let chords = wezterm_chords(WEZTERM_SAMPLE);
+        assert!(!chords.contains(&"ctrl+q".to_string()), "{chords:?}");
+    }
+
+    #[test]
+    fn wezterm_skips_leader_sequences() {
+        // LEADER makes this a two-step sequence, not a single chord.
+        let chords = wezterm_chords(WEZTERM_SAMPLE);
+        assert!(!chords.contains(&"ctrl+a".to_string()), "{chords:?}");
+    }
+
+    #[test]
+    fn wezterm_skips_mouse_section() {
+        assert!(
+            parse_wezterm_keys(WEZTERM_SAMPLE)
+                .iter()
+                .all(|b| !b.raw.contains("streak")),
+            "mouse rows must not become key bindings"
+        );
+    }
+
+    #[test]
+    fn wezterm_key_prefixes_are_stripped() {
+        assert_eq!(wezterm_key_name("phys:Space"), "space");
+        assert_eq!(wezterm_key_name("mapped:k"), "k");
+    }
+
+    #[test]
+    fn wezterm_bindings_are_labelled() {
+        let binds = parse_wezterm_keys(WEZTERM_SAMPLE);
+        assert!(binds.iter().all(|b| b.tool == "WezTerm"));
+        assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+    }
 
     #[test]
     fn parses_listed_keybind() {
