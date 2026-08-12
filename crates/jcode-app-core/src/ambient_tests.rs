@@ -354,6 +354,72 @@ fn test_build_ambient_system_prompt_minimal() {
     assert!(prompt.contains("context.why_permission_needed"));
 }
 
+/// The whole point of issue #22 direction 4: the ambient prompt is installed
+/// through `system_prompt_override`, which drops the base prompt, so if this
+/// section is missing a cycle is judged by gates it was never told about.
+#[test]
+fn test_build_ambient_system_prompt_includes_todo_guidance() {
+    let state = AmbientState::default();
+    let queue = vec![];
+    let health = MemoryGraphHealth::default();
+    let sessions = vec![];
+    let feedback: Vec<String> = vec![];
+    let budget = ResourceBudget {
+        provider: "anthropic-oauth".into(),
+        tokens_remaining_desc: "unknown".into(),
+        window_resets_desc: "unknown".into(),
+        user_usage_rate_desc: "0 tokens/min".into(),
+        cycle_budget_desc: "stay under 50k tokens".into(),
+    };
+
+    let prompt =
+        build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
+
+    assert!(prompt.contains("## Todo Discipline"));
+    assert!(
+        prompt.contains(crate::ambient::gates::AMBIENT_TODO_GUIDANCE),
+        "the guidance must be the shared constant, not a drifting copy"
+    );
+    // Each gate the runner can raise should be recognisable in the guidance,
+    // or the cycle cannot act on the follow-up it eventually receives.
+    assert!(prompt.contains("completion_confidence"));
+    assert!(prompt.contains("feedback loop"));
+
+    // Markdown headings must stay separated from the section that follows, or
+    // the next heading is swallowed into this one's last bullet.
+    assert!(prompt.contains("\n\n## Messaging Check-ins"));
+}
+
+/// The pass thresholds are private policy. Naming them here would tell a cycle
+/// which value clears the bar, which is an invitation to write that value
+/// instead of doing the work it stands for.
+#[test]
+fn test_ambient_todo_guidance_does_not_leak_gate_thresholds() {
+    let guidance = crate::ambient::gates::AMBIENT_TODO_GUIDANCE.to_lowercase();
+    // Compare whole tokens, not substrings: the passing value `verified` is a
+    // substring of the ordinary English word "unverified", and matching that
+    // would fail on prose that names no threshold at all.
+    let tokens: Vec<&str> = guidance
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    for threshold in [
+        "workflow_validated",
+        "outcome_delivered",
+        "necessary_followthrough",
+        "acceptance_aligned",
+        "edge_and_integration_paths",
+        "validated",
+        "verified",
+    ] {
+        assert!(
+            !tokens.contains(&threshold),
+            "guidance names the passing value {threshold:?}, which turns the gate into a form to fill in"
+        );
+    }
+}
+
 #[test]
 fn test_build_ambient_system_prompt_with_data() {
     let state = AmbientState {
@@ -1301,9 +1367,7 @@ fn ambient_prompt_tells_the_agent_to_walk_down_the_priority_list() {
 
     // Garden-only cycles are not supposed to go hunting for code work, so the
     // walk instruction must not contradict a disabled proactive_work.
-    let garden_only = render(
-        "proactive_work = false\nproject_priority = [\"/home/potb/jcode\"]\n",
-    );
+    let garden_only = render("proactive_work = false\nproject_priority = [\"/home/potb/jcode\"]\n");
     assert!(
         !garden_only.contains("Do Not Stop At The First Quiet Project"),
         "a garden-only cycle must not be told to hunt for work across projects"
@@ -1623,7 +1687,6 @@ fn per_project_instructions_can_be_declared_in_config() {
     crate::config::invalidate_config_cache();
 }
 
-
 /// One global `active_windows` forces the strictest project's hours onto every
 /// other project, costing every cycle in between. Windows belong per project.
 #[test]
@@ -1732,8 +1795,6 @@ fn per_project_active_windows_gate_only_their_own_project() {
     }
     crate::config::invalidate_config_cache();
 }
-
-
 
 /// A session started in a subdirectory belongs to its project, so its
 /// instructions must render under the project root. Observed live: a session in

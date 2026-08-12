@@ -490,35 +490,36 @@ fn configured_projects() -> Vec<ResolvedProject> {
     let ambient = &crate::config::config().ambient;
     let mut out: Vec<ResolvedProject> = Vec::new();
 
-    let mut push = |path: &str, pr_repo: &str, instructions: String, active_windows: Vec<String>| {
-        let path = path.trim();
-        if path.is_empty() {
-            return;
-        }
-        let path = expand_project_path(path);
-        let pr_repo = pr_repo.trim().to_string();
-        match out.iter_mut().find(|p| p.path == path) {
-            // First mention wins the rank; a PR target from a later, less
-            // specific source still fills an empty one.
-            Some(existing) => {
-                if existing.pr_repo.is_empty() {
-                    existing.pr_repo = pr_repo;
-                }
-                if existing.instructions.is_empty() {
-                    existing.instructions = instructions;
-                }
-                if existing.active_windows.is_empty() {
-                    existing.active_windows = active_windows;
-                }
+    let mut push =
+        |path: &str, pr_repo: &str, instructions: String, active_windows: Vec<String>| {
+            let path = path.trim();
+            if path.is_empty() {
+                return;
             }
-            None => out.push(ResolvedProject {
-                path,
-                pr_repo,
-                instructions,
-                active_windows,
-            }),
-        }
-    };
+            let path = expand_project_path(path);
+            let pr_repo = pr_repo.trim().to_string();
+            match out.iter_mut().find(|p| p.path == path) {
+                // First mention wins the rank; a PR target from a later, less
+                // specific source still fills an empty one.
+                Some(existing) => {
+                    if existing.pr_repo.is_empty() {
+                        existing.pr_repo = pr_repo;
+                    }
+                    if existing.instructions.is_empty() {
+                        existing.instructions = instructions;
+                    }
+                    if existing.active_windows.is_empty() {
+                        existing.active_windows = active_windows;
+                    }
+                }
+                None => out.push(ResolvedProject {
+                    path,
+                    pr_repo,
+                    instructions,
+                    active_windows,
+                }),
+            }
+        };
 
     for project in &ambient.projects {
         push(
@@ -543,9 +544,7 @@ fn configured_projects() -> Vec<ResolvedProject> {
         && let Some(repo_name) = legacy.rsplit('/').next()
     {
         for project in out.iter_mut() {
-            if project.pr_repo.is_empty()
-                && project.path.rsplit('/').next() == Some(repo_name)
-            {
+            if project.pr_repo.is_empty() && project.path.rsplit('/').next() == Some(repo_name) {
                 project.pr_repo = legacy.to_string();
             }
         }
@@ -556,10 +555,7 @@ fn configured_projects() -> Vec<ResolvedProject> {
 
 /// Just the project paths, highest priority first.
 fn configured_project_priority() -> Vec<String> {
-    workable_projects()
-        .into_iter()
-        .map(|p| p.path)
-        .collect()
+    workable_projects().into_iter().map(|p| p.path).collect()
 }
 
 /// Standing instructions declared for a project in config: the inline
@@ -584,7 +580,10 @@ fn configured_project_instructions(project: &crate::config::AmbientProject) -> S
             // `instructions_file = "jcode.md"` keeps working after the file is
             // moved out of the slug-named layout.
             match crate::storage::jcode_dir() {
-                Ok(dir) => dir.join("ambient").join(AMBIENT_INSTRUCTIONS_DIR).join(file),
+                Ok(dir) => dir
+                    .join("ambient")
+                    .join(AMBIENT_INSTRUCTIONS_DIR)
+                    .join(file),
                 Err(_) => std::path::PathBuf::from(file),
             }
         };
@@ -1046,8 +1045,17 @@ pub fn build_ambient_system_prompt(
          a missed notification costs one cycle of delay, whereas noise \
          trains them to ignore the channel and costs every future alert.\n\
          Permission requests, failures and code changes always notify on \
-         their own, so you never need \"notable\" to reach the user for those.\n\n\
-         ## Messaging Check-ins\n\n\
+         their own, so you never need \"notable\" to reach the user for those.\n\n",
+    );
+
+    // The ambient prompt is installed via `system_prompt_override`, which
+    // replaces the base prompt wholesale, so the base todo guidance never
+    // reaches a cycle that is nonetheless judged by the same gates.
+    prompt.push_str(crate::ambient::gates::AMBIENT_TODO_GUIDANCE);
+    prompt.push('\n');
+
+    prompt.push_str(
+        "## Messaging Check-ins\n\n\
          You have a `send_message` tool. Use it to keep the user informed \
          about what you're doing. Send a brief message when you start a cycle \
          and when you finish significant work. Keep messages short and useful — \
