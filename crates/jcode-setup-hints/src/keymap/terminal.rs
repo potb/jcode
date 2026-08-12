@@ -222,10 +222,44 @@ const ALACRITTY_MACOS_DEFAULTS: &[(&str, &str)] = &[
     ("cmd+9", "SelectLastTab"),
 ];
 
-/// The documented macOS default bindings, as [`DiscoveredBinding`]s.
-#[cfg(any(test, target_os = "macos"))]
-pub fn alacritty_macos_default_bindings() -> Vec<DiscoveredBinding> {
-    ALACRITTY_MACOS_DEFAULTS
+/// Alacritty's compiled-in bindings that apply on *every* platform, from the
+/// "KEY BINDINGS" table of `alacritty-bindings(5)`.
+///
+/// `Ctrl+L` is the interesting one for jcode: it is bound outside Vi/Search
+/// mode, so it is live in a normal TUI session on macOS as well as on Linux.
+/// Mode-specific (Vi/Search) entries are excluded for the same reason as in
+/// the macOS table.
+const ALACRITTY_COMMON_DEFAULTS: &[(&str, &str)] = &[
+    ("ctrl+l", "ClearLogNotice"),
+    ("shift+pageup", "ScrollPageUp"),
+    ("shift+pagedown", "ScrollPageDown"),
+    ("shift+home", "ScrollToTop"),
+    ("shift+end", "ScrollToBottom"),
+];
+
+/// Alacritty's compiled-in bindings for Windows, Linux and BSD, from the
+/// "Windows, Linux, and BSD only" table of `alacritty-bindings(5)`.
+///
+/// Without this table a Linux user got *no* Alacritty coverage at all: the
+/// scanner only knew the Cmd-based macOS defaults, so a clean conflict report
+/// on Linux was not evidence of anything. `Ctrl+Shift+B/F` in particular
+/// shadow chords in the same way `Cmd+B/F` do on macOS.
+#[cfg(any(test, not(target_os = "macos")))]
+const ALACRITTY_UNIX_DEFAULTS: &[(&str, &str)] = &[
+    ("ctrl+shift+v", "Paste"),
+    ("ctrl+shift+c", "Copy"),
+    ("ctrl+shift+f", "SearchForward"),
+    ("ctrl+shift+b", "SearchBackward"),
+    ("shift+insert", "PasteSelection"),
+    ("ctrl+0", "ResetFontSize"),
+    ("ctrl+=", "IncreaseFontSize"),
+    ("ctrl++", "IncreaseFontSize"),
+    ("ctrl+-", "DecreaseFontSize"),
+];
+
+/// Build [`DiscoveredBinding`]s from a `(chord, action)` table.
+fn alacritty_table_bindings(table: &[(&str, &str)]) -> Vec<DiscoveredBinding> {
+    table
         .iter()
         .filter_map(|(chord, action)| {
             Some(DiscoveredBinding {
@@ -237,6 +271,58 @@ pub fn alacritty_macos_default_bindings() -> Vec<DiscoveredBinding> {
             })
         })
         .collect()
+}
+
+/// The documented macOS default bindings, as [`DiscoveredBinding`]s.
+#[cfg(any(test, target_os = "macos"))]
+pub fn alacritty_macos_default_bindings() -> Vec<DiscoveredBinding> {
+    let mut binds = alacritty_table_bindings(ALACRITTY_MACOS_DEFAULTS);
+    binds.extend(alacritty_table_bindings(ALACRITTY_COMMON_DEFAULTS));
+    binds
+}
+
+/// The documented Windows/Linux/BSD default bindings, as
+/// [`DiscoveredBinding`]s.
+#[cfg(any(test, not(target_os = "macos")))]
+pub fn alacritty_unix_default_bindings() -> Vec<DiscoveredBinding> {
+    let mut binds = alacritty_table_bindings(ALACRITTY_UNIX_DEFAULTS);
+    binds.extend(alacritty_table_bindings(ALACRITTY_COMMON_DEFAULTS));
+    binds
+}
+
+/// Alacritty's config search order, relative to `$HOME`. `$XDG_CONFIG_HOME` is
+/// handled separately by the caller since it is an absolute path.
+const ALACRITTY_CONFIG_CANDIDATES: [&str; 3] = [
+    ".config/alacritty/alacritty.toml",
+    ".alacritty.toml",
+    ".config/alacritty.toml",
+];
+
+/// Layer the user's `alacritty.toml` (first match in the documented search
+/// order) on top of `defaults`.
+fn apply_alacritty_user_config(mut effective: Vec<DiscoveredBinding>) -> Vec<DiscoveredBinding> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let xdg = std::path::PathBuf::from(xdg);
+        paths.push(xdg.join("alacritty/alacritty.toml"));
+        paths.push(xdg.join("alacritty.toml"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.extend(ALACRITTY_CONFIG_CANDIDATES.iter().map(|rel| home.join(rel)));
+    }
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let (user, unbound) = parse_alacritty_bindings(&text);
+        effective.retain(|b| !unbound.contains(&b.chord));
+        for binding in user {
+            effective.retain(|b| b.chord != binding.chord);
+            effective.push(binding);
+        }
+        break;
+    }
+    effective
 }
 
 /// Parse the `[[keyboard.bindings]]` array of an `alacritty.toml`.
@@ -320,39 +406,15 @@ pub fn read_alacritty_keybinds() -> Vec<DiscoveredBinding> {
     if std::env::var_os("ALACRITTY_WINDOW_ID").is_none() {
         return Vec::new();
     }
-
-    let mut effective = alacritty_macos_default_bindings();
-
-    let Some(home) = dirs::home_dir() else {
-        return effective;
-    };
-    // Alacritty's documented config search order.
-    const CANDIDATES: [&str; 3] = [
-        ".config/alacritty/alacritty.toml",
-        ".alacritty.toml",
-        ".config/alacritty.toml",
-    ];
-    for rel in CANDIDATES {
-        let path = home.join(rel);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let (user, unbound) = parse_alacritty_bindings(&text);
-        effective.retain(|b| !unbound.contains(&b.chord));
-        for binding in user {
-            effective.retain(|b| b.chord != binding.chord);
-            effective.push(binding);
-        }
-        break;
-    }
-    effective
+    apply_alacritty_user_config(alacritty_macos_default_bindings())
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn read_alacritty_keybinds() -> Vec<DiscoveredBinding> {
-    // The default table encoded here is macOS-specific (Cmd-based). Other
-    // platforms use Ctrl+Shift chords that jcode does not bind by default.
-    Vec::new()
+    if std::env::var_os("ALACRITTY_WINDOW_ID").is_none() {
+        return Vec::new();
+    }
+    apply_alacritty_user_config(alacritty_unix_default_bindings())
 }
 
 #[cfg(test)]
@@ -442,6 +504,93 @@ keybind = super+enter=new_window
         );
         assert!(binds.iter().all(|b| b.tool == "Alacritty"));
         assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+    }
+
+    #[test]
+    fn alacritty_unix_defaults_cover_the_ctrl_shift_table() {
+        // Before this table existed, a Linux user got zero Alacritty bindings,
+        // so a "no conflicts" report there meant nothing.
+        let binds = alacritty_unix_default_bindings();
+        let find = |c: &str| binds.iter().find(|b| b.chord.canonical() == c);
+
+        assert_eq!(
+            find("ctrl+shift+b").map(|b| b.action.as_str()),
+            Some("SearchBackward")
+        );
+        assert_eq!(
+            find("ctrl+shift+f").map(|b| b.action.as_str()),
+            Some("SearchForward")
+        );
+        assert_eq!(
+            find("ctrl+shift+c").map(|b| b.action.as_str()),
+            Some("Copy")
+        );
+        assert_eq!(
+            find("ctrl+shift+v").map(|b| b.action.as_str()),
+            Some("Paste")
+        );
+        assert_eq!(
+            find("shift+insert").map(|b| b.action.as_str()),
+            Some("PasteSelection")
+        );
+        assert_eq!(
+            find("ctrl+0").map(|b| b.action.as_str()),
+            Some("ResetFontSize")
+        );
+        assert!(binds.iter().all(|b| b.tool == "Alacritty"));
+        assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+        // The Cmd-based macOS table must NOT leak onto other platforms.
+        assert!(
+            binds
+                .iter()
+                .all(|b| !b.chord.canonical().starts_with("cmd+"))
+        );
+    }
+
+    #[test]
+    fn alacritty_cross_platform_defaults_are_in_both_tables() {
+        // `ctrl+l` is bound outside Vi/Search mode on every platform, so it is
+        // live in a normal TUI session and belongs in both tables.
+        for binds in [
+            alacritty_macos_default_bindings(),
+            alacritty_unix_default_bindings(),
+        ] {
+            let find = |c: &str| binds.iter().find(|b| b.chord.canonical() == c);
+            assert_eq!(
+                find("ctrl+l").map(|b| b.action.as_str()),
+                Some("ClearLogNotice")
+            );
+            assert_eq!(
+                find("shift+pageup").map(|b| b.action.as_str()),
+                Some("ScrollPageUp")
+            );
+        }
+    }
+
+    #[test]
+    fn jcode_default_scroll_bookmark_survives_but_ctrl_shift_b_conflicts_on_linux() {
+        use crate::keymap::{KeymapSnapshot, detect_conflicts};
+        use jcode_config_types::KeybindingsConfig;
+
+        let snapshot = KeymapSnapshot {
+            version: 1,
+            captured_at: String::new(),
+            os: "linux".to_string(),
+            terminal: "Alacritty".to_string(),
+            terminal_version: String::new(),
+            bindings: alacritty_unix_default_bindings(),
+        };
+        let cfg = KeybindingsConfig {
+            open_resume: "ctrl+shift+b".to_string(),
+            ..Default::default()
+        };
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.open_resume"),
+            "expected ctrl+shift+b to conflict with Alacritty SearchBackward, got {conflicts:?}"
+        );
     }
 
     #[test]
