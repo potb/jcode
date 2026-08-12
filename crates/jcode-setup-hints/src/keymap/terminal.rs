@@ -1102,6 +1102,178 @@ pub fn read_apple_terminal_keybinds() -> Vec<DiscoveredBinding> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// iTerm2
+// ---------------------------------------------------------------------------
+
+/// `NSEventModifierFlagNumericPad`. iTerm2 keeps this bit in the mask it
+/// stores, and `KeyChord` cannot distinguish keypad `1` from the main-row `1`,
+/// so a chord carrying it is skipped rather than reported against the wrong
+/// key.
+const NS_NUMERIC_PAD: u64 = 0x0020_0000;
+
+/// Parse one `Key Mappings` key, e.g. `"0xf702-0x120000"` (Ctrl+Shift+Left).
+///
+/// The format is `<character>-<modifier mask>`, both hex, where the character
+/// is the `charactersIgnoringModifiers` code point (so non-printable keys are
+/// the AppKit private-use constants, exactly as in Terminal.app) and the mask
+/// is a raw `NSEventModifierFlags` value — the same encoding the macOS system
+/// decoder and Rectangle already use, so the flag constants are shared. iTerm2
+/// 3.5 appends a third `-<keycode>` component, which is ignored: the character
+/// already identifies the key, and the extra field only disambiguates layouts.
+///
+/// Returns `None` for anything that is not a usable, representable chord:
+///
+/// * **no modifiers at all** — iTerm2 lets you map a bare key, which is not an
+///   interception of a *chord*, and reporting it would manufacture conflicts on
+///   unmodified keys;
+/// * a chord carrying **`fn`**, skipped whole rather than having the flag
+///   dropped, which would make `fn+f1` compare equal to a plain `f1`;
+/// * a **numeric-keypad** chord, for the reason on [`NS_NUMERIC_PAD`];
+/// * an unnamed private-use code point, which would render as an unreadable
+///   glyph.
+fn parse_iterm2_key(spec: &str) -> Option<KeyChord> {
+    let mut parts = spec.split('-');
+    let code = parse_hex_u32(parts.next()?)?;
+    let mask = u64::from(parse_hex_u32(parts.next()?)?);
+
+    use super::macos_hotkeys::{NS_COMMAND, NS_CONTROL, NS_FUNCTION, NS_OPTION, NS_SHIFT};
+    if mask & NS_FUNCTION != 0 || mask & NS_NUMERIC_PAD != 0 {
+        return None;
+    }
+    let cmd = mask & NS_COMMAND != 0;
+    let ctrl = mask & NS_CONTROL != 0;
+    let alt = mask & NS_OPTION != 0;
+    let shift = mask & NS_SHIFT != 0;
+    if !(cmd || ctrl || alt || shift) {
+        return None;
+    }
+
+    let ch = char::from_u32(code)?;
+    // Non-printable keys use the same `NSxxxFunctionKey` constants Terminal.app
+    // writes, so the translation table is shared rather than duplicated.
+    let key = match apple_terminal_function_key(ch) {
+        Some(name) => name.to_string(),
+        None => {
+            if ('\u{F700}'..='\u{F8FF}').contains(&ch) {
+                return None;
+            }
+            ch.to_string()
+        }
+    };
+    Some(KeyChord::new(cmd, ctrl, alt, shift, &key))
+}
+
+/// Parse a `0x`-prefixed (or bare) hex field from an iTerm2 mapping key.
+fn parse_hex_u32(field: &str) -> Option<u32> {
+    let trimmed = field.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// Parse iTerm2's preferences, as JSON produced by `export_domain_json`.
+///
+/// Bindings live in two places, both scanned: `GlobalKeyMap` at the top level
+/// (mappings that apply everywhere) and a per-profile `Key Mappings` dictionary
+/// under each entry of the `New Bookmarks` array. Every profile is scanned
+/// rather than only the default one, because the conflict question is "can this
+/// chord reach jcode", and a chord remapped in any profile the user might open
+/// is a chord that can be swallowed.
+///
+/// The stored action is an integer opcode from iTerm2's own internal
+/// enumeration, which is undocumented and has been renumbered across versions.
+/// Guessing at it would send the user looking for the wrong setting, so the
+/// binding is reported by *where it is configured* instead — which is what they
+/// need in order to find and change it.
+pub fn parse_iterm2_keymap(json: &str) -> Vec<DiscoveredBinding> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+
+    let mut scopes: Vec<(String, &serde_json::Value)> = Vec::new();
+    if let Some(global) = value.get("GlobalKeyMap") {
+        scopes.push(("global".to_string(), global));
+    }
+    if let Some(profiles) = value.get("New Bookmarks").and_then(|v| v.as_array()) {
+        for (index, profile) in profiles.iter().enumerate() {
+            let Some(map) = profile.get("Key Mappings") else {
+                continue;
+            };
+            let name = profile
+                .get("Name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("profile #{}", index + 1));
+            scopes.push((name, map));
+        }
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (scope, map) in scopes {
+        let Some(map) = map.as_object() else { continue };
+        for spec in map.keys() {
+            let Some(chord) = parse_iterm2_key(spec) else {
+                continue;
+            };
+            // The same chord mapped in several profiles is one conflict, not
+            // one per profile.
+            if !seen.insert(chord.canonical()) {
+                continue;
+            }
+            let where_ = if scope == "global" {
+                "global key map".to_string()
+            } else {
+                format!("{scope} profile")
+            };
+            out.push(DiscoveredBinding {
+                chord,
+                source: KeySource::Terminal,
+                action: format!("iTerm2: key mapping ({where_})"),
+                raw: format!("{spec} in {where_}"),
+                tool: "iTerm2".to_string(),
+                alt_side: AltSide::Unspecified,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.chord.canonical().cmp(&b.chord.canonical()));
+    out
+}
+
+/// Effective iTerm2 key mappings for this machine.
+///
+/// Like Terminal.app, iTerm2 has no config file to read and no command that
+/// dumps its keymap, but its mappings live in the `com.googlecode.iterm2`
+/// preference domain, so they are read **live** rather than transcribed — which
+/// is why this needs no entry in [`super::drift`].
+///
+/// Scope limit, stated so a clean report is not over-read: iTerm2's *menu*
+/// shortcuts (`Cmd+T`, `Cmd+D`, `Cmd+W`, …) are AppKit menu items and are not
+/// part of `Key Mappings`, so only mappings present in Settings → Keys and
+/// Settings → Profiles → Keys are visible here. That is a floor, not a ceiling,
+/// and it is also the set most likely to surprise: a default menu shortcut is
+/// one the user knows about, while a mapping added months ago is exactly the
+/// kind of thing that silently eats a jcode chord.
+///
+/// Returns nothing unless iTerm2 is the active terminal, so an unused terminal
+/// never generates conflict noise.
+pub fn read_iterm2_keybinds() -> Vec<DiscoveredBinding> {
+    // iTerm2 sets TERM_PROGRAM=iTerm.app in every shell it spawns.
+    if !std::env::var("TERM_PROGRAM")
+        .map(|v| v.eq_ignore_ascii_case("iTerm.app"))
+        .unwrap_or(false)
+    {
+        return Vec::new();
+    }
+    match super::macos_hotkeys::export_domain_json("com.googlecode.iterm2") {
+        Some(json) => parse_iterm2_keymap(&json),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1735,6 +1907,145 @@ action = "ReceiveChar"
                 .iter()
                 .any(|c| c.jcode.field == "keybindings.open_resume"),
             "expected ctrl+shift+k to conflict with kitty scroll_line_up, got {conflicts:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // iTerm2
+    // -----------------------------------------------------------------
+
+    /// A structurally faithful `com.googlecode.iterm2` export: a global key
+    /// map plus per-profile mappings under "New Bookmarks", keyed by
+    /// `<hex character>-<hex NSEventModifierFlags>`.
+    const ITERM2_SAMPLE: &str = r#"{
+  "GlobalKeyMap": {
+    "0xf702-0xc0000": { "Action": 10, "Text": "" }
+  },
+  "New Bookmarks": [
+    {
+      "Name": "Default",
+      "Key Mappings": {
+        "0x6b-0x100000": { "Action": 11, "Text": "" },
+        "0xf729-0x20000": { "Action": 12, "Text": "" }
+      }
+    },
+    {
+      "Name": "Work",
+      "Key Mappings": {
+        "0x6b-0x100000": { "Action": 11, "Text": "" },
+        "0x62-0x80000": { "Action": 13, "Text": "" }
+      }
+    }
+  ]
+}"#;
+
+    #[test]
+    fn iterm2_reads_both_global_and_per_profile_mappings() {
+        let binds = parse_iterm2_keymap(ITERM2_SAMPLE);
+        let chords: Vec<String> = binds.iter().map(|b| b.chord.canonical()).collect();
+        // Global: Ctrl+Option+Left (0xf702 is NSLeftArrowFunctionKey).
+        assert!(chords.contains(&"ctrl+alt+left".to_string()), "{chords:?}");
+        // Default profile: Cmd+K and Shift+Home.
+        assert!(chords.contains(&"cmd+k".to_string()), "{chords:?}");
+        assert!(chords.contains(&"shift+home".to_string()), "{chords:?}");
+        // A non-default profile is scanned too: a chord remapped there can
+        // still swallow the keystroke whenever that profile is open.
+        assert!(chords.contains(&"alt+b".to_string()), "{chords:?}");
+        assert!(binds.iter().all(|b| b.tool == "iTerm2"));
+        assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+    }
+
+    #[test]
+    fn iterm2_chord_mapped_in_several_profiles_is_reported_once() {
+        // Cmd+K is mapped in both profiles of the sample. Reporting it twice
+        // would tell the user they have two conflicts to resolve when they
+        // have one.
+        let binds = parse_iterm2_keymap(ITERM2_SAMPLE);
+        let hits = binds
+            .iter()
+            .filter(|b| b.chord.canonical() == "cmd+k")
+            .count();
+        assert_eq!(hits, 1, "{binds:?}");
+    }
+
+    #[test]
+    fn iterm2_unmodified_mapping_is_not_a_conflict() {
+        // iTerm2 allows mapping a bare key. That is not an interception of a
+        // chord, and reporting it would manufacture conflicts on plain keys.
+        assert!(parse_iterm2_key("0xf704-0x0").is_none());
+        assert!(parse_iterm2_keymap(r#"{"GlobalKeyMap":{"0xf704-0x0":{"Action":1}}}"#).is_empty());
+    }
+
+    #[test]
+    fn iterm2_fn_and_keypad_chords_are_skipped_whole() {
+        // `fn` has no representation in KeyChord: dropping the flag would make
+        // fn+F1 compare equal to a plain F1 and claim an unrelated key is
+        // taken. Keypad is the same problem for digits.
+        assert!(parse_iterm2_key("0xf704-0x900000").is_none());
+        assert!(parse_iterm2_key("0x31-0x300000").is_none());
+        // The same mask without those bits is a normal chord.
+        assert_eq!(
+            parse_iterm2_key("0x31-0x100000").map(|c| c.canonical()),
+            Some("cmd+1".to_string())
+        );
+    }
+
+    #[test]
+    fn iterm2_unnamed_private_use_key_is_skipped_not_rendered_raw() {
+        // U+F7XX code points we have no name for would print as an unreadable
+        // glyph in the report, which is worse than saying nothing.
+        assert!(parse_iterm2_key("0xf7ff-0x100000").is_none());
+        // A named one decodes: 0xf704 is NSF1FunctionKey, i.e. F1 not a glyph.
+        assert_eq!(
+            parse_iterm2_key("0xf704-0x100000").map(|c| c.canonical()),
+            Some("cmd+f1".to_string())
+        );
+    }
+
+    #[test]
+    fn iterm2_trailing_keycode_component_is_tolerated() {
+        // iTerm2 3.5 writes a third `-<keycode>` field. A parser that required
+        // exactly two components would silently see no bindings at all on
+        // current versions.
+        assert_eq!(
+            parse_iterm2_key("0x6b-0x100000-40").map(|c| c.canonical()),
+            Some("cmd+k".to_string())
+        );
+    }
+
+    #[test]
+    fn iterm2_malformed_input_is_ignored_not_fatal() {
+        assert!(parse_iterm2_keymap("not json {{{").is_empty());
+        assert!(parse_iterm2_keymap("{}").is_empty());
+        assert!(parse_iterm2_key("garbage").is_none());
+        assert!(parse_iterm2_key("0x6b").is_none());
+    }
+
+    #[test]
+    fn jcode_binding_on_cmd_k_conflicts_with_an_iterm2_mapping() {
+        use crate::keymap::{KeymapSnapshot, detect_conflicts};
+        use jcode_config_types::KeybindingsConfig;
+
+        let snapshot = KeymapSnapshot {
+            alt_delivery: Default::default(),
+            version: 1,
+            captured_at: String::new(),
+            os: "macos".to_string(),
+            terminal: "iTerm2".to_string(),
+            terminal_version: String::new(),
+            tool_versions: Vec::new(),
+            bindings: parse_iterm2_keymap(ITERM2_SAMPLE),
+        };
+        let cfg = KeybindingsConfig {
+            open_resume: "cmd+k".to_string(),
+            ..Default::default()
+        };
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.open_resume"),
+            "expected cmd+k to conflict with the iTerm2 mapping, got {conflicts:?}"
         );
     }
 }
