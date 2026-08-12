@@ -9,7 +9,7 @@
 use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
-    CycleStatus, ScheduleTarget, ScheduledItem, cycle_significance, schedule_window,
+    CycleStatus, ScheduleTarget, ScheduledItem, cycle_significance, gates, schedule_window,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -1405,6 +1405,88 @@ impl AmbientRunnerHandle {
         Ok((system_prompt, initial_message, claimed))
     }
 
+    /// Hold a finished headless cycle to the same todo gates an interactive
+    /// session enforces (issue #22).
+    ///
+    /// `end_ambient_cycle` has already been called when we get here; each
+    /// unsatisfied gate sends the agent one more turn and then re-reads the
+    /// result, so a cycle that fixes its todos ends normally. Every path
+    /// returns a result: refusing to end the cycle at all is not an option,
+    /// since nobody is watching to unstick it.
+    async fn enforce_todo_gates(
+        &self,
+        agent: &mut Agent,
+        initial: AmbientCycleResult,
+        session_id: &str,
+    ) -> AmbientCycleResult {
+        let mut result = initial;
+        let mut state = gates::AmbientGateState::default();
+
+        for attempt in 0..gates::AMBIENT_GATE_MAX_ATTEMPTS {
+            let todos = crate::todo::load_todos(session_id).unwrap_or_default();
+            let goals = crate::todo::load_goals(session_id).unwrap_or_default();
+
+            // Building the digest consumes the observation log, so only take it
+            // once the follow-up that would use it can actually be delivered.
+            let digest = if gates::digest_is_due(&todos, state) {
+                let observations =
+                    crate::todo::load_gate_observations(session_id).unwrap_or_default();
+                let plan = crate::todo::load_plan(session_id).unwrap_or_default();
+                let built = gates::build_digest(&observations, &plan, &goals);
+                if built.is_some() {
+                    let _ = crate::todo::clear_gate_observations(session_id);
+                }
+                built
+            } else {
+                None
+            };
+
+            let Some(follow_up) = gates::next_gate_follow_up(&todos, &goals, digest, state) else {
+                return result;
+            };
+
+            match &follow_up {
+                gates::AmbientGateFollowUp::GateDigest { .. } => state.gate_digest_delivered = true,
+                gates::AmbientGateFollowUp::ConfidenceSpike { .. } => {
+                    state.confidence_spike_challenged = true
+                }
+                _ => {}
+            }
+
+            logging::info(&format!(
+                "Ambient cycle: todo gate '{}' unsatisfied, follow-up {}/{}",
+                follow_up.label(),
+                attempt + 1,
+                gates::AMBIENT_GATE_MAX_ATTEMPTS
+            ));
+            self.set_running_detail("todo quality gate").await;
+
+            let message = follow_up.message().to_string();
+            if agent.run_once_capture(&message).await.is_err() {
+                logging::warn("Ambient cycle: gate follow-up turn errored; accepting the cycle");
+                return result;
+            }
+
+            // The follow-up turn is expected to end the cycle again. If it did
+            // not, keep the previous result rather than losing the summary the
+            // agent already wrote.
+            if let Some(next) = ambient_tools::take_cycle_result() {
+                result = next;
+            }
+        }
+
+        // Budget exhausted: the gate keeps failing and the agent is no longer
+        // making progress on it. Nudging forever would burn one API call per
+        // turn for the rest of the cycle, so stop and mark the cycle incomplete
+        // so the outcome is visible instead of silently passing as clean.
+        logging::warn(&format!(
+            "Ambient cycle: todo gates still unsatisfied after {} follow-ups; ending as incomplete",
+            gates::AMBIENT_GATE_MAX_ATTEMPTS
+        ));
+        result.status = CycleStatus::Incomplete;
+        result
+    }
+
     /// Run a single ambient cycle. Returns the cycle result.
     async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
         let started_at = Utc::now();
@@ -1480,9 +1562,20 @@ impl AmbientRunnerHandle {
 
         let run_result = agent.run_once_capture(&initial_message).await;
 
-        // Check if end_ambient_cycle was called
+        // Check if end_ambient_cycle was called. Calling it is not by itself
+        // permission to finish: the same todo quality gates an interactive
+        // session enforces are applied here first (issue #22), because an
+        // unattended cycle is exactly the one that can ship a branch and a PR
+        // with nothing validated.
         if let Some(result) = ambient_tools::take_cycle_result() {
+            let result = self
+                .enforce_todo_gates(&mut agent, result, &ambient_session_id)
+                .await;
             ambient_tools::unregister_ambient_session(&ambient_session_id);
+            // The observation log is per session and is never read again once
+            // the cycle ends, so leaving it behind is how `~/.jcode/todos/`
+            // grew a file per ambient cycle forever (issue #22).
+            let _ = crate::todo::clear_gate_observations(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
             agent.mark_closed();
             return Ok(AmbientCycleResult {

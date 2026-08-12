@@ -7,6 +7,9 @@ pub mod cycle_significance;
 #[cfg(test)]
 mod cycle_significance_tests;
 mod directives;
+pub mod gates;
+#[cfg(test)]
+mod gates_tests;
 pub mod headroom;
 mod manager;
 mod paths;
