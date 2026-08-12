@@ -326,15 +326,302 @@ pub fn read_skhd() -> Vec<DiscoveredBinding> {
 }
 
 // ---------------------------------------------------------------------------
+// Karabiner-Elements (~/.config/karabiner/karabiner.json)
+// ---------------------------------------------------------------------------
+
+/// Map a Karabiner `key_code` spelling onto jcode's vocabulary. Karabiner uses
+/// its own names for most non-alphanumeric keys, so they have to be translated
+/// before [`KeyChord::normalize_key`] can canonicalize them. Unknown names pass
+/// through unchanged (single letters and digits already match).
+fn karabiner_key_token(name: &str) -> &str {
+    match name {
+        "spacebar" => "space",
+        "return_or_enter" => "enter",
+        "delete_or_backspace" => "backspace",
+        "delete_forward" => "delete",
+        "escape" => "esc",
+        "up_arrow" => "up",
+        "down_arrow" => "down",
+        "left_arrow" => "left",
+        "right_arrow" => "right",
+        "page_up" => "pageup",
+        "page_down" => "pagedown",
+        "hyphen" => "-",
+        "equal_sign" => "=",
+        "open_bracket" => "[",
+        "close_bracket" => "]",
+        "backslash" => "\\",
+        "semicolon" => ";",
+        "quote" => "'",
+        "grave_accent_and_tilde" => "`",
+        "comma" => ",",
+        "period" => ".",
+        "slash" => "/",
+        other => other,
+    }
+}
+
+/// Translate a Karabiner modifier name into a chord token. Karabiner names the
+/// sides explicitly (`left_command`) as well as offering the side-agnostic form
+/// (`command`), and both must collapse onto jcode's single flag.
+///
+/// `any` is deliberately not translated: it means "with any modifiers", which
+/// describes a family of chords rather than one, and expanding it would
+/// manufacture conflicts that may not exist.
+fn karabiner_modifier(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "command" | "left_command" | "right_command" => "cmd",
+        "control" | "left_control" | "right_control" => "ctrl",
+        "option" | "left_option" | "right_option" => "alt",
+        "shift" | "left_shift" | "right_shift" => "shift",
+        "fn" => "fn",
+        _ => return None,
+    })
+}
+
+/// Parse a Karabiner-Elements `karabiner.json` into discovered bindings.
+///
+/// Karabiner matters more than any other app here: it remaps at the HID level,
+/// *before* the window server, so its rules win over the window manager, the
+/// terminal, and jcode alike. A machine running a Karabiner rule on a chord
+/// jcode wants will never deliver that chord, and nothing downstream can tell.
+///
+/// Only the **selected** profile is read, since the others are inert. Within it
+/// we take `complex_modifications` manipulators of type `basic`, using the
+/// `from` chord and its **mandatory** modifiers (optional modifiers merely
+/// tolerate extra keys and do not define the trigger).
+///
+/// Manipulators scoped to particular applications via a
+/// `frontmost_application_if`/`unless` condition are skipped: whether they apply
+/// to the terminal depends on a bundle-identifier list we would have to match
+/// against the running terminal, and guessing wrong invents a conflict that the
+/// user cannot find. Unconditional rules, which are the common case, are
+/// reported.
+pub fn parse_karabiner(text: &str) -> Vec<DiscoveredBinding> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(profiles) = value.get("profiles").and_then(|p| p.as_array()) else {
+        return Vec::new();
+    };
+    // Exactly one profile is active at a time; the rest are stored but inert.
+    // If none is flagged, Karabiner falls back to the first.
+    let profile = profiles
+        .iter()
+        .find(|p| p.get("selected").and_then(serde_json::Value::as_bool) == Some(true))
+        .or_else(|| profiles.first());
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let rules = profile
+        .get("complex_modifications")
+        .and_then(|c| c.get("rules"))
+        .and_then(|r| r.as_array());
+    for rule in rules.into_iter().flatten() {
+        let rule_desc = rule
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let manipulators = rule.get("manipulators").and_then(|m| m.as_array());
+        for man in manipulators.into_iter().flatten() {
+            // Only "basic" manipulators describe a key trigger; the type key is
+            // optional and defaults to "basic".
+            let kind = man
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("basic");
+            if kind != "basic" {
+                continue;
+            }
+            if manipulator_is_app_scoped(man) {
+                continue;
+            }
+            let Some(from) = man.get("from") else {
+                continue;
+            };
+            let Some(key_code) = from.get("key_code").and_then(serde_json::Value::as_str) else {
+                // `consumer_key_code`, `pointing_button`, `any` and
+                // `simultaneous` triggers are not single chords.
+                continue;
+            };
+
+            let mut mods = Mods::default();
+            let mandatory = from
+                .get("modifiers")
+                .and_then(|m| m.get("mandatory"))
+                .and_then(|m| m.as_array());
+            for m in mandatory.into_iter().flatten() {
+                let Some(name) = m.as_str() else { continue };
+                if let Some(token) = karabiner_modifier(name) {
+                    apply_modifier(token, &mut mods, Mods::default());
+                }
+            }
+
+            let key = karabiner_key_token(key_code);
+            let chord = KeyChord::new(mods.cmd, mods.ctrl, mods.alt, mods.shift, key);
+            let action = if rule_desc.is_empty() {
+                man.get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("remapped by Karabiner")
+                    .to_string()
+            } else {
+                rule_desc.to_string()
+            };
+            out.push(DiscoveredBinding {
+                chord,
+                source: KeySource::ExternalApp,
+                action,
+                raw: key_code.to_string(),
+                tool: "Karabiner-Elements".to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// True if the manipulator only fires for particular applications, which makes
+/// its effect on the terminal unknowable from the config alone.
+fn manipulator_is_app_scoped(man: &serde_json::Value) -> bool {
+    let Some(conditions) = man.get("conditions").and_then(|c| c.as_array()) else {
+        return false;
+    };
+    conditions.iter().any(|c| {
+        matches!(
+            c.get("type").and_then(serde_json::Value::as_str),
+            Some("frontmost_application_if") | Some("frontmost_application_unless")
+        )
+    })
+}
+
+/// Read and parse Karabiner-Elements' config.
+pub fn read_karabiner() -> Vec<DiscoveredBinding> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let path = home.join(".config/karabiner/karabiner.json");
+    match read_to_string(&path) {
+        Some(text) => parse_karabiner(&text),
+        None => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hammerspoon (~/.hammerspoon/init.lua)
+// ---------------------------------------------------------------------------
+
+/// Parse a Hammerspoon `init.lua` for global hotkeys.
+///
+/// Hammerspoon is a Lua runtime, so a complete answer would require executing
+/// the config. We deliberately read only the literal, unambiguous form:
+///
+/// ```lua
+/// hs.hotkey.bind({"cmd", "alt"}, "K", function() ... end)
+/// ```
+///
+/// Bindings whose modifier argument is a variable (the widespread
+/// `hs.hotkey.bind(hyper, "j", ...)` idiom, where `hyper` is defined elsewhere)
+/// are skipped rather than guessed at. That makes this scanner incomplete by
+/// construction, which is the right trade: a missed binding leaves detection no
+/// worse than today, while a guessed one would point the user at a conflict
+/// that does not exist.
+pub fn parse_hammerspoon(text: &str) -> Vec<DiscoveredBinding> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("--") {
+            continue;
+        }
+        let mut rest = line;
+        // A single line can carry more than one bind call.
+        while let Some(idx) = rest.find("hs.hotkey.bind") {
+            let after = &rest[idx + "hs.hotkey.bind".len()..];
+            rest = after;
+            // Skip bindSpec and any other suffixed variant.
+            let Some(open) = after.find('(') else {
+                continue;
+            };
+            if after[..open].chars().any(|c| c.is_alphanumeric()) {
+                continue;
+            }
+            let args = &after[open + 1..];
+            // Modifier list must be a literal Lua table.
+            let args_trimmed = args.trim_start();
+            if !args_trimmed.starts_with('{') {
+                continue;
+            }
+            let Some(close) = args_trimmed.find('}') else {
+                continue;
+            };
+            let mods_src = &args_trimmed[1..close];
+            let mut mods = Mods::default();
+            for token in mods_src.split(',') {
+                let token = token.trim().trim_matches(['"', '\'']).trim();
+                if token.is_empty() {
+                    continue;
+                }
+                apply_modifier(token, &mut mods, Mods::default());
+            }
+            // The key is the next quoted string after the table.
+            let tail = &args_trimmed[close + 1..];
+            let Some((key, _)) = next_quoted(tail) else {
+                continue;
+            };
+            if key.is_empty() {
+                continue;
+            }
+            out.push(DiscoveredBinding {
+                chord: KeyChord::new(mods.cmd, mods.ctrl, mods.alt, mods.shift, &key),
+                source: KeySource::ExternalApp,
+                action: "Hammerspoon hotkey".to_string(),
+                raw: line.to_string(),
+                tool: "Hammerspoon".to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// Return the first single- or double-quoted string in `s`, plus the offset just
+/// past its closing quote.
+fn next_quoted(s: &str) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'"' || b == b'\'')?;
+    let quote = bytes[start];
+    let end = bytes[start + 1..].iter().position(|&b| b == quote)? + start + 1;
+    Some((s[start + 1..end].to_string(), end + 1))
+}
+
+/// Read and parse Hammerspoon's config.
+pub fn read_hammerspoon() -> Vec<DiscoveredBinding> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let path = home.join(".hammerspoon/init.lua");
+    match read_to_string(&path) {
+        Some(text) => parse_hammerspoon(&text),
+        None => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Aggregation
 // ---------------------------------------------------------------------------
 
 /// Read every supported external app's bindings on this machine.
+///
+/// yabai is intentionally absent: it registers no hotkeys of its own. `yabairc`
+/// is a shell script of `yabai -m config` calls, and every yabai key binding in
+/// practice lives in skhd, which is already scanned above. Adding a `yabairc`
+/// parser would find nothing to parse.
 pub fn read_external_bindings() -> Vec<DiscoveredBinding> {
     let mut out = Vec::new();
     out.extend(read_omniwm());
     out.extend(read_aerospace());
     out.extend(read_skhd());
+    out.extend(read_karabiner());
+    out.extend(read_hammerspoon());
     out
 }
 
@@ -351,6 +638,8 @@ pub fn external_config_paths() -> Vec<PathBuf> {
         ".config/aerospace/aerospace.toml",
         ".config/skhd/skhdrc",
         ".skhdrc",
+        ".config/karabiner/karabiner.json",
+        ".hammerspoon/init.lua",
     ]
     .iter()
     .map(PathBuf::from)
@@ -360,6 +649,140 @@ pub fn external_config_paths() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KARABINER_SAMPLE: &str = r#"{
+  "profiles": [
+    {
+      "name": "Unused",
+      "selected": false,
+      "complex_modifications": {
+        "rules": [
+          {
+            "description": "inert profile rule",
+            "manipulators": [
+              { "type": "basic",
+                "from": { "key_code": "z", "modifiers": { "mandatory": ["command"] } },
+                "to": [{ "key_code": "y" }] }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "Default",
+      "selected": true,
+      "complex_modifications": {
+        "rules": [
+          {
+            "description": "Window focus",
+            "manipulators": [
+              { "type": "basic",
+                "from": { "key_code": "j", "modifiers": { "mandatory": ["left_command"] } },
+                "to": [{ "key_code": "down_arrow" }] },
+              { "type": "basic",
+                "from": { "key_code": "spacebar", "modifiers": { "mandatory": ["option", "shift"] } },
+                "to": [{ "key_code": "tab" }] }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}"#;
+
+    #[test]
+    fn karabiner_reads_only_the_selected_profile() {
+        let binds = parse_karabiner(KARABINER_SAMPLE);
+        // The unselected profile's cmd+z rule is inert and must not be reported.
+        assert!(!binds.iter().any(|b| b.chord.canonical() == "cmd+z"));
+        assert_eq!(binds.len(), 2);
+        assert!(binds.iter().any(|b| b.chord.canonical() == "cmd+j"));
+    }
+
+    #[test]
+    fn karabiner_translates_key_names_and_sided_modifiers() {
+        let binds = parse_karabiner(KARABINER_SAMPLE);
+        // left_command collapses onto cmd, spacebar onto space.
+        let j = binds
+            .iter()
+            .find(|b| b.chord.canonical() == "cmd+j")
+            .expect("cmd+j");
+        assert_eq!(j.tool, "Karabiner-Elements");
+        assert_eq!(j.source, KeySource::ExternalApp);
+        assert_eq!(j.action, "Window focus");
+        assert!(
+            binds
+                .iter()
+                .any(|b| b.chord.canonical() == "alt+shift+space")
+        );
+    }
+
+    #[test]
+    fn karabiner_ignores_optional_modifiers() {
+        // Optional modifiers merely tolerate extra keys; only mandatory ones
+        // define the trigger, so this is ctrl+k and not ctrl+shift+k.
+        let cfg = r#"{"profiles":[{"selected":true,"complex_modifications":{"rules":[
+          {"description":"r","manipulators":[
+            {"type":"basic","from":{"key_code":"k","modifiers":{"mandatory":["control"],"optional":["shift"]}}}]}]}}]}"#;
+        let binds = parse_karabiner(cfg);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].chord.canonical(), "ctrl+k");
+    }
+
+    #[test]
+    fn karabiner_skips_app_scoped_and_non_key_triggers() {
+        // A rule limited to specific apps may not apply to the terminal, and a
+        // pointing-button trigger is not a chord at all. Reporting either would
+        // send the user hunting for a conflict that is not there.
+        let cfg = r#"{"profiles":[{"selected":true,"complex_modifications":{"rules":[
+          {"description":"scoped","manipulators":[
+            {"type":"basic","from":{"key_code":"t","modifiers":{"mandatory":["command"]}},
+             "conditions":[{"type":"frontmost_application_if","bundle_identifiers":["^com\\.apple\\.Safari$"]}]}]},
+          {"description":"mouse","manipulators":[
+            {"type":"basic","from":{"pointing_button":"button1"}}]}]}}]}"#;
+        assert!(parse_karabiner(cfg).is_empty());
+    }
+
+    #[test]
+    fn karabiner_tolerates_malformed_config() {
+        assert!(parse_karabiner("not json").is_empty());
+        assert!(parse_karabiner("{}").is_empty());
+    }
+
+    #[test]
+    fn hammerspoon_parses_literal_modifier_tables() {
+        let cfg = r#"
+-- hs.hotkey.bind({"cmd"}, "Q", quit)   commented out, must be ignored
+hs.hotkey.bind({"cmd", "alt"}, "K", function() hs.alert("hi") end)
+hs.hotkey.bind({'ctrl','shift'}, 'Left', nil, function() end)
+"#;
+        let binds = parse_hammerspoon(cfg);
+        assert_eq!(binds.len(), 2);
+        assert_eq!(binds[0].chord.canonical(), "cmd+alt+k");
+        assert_eq!(binds[0].tool, "Hammerspoon");
+        assert_eq!(binds[0].source, KeySource::ExternalApp);
+        // "Left" normalizes onto jcode's arrow token.
+        assert_eq!(binds[1].chord.canonical(), "ctrl+shift+left");
+    }
+
+    #[test]
+    fn hammerspoon_skips_variable_modifier_bindings() {
+        // `hyper` is defined elsewhere in Lua and we do not execute the config,
+        // so this binding is unknowable. Skipping it keeps detection no worse
+        // than before; guessing would invent a conflict.
+        let cfg = r#"
+local hyper = {"cmd", "alt", "ctrl", "shift"}
+hs.hotkey.bind(hyper, "j", function() end)
+"#;
+        assert!(parse_hammerspoon(cfg).is_empty());
+    }
+
+    #[test]
+    fn external_config_paths_include_the_new_sources() {
+        let paths = external_config_paths();
+        assert!(paths.contains(&PathBuf::from(".config/karabiner/karabiner.json")));
+        assert!(paths.contains(&PathBuf::from(".hammerspoon/init.lua")));
+    }
 
     #[test]
     fn omniwm_cmd_jk_focus_bindings() {
