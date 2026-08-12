@@ -141,7 +141,22 @@ async fn fetch_openai_usage_data() -> OpenAIUsageData {
 }
 
 async fn refresh_openai_usage(usage: Arc<RwLock<OpenAIUsageData>>) {
+    let active_label = auth::codex::active_account_label();
+
+    // Another jcode process on this machine may have fetched moments ago; see
+    // the Anthropic path above. Without this, a server plus several clients
+    // each poll the Codex usage endpoint on their own timer, and the
+    // reset-timestamp staleness rule makes them all refetch at once.
+    if let Some(shared) = super::snapshot::fresh_shared_openai_snapshot(active_label.as_deref()) {
+        *usage.write().await = shared;
+        return;
+    }
+
     let new_data = fetch_openai_usage_data().await;
+    // Publish before storing, so the next process to wake sees it even if this
+    // one exits immediately afterwards. `publish_openai` itself refuses error
+    // and empty snapshots, so a failed fetch never silences other processes.
+    super::snapshot::publish_openai(&new_data, active_label.as_deref());
     *usage.write().await = new_data;
 }
 

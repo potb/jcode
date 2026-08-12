@@ -26,7 +26,7 @@
 //!   fetch time is persisted and the reader reconstructs the age on load.
 
 use super::UsageData;
-use super::model::ModelScopedUsageWindow;
+use super::model::{ModelScopedUsageWindow, OpenAIUsageData, OpenAIUsageWindow};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -219,6 +219,126 @@ fn age_from_wall_clock(fetched_at_ms: i64) -> Option<Duration> {
 /// when another process already fetched recently.
 pub(super) fn fresh_shared_snapshot(account_label: Option<&str>) -> Option<UsageData> {
     let data = load(account_label)?;
+    if data.is_stale() { None } else { Some(data) }
+}
+
+// ─── OpenAI/Codex ────────────────────────────────────────────────────────────
+//
+// The Codex usage endpoint has the same shape of problem as Anthropic's: every
+// process polls it on its own timer, and the reset-timestamp staleness rule
+// synchronizes them into a burst. It gets its own file rather than sharing
+// `usage.json`, because the two providers have independent accounts and
+// independent cache durations, and a reader for one must never be able to
+// invalidate or misparse the other's snapshot.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredOpenAIWindow {
+    name: String,
+    usage_ratio: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredOpenAISnapshot {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_label: Option<String>,
+    fetched_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    five_hour: Option<StoredOpenAIWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seven_day: Option<StoredOpenAIWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spark: Option<StoredOpenAIWindow>,
+    #[serde(default)]
+    hard_limit_reached: bool,
+}
+
+fn openai_snapshot_path() -> PathBuf {
+    jcode_storage::durable_state_dir().join("usage-openai.json")
+}
+
+fn store_window(window: &OpenAIUsageWindow) -> StoredOpenAIWindow {
+    StoredOpenAIWindow {
+        name: window.name.clone(),
+        usage_ratio: window.usage_ratio,
+        resets_at: window.resets_at.clone(),
+    }
+}
+
+fn restore_window(window: StoredOpenAIWindow) -> OpenAIUsageWindow {
+    OpenAIUsageWindow {
+        name: window.name,
+        usage_ratio: window.usage_ratio,
+        resets_at: window.resets_at,
+    }
+}
+
+/// Publish a successful OpenAI/Codex usage fetch for the other processes.
+pub(super) fn publish_openai(data: &OpenAIUsageData, account_label: Option<&str>) {
+    publish_openai_to(&openai_snapshot_path(), data, account_label);
+}
+
+fn publish_openai_to(path: &PathBuf, data: &OpenAIUsageData, account_label: Option<&str>) {
+    // Same two refusals as the Anthropic side. `has_limits()` is the OpenAI
+    // equivalent of "we actually measured something": a default snapshot has
+    // no windows at all, and publishing it would let every other process read
+    // "no limits reported" as a fetched fact.
+    if data.last_error.is_some() || !data.has_limits() {
+        return;
+    }
+
+    let stored = StoredOpenAISnapshot {
+        version: SNAPSHOT_VERSION,
+        account_label: account_label.map(str::to_string),
+        fetched_at_ms: chrono::Utc::now().timestamp_millis(),
+        five_hour: data.five_hour.as_ref().map(store_window),
+        seven_day: data.seven_day.as_ref().map(store_window),
+        spark: data.spark.as_ref().map(store_window),
+        hard_limit_reached: data.hard_limit_reached,
+    };
+
+    let Ok(json) = serde_json::to_string(&stored) else {
+        return;
+    };
+    write_atomic(path, &json);
+}
+
+/// Load the shared OpenAI/Codex snapshot, if one exists for this account.
+pub(super) fn load_openai(account_label: Option<&str>) -> Option<OpenAIUsageData> {
+    load_openai_from(&openai_snapshot_path(), account_label)
+}
+
+fn load_openai_from(path: &PathBuf, account_label: Option<&str>) -> Option<OpenAIUsageData> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let stored: StoredOpenAISnapshot = serde_json::from_str(&raw).ok()?;
+    if stored.version != SNAPSHOT_VERSION {
+        return None;
+    }
+
+    if let (Some(want), Some(have)) = (account_label, stored.account_label.as_deref())
+        && want != have
+    {
+        return None;
+    }
+
+    let age = age_from_wall_clock(stored.fetched_at_ms)?;
+    let fetched_at = Instant::now().checked_sub(age)?;
+
+    Some(OpenAIUsageData {
+        five_hour: stored.five_hour.map(restore_window),
+        seven_day: stored.seven_day.map(restore_window),
+        spark: stored.spark.map(restore_window),
+        hard_limit_reached: stored.hard_limit_reached,
+        fetched_at: Some(fetched_at),
+        last_error: None,
+    })
+}
+
+/// A shared OpenAI/Codex snapshot worth adopting instead of fetching.
+pub(super) fn fresh_shared_openai_snapshot(account_label: Option<&str>) -> Option<OpenAIUsageData> {
+    let data = load_openai(account_label)?;
     if data.is_stale() { None } else { Some(data) }
 }
 
@@ -417,5 +537,164 @@ mod tests {
         assert!(stored.model_scoped.is_empty());
         assert!(!stored.extra_usage_enabled);
         assert!(stored.account_label.is_none());
+    }
+
+    // ─── OpenAI/Codex ────────────────────────────────────────────────────────
+
+    fn openai_window(name: &str, ratio: f32, resets_at: &str) -> OpenAIUsageWindow {
+        OpenAIUsageWindow {
+            name: name.to_string(),
+            usage_ratio: ratio,
+            resets_at: Some(resets_at.to_string()),
+        }
+    }
+
+    fn openai_sample() -> OpenAIUsageData {
+        OpenAIUsageData {
+            five_hour: Some(openai_window("5h", 0.30, "2999-01-01T00:00:00Z")),
+            seven_day: Some(openai_window("7d", 0.60, "2999-01-02T00:00:00Z")),
+            spark: Some(openai_window("spark", 0.10, "2999-01-03T00:00:00Z")),
+            hard_limit_reached: false,
+            fetched_at: Some(Instant::now()),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn every_openai_window_survives_the_round_trip() {
+        let path = temp_path("openai-roundtrip");
+        let original = openai_sample();
+        publish_openai_to(&path, &original, Some("openai-1"));
+
+        let restored = load_openai_from(&path, Some("openai-1")).expect("restored");
+        let five = restored.five_hour.as_ref().expect("five hour");
+        assert_eq!(five.name, "5h");
+        assert!((five.usage_ratio - 0.30).abs() < f32::EPSILON);
+        assert_eq!(five.resets_at.as_deref(), Some("2999-01-01T00:00:00Z"));
+        assert!(
+            (restored.seven_day.as_ref().expect("seven day").usage_ratio - 0.60).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(restored.spark.as_ref().expect("spark").name, "spark");
+        assert!(restored.fetched_at.is_some());
+        assert!(!restored.is_stale());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_openai_snapshot_from_another_account_is_ignored() {
+        let path = temp_path("openai-account");
+        publish_openai_to(&path, &openai_sample(), Some("work"));
+
+        assert!(
+            load_openai_from(&path, Some("personal")).is_none(),
+            "another account's quota must never be adopted"
+        );
+        assert!(load_openai_from(&path, Some("work")).is_some());
+        assert!(load_openai_from(&path, None).is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_openai_error_state_is_never_written_to_disk() {
+        // One process with expired Codex credentials must not be able to
+        // silence refreshes for every other process on the machine.
+        let path = temp_path("openai-error");
+        let _ = std::fs::remove_file(&path);
+        let mut data = openai_sample();
+        data.last_error = Some("No OpenAI/Codex OAuth credentials found".to_string());
+        publish_openai_to(&path, &data, Some("openai-1"));
+        assert!(!path.exists(), "a failed refresh must not be published");
+    }
+
+    #[test]
+    fn an_openai_snapshot_with_no_windows_is_never_written_to_disk() {
+        // A snapshot with no windows carries no measurement; publishing it
+        // would let readers treat "we know nothing" as a fetched fact and
+        // suppress their own fetch for a whole cache duration.
+        let path = temp_path("openai-empty");
+        let _ = std::fs::remove_file(&path);
+        publish_openai_to(&path, &OpenAIUsageData::default(), Some("openai-1"));
+        assert!(!path.exists(), "an empty snapshot must not be published");
+    }
+
+    #[test]
+    fn the_openai_hard_limit_flag_survives_the_round_trip() {
+        // Exhaustion is the state that most changes behaviour (account
+        // rotation reads it), so it must not be silently dropped in transit.
+        let path = temp_path("openai-hardlimit");
+        let mut data = openai_sample();
+        data.hard_limit_reached = true;
+        publish_openai_to(&path, &data, Some("openai-1"));
+        let restored = load_openai_from(&path, Some("openai-1")).expect("restored");
+        assert!(restored.hard_limit_reached);
+        assert!(restored.exhausted());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_fresh_openai_snapshot_is_adopted_but_a_stale_one_is_not() {
+        let path = temp_path("openai-freshness");
+        publish_openai_to(&path, &openai_sample(), Some("openai-1"));
+        assert!(
+            !load_openai_from(&path, Some("openai-1"))
+                .expect("restored")
+                .is_stale()
+        );
+
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let mut stored: StoredOpenAISnapshot = serde_json::from_str(&raw).expect("parse");
+        stored.fetched_at_ms -= 3_600_000;
+        std::fs::write(&path, serde_json::to_string(&stored).expect("serialize")).expect("write");
+
+        assert!(
+            load_openai_from(&path, Some("openai-1"))
+                .expect("restored")
+                .is_stale(),
+            "an hour-old snapshot must not be reused"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_openai_snapshot_whose_window_reset_is_stale() {
+        // The reset rule is the one that causes the synchronized burst;
+        // carrying it over is what stops the shared file from serving quota
+        // from before a rollover.
+        let mut data = openai_sample();
+        data.five_hour = Some(openai_window("5h", 0.9, "2000-01-01T00:00:00Z"));
+        assert!(data.is_stale());
+    }
+
+    #[test]
+    fn a_corrupt_openai_file_is_ignored_rather_than_fatal() {
+        let path = temp_path("openai-corrupt");
+        std::fs::write(&path, "{not json").expect("write");
+        assert!(load_openai_from(&path, Some("openai-1")).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unknown_openai_version_is_ignored() {
+        // A future jcode may change the shape; misreading it would report the
+        // wrong quota, whereas ignoring it costs one extra fetch.
+        let path = temp_path("openai-version");
+        publish_openai_to(&path, &openai_sample(), Some("openai-1"));
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let bumped = raw.replace(
+            &format!("\"version\":{}", SNAPSHOT_VERSION),
+            "\"version\":99",
+        );
+        std::fs::write(&path, bumped).expect("write");
+        assert!(load_openai_from(&path, Some("openai-1")).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_two_providers_use_separate_files() {
+        // Sharing one path would let an Anthropic reader parse an OpenAI
+        // snapshot (or the reverse) and report one provider's quota as the
+        // other's; the accounts and cache durations are independent.
+        assert_ne!(snapshot_path(), openai_snapshot_path());
     }
 }
