@@ -57,7 +57,23 @@ async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
         return;
     }
 
-    match fetch_usage().await {
+    // No fresh snapshot to adopt, so a request is warranted - but not from
+    // every process at once. `is_stale()` fires unconditionally the moment a
+    // window's reset timestamp passes, which makes the shared snapshot stale
+    // for every process on the machine at the *same instant*: without this
+    // lease they all miss the adopt path above and burst together, which is
+    // the 429 storm. Losing the race is a skip, not a wait: this process keeps
+    // serving what it has and adopts the winner's snapshot on its next tick.
+    let Some(lease) = super::lease::try_acquire_anthropic() else {
+        return;
+    };
+
+    let result = fetch_usage().await;
+    // Release before storing, so the next process to decide it needs a fetch
+    // is not blocked behind bookkeeping this one still has to do.
+    super::lease::release(&lease);
+
+    match result {
         Ok(new_data) => {
             // Publish before storing so the next process to wake sees it even
             // if this one exits immediately afterwards.
@@ -152,7 +168,16 @@ async fn refresh_openai_usage(usage: Arc<RwLock<OpenAIUsageData>>) {
         return;
     }
 
+    // One fetcher per machine per round; see the Anthropic path above. The
+    // Codex endpoint has its own lease file because the two providers have
+    // independent accounts and cache durations, so an Anthropic fetch must
+    // never keep a Codex refresh from happening.
+    let Some(lease) = super::lease::try_acquire_openai() else {
+        return;
+    };
+
     let new_data = fetch_openai_usage_data().await;
+    super::lease::release(&lease);
     // Publish before storing, so the next process to wake sees it even if this
     // one exits immediately afterwards. `publish_openai` itself refuses error
     // and empty snapshots, so a failed fetch never silences other processes.

@@ -7,6 +7,7 @@ mod accessors;
 mod api_keys;
 mod cache;
 mod display;
+mod lease;
 mod model;
 mod openai_helpers;
 mod provider_fetch;
