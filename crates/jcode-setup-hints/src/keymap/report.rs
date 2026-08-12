@@ -23,10 +23,6 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
     ));
     out.push_str(&format!("OS: {}\n", snapshot.os));
 
-    if let Some(note) = super::alt::explain(snapshot.alt_delivery, &snapshot.terminal) {
-        out.push_str(&format!("\n⚠ {note}\n"));
-    }
-
     let term_count = snapshot.from_source(KeySource::Terminal).count();
     let sys_count = snapshot.from_source(KeySource::MacosSystem).count();
     let app_count = snapshot.from_source(KeySource::ExternalApp).count();
@@ -55,6 +51,13 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
              terminals and tools are not yet inspected, so conflicts there will not be\n\
              detected.\n",
         );
+    }
+
+    // The Option-key state goes after the discovery summary and before the
+    // conflict list: it is not a conflict, but it decides whether any `alt+`
+    // conflict listed below could even fire.
+    if let Some(note) = super::alt::explain(snapshot.alt_delivery, &snapshot.terminal) {
+        out.push_str(&format!("\n⚠ {note}\n"));
     }
 
     let conflicts = detect_conflicts(cfg, snapshot);
@@ -124,10 +127,7 @@ pub fn render_status_line(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) ->
         // the binding silently does nothing. Surface it on its own rather than
         // reporting a clean bill of health.
         if alt_warning_applies(snapshot.alt_delivery, jcode_has_alt_binding(cfg)) {
-            return Some(format!(
-                "{} does not send Option as Alt, so your `alt+` keybindings never arrive. Run /keys for details.",
-                snapshot.terminal
-            ));
+            return super::alt::status_phrase(snapshot.alt_delivery, &snapshot.terminal);
         }
         return None;
     }

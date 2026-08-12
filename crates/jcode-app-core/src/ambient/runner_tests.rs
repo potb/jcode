@@ -1118,10 +1118,45 @@ fn closed_window_blocks_cycle_start() {
     );
 }
 
+/// The runner used to read `ambient.enabled` once, before its loop, and reuse
+/// that snapshot forever. Config is hot-reloadable, so turning ambient off and
+/// back on in config.toml left a live runner pinned to `false` until the
+/// daemon restarted: cron kept firing on the same loop, so the logs looked
+/// healthy while no ambient cycle ran for a day.
+///
+/// `ambient_allowed` therefore takes `enabled` as an argument, and this test
+/// pins the behaviour that a changed flag changes the answer for one unchanged
+/// state.
+#[test]
+fn enabled_flag_is_read_per_pass_not_snapshotted() {
+    use super::ambient_allowed;
+    use crate::ambient::AmbientStatus;
+
+    let idle = AmbientStatus::Idle;
+
+    assert!(
+        !ambient_allowed(false, &idle),
+        "config says disabled, so no cycle may start"
+    );
+    assert!(
+        ambient_allowed(true, &idle),
+        "the same idle state must become allowed once config re-enables ambient, \
+         with no restart and no state change"
+    );
+
+    // An explicitly stopped runner (`ambient stop`) stays stopped regardless:
+    // that is a live instruction, not a stale config read.
+    assert!(
+        !ambient_allowed(true, &AmbientStatus::Disabled),
+        "an explicitly disabled runner must not be revived by the config flag alone"
+    );
+}
+
 /// A closed window must park the runner near the reopening instead of polling
 /// every 30s, but a direct delivery still pulls it awake early.
 #[test]
 fn closed_window_sleeps_until_open() {
+    // (see also `enabled_flag_is_read_per_pass_not_snapshotted` below)
     use super::closed_window_sleep_secs;
     use chrono::{Duration, Local, Utc};
 

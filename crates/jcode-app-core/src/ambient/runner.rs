@@ -131,6 +131,18 @@ fn may_start_cycle(ambient_allowed: bool, window_open: bool, wants_to_run: bool)
     ambient_allowed && window_open && wants_to_run
 }
 
+/// Whether ambient cycles are permitted right now.
+///
+/// `enabled` MUST be passed freshly from `config()` on every loop pass, never
+/// from a value read once at startup: config is hot-reloadable, so a snapshot
+/// pins the runner to whatever ambient's setting happened to be when the
+/// daemon started. That failure is near-invisible, since cron runs
+/// unconditionally on this same loop and keeps producing healthy-looking log
+/// activity while no ambient cycle ever starts.
+fn ambient_allowed(enabled: bool, status: &AmbientStatus) -> bool {
+    enabled && !matches!(status, AmbientStatus::Disabled)
+}
+
 /// How long to idle when a wall-clock window is closed.
 ///
 /// An ambient deadline inside the closed period must NOT shorten this: it
@@ -914,8 +926,9 @@ impl AmbientRunnerHandle {
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
-            let ambient_allowed =
-                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
+            // `enabled` is re-read here on every pass, never reused from the
+            // startup snapshot: see `ambient_allowed`.
+            let ambient_allowed = ambient_allowed(config().ambient.enabled, &state.status);
 
             // Wall-clock windows: the user's "not at night, not on weekends".
             //

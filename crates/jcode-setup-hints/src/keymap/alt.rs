@@ -159,6 +159,24 @@ fn ghostty_alt_delivery() -> AltDelivery {
     AltDelivery::Unknown
 }
 
+/// A short status-line phrasing for a degraded state. Distinct from
+/// [`explain`]: the one-liner must stay accurate for the side-specific cases,
+/// where saying "does not send Option as Alt" would be plainly false.
+pub fn status_phrase(delivery: AltDelivery, terminal: &str) -> Option<String> {
+    match delivery {
+        AltDelivery::Never => Some(format!(
+            "{terminal} does not send Option as Alt, so your `alt+` keybindings never arrive. Run /keys for details."
+        )),
+        AltDelivery::LeftOnly => Some(format!(
+            "{terminal} sends only the left Option key as Alt, so `alt+` keybindings work only from the left. Run /keys for details."
+        )),
+        AltDelivery::RightOnly => Some(format!(
+            "{terminal} sends only the right Option key as Alt, so `alt+` keybindings work only from the right. Run /keys for details."
+        )),
+        AltDelivery::Unknown | AltDelivery::Delivered => None,
+    }
+}
+
 /// The user-facing explanation of a degraded state, or `None` when Alt is fine
 /// or unknown. `terminal` is the detected terminal label.
 pub fn explain(delivery: AltDelivery, terminal: &str) -> Option<String> {
@@ -169,16 +187,18 @@ pub fn explain(delivery: AltDelivery, terminal: &str) -> Option<String> {
     };
     match delivery {
         AltDelivery::Never => Some(format!(
-            "{terminal} never sends Option as Alt, so every `alt+` binding below is dead\n\
-             regardless of conflicts. Set {setting} to send Alt."
+            "{terminal} never sends Option as Alt, so every `alt+` binding is dead\n\
+             regardless of conflicts.\nFix: set {setting} to send Alt."
         )),
         AltDelivery::LeftOnly => Some(format!(
-            "{terminal} sends only the LEFT Option key as Alt ({setting}); the right\n\
-             Option key composes instead, so `alt+` chords work only from the left."
+            "{terminal} sends only the LEFT Option key as Alt; the right Option key\n\
+             composes instead, so `alt+` chords work only from the left.\n\
+             Setting: {setting}."
         )),
         AltDelivery::RightOnly => Some(format!(
-            "{terminal} sends only the RIGHT Option key as Alt ({setting}); the left\n\
-             Option key composes instead, so `alt+` chords work only from the right."
+            "{terminal} sends only the RIGHT Option key as Alt; the left Option key\n\
+             composes instead, so `alt+` chords work only from the right.\n\
+             Setting: {setting}."
         )),
         AltDelivery::Unknown | AltDelivery::Delivered => None,
     }
@@ -254,6 +274,29 @@ mod tests {
             parse_ghostty_option_as_alt("macos-option-as-alt-other = true\n"),
             AltDelivery::Unknown
         );
+    }
+
+    #[test]
+    fn status_phrase_does_not_claim_alt_is_dead_for_side_specific_states() {
+        // Regression: the one-liner used to say "does not send Option as Alt"
+        // for OnlyLeft/OnlyRight, which is false and sends the user hunting for
+        // the wrong problem.
+        let left = status_phrase(AltDelivery::LeftOnly, "Alacritty").unwrap();
+        assert!(left.contains("only the left"), "got {left}");
+        assert!(!left.contains("does not send Option as Alt"), "got {left}");
+
+        let right = status_phrase(AltDelivery::RightOnly, "Ghostty").unwrap();
+        assert!(right.contains("only the right"), "got {right}");
+        assert!(
+            !right.contains("does not send Option as Alt"),
+            "got {right}"
+        );
+
+        let never = status_phrase(AltDelivery::Never, "Alacritty").unwrap();
+        assert!(never.contains("does not send Option as Alt"), "got {never}");
+
+        assert!(status_phrase(AltDelivery::Delivered, "Ghostty").is_none());
+        assert!(status_phrase(AltDelivery::Unknown, "iTerm2").is_none());
     }
 
     #[test]
