@@ -40,11 +40,17 @@ PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
 # longer be reachable, `git merge-base` would still report the old fork point,
 # and every later run would try to merge the same upstream history again.
 PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-merge}"
-# Whether this job merges its own pull request. Defaults to 0: the pull request
-# is opened and left for review, and every later run force-pushes the refreshed
-# base onto the same pull request branch, so successive upstream updates
-# accumulate in one pull request until it is merged by hand.
-AUTO_MERGE_PR="${JCODE_UPSTREAM_AUTO_MERGE:-0}"
+# Whether this job merges its own pull request. Defaults to 1: staying aligned
+# with upstream is the entire point, so the update lands on the fork's base
+# branch without waiting for a human.
+#
+# The pull request is not ceremony. The base branch is protected by a ruleset
+# that requires one, and it doubles as the recovery path: if the merge fails
+# (checks red, a conflict GitHub sees that git did not, no credentials), the
+# branch stays open and every later run force-pushes the refreshed merge onto
+# it, so upstream updates accumulate in that one pull request instead of being
+# lost. Set to 0 to always stop at the open pull request and merge by hand.
+AUTO_MERGE_PR="${JCODE_UPSTREAM_AUTO_MERGE:-1}"
 # Branch the pull request is opened from. Owned entirely by this job.
 PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # Keep GitHub Actions disabled on the fork.
@@ -342,8 +348,10 @@ requires upstream's commits to stay genuine ancestors of \`$BASE\`. A squash wou
 replace them with one new commit containing the same code, leaving upstream SHAs
 unreachable and every later run re-merging the same history.
 
-While this stays open, later runs force-push the refreshed merge onto
-\`$PR_BRANCH\`, so further upstream updates accumulate here.
+This is normally merged by the job itself the moment it is opened. If you are
+reading it, that merge did not go through: later runs force-push the refreshed
+merge onto \`$PR_BRANCH\` and retry, so further upstream updates accumulate here
+rather than being lost.
 
 Last updated $(date -u +%Y-%m-%dT%H:%M:%SZ) by scripts/upstream_merge_agent.sh."
 
@@ -396,8 +404,19 @@ https://github.com/$slug/pull/$pr" "default"
   if merge_out=$(gh pr merge "$pr" --repo "$slug" "--$PR_MERGE_METHOD" 2>&1); then
     log "merged pull request #$pr into $BASE"
   else
-    log "WARNING: could not merge pull request #$pr; it is open for manual merge"
+    # Leave it open rather than escalating to a hard failure. The branch is the
+    # accumulation point: the next run rebuilds it with the newer upstream and
+    # retries the merge on this same pull request, so a transient red check or a
+    # missing credential costs a cycle instead of an update.
+    log "WARNING: could not merge pull request #$pr; leaving it open"
     log "$(printf '%s' "$merge_out" | tail -3)"
+    notify "Upstream merge pull request could not be merged" "Pull request #$pr on $slug carries upstream $UP_SHA but could not be merged automatically.
+
+$(printf '%s' "$merge_out" | tail -3)
+
+Later runs keep adding upstream to it, so nothing is lost. Merge it by hand, or fix what blocks it.
+
+https://github.com/$slug/pull/$pr" "high"
     return 1
   fi
 
