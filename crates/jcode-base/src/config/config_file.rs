@@ -103,10 +103,27 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)?;
+        let content = self.to_pruned_toml()?;
         std::fs::write(&path, content)?;
         Self::invalidate_cache();
         Ok(())
+    }
+
+    /// Serialize the config with every value that still equals the shipped
+    /// default omitted.
+    ///
+    /// Without this, `save()` writes the entire schema into the user's
+    /// `config.toml`, which buries real overrides among hundreds of default
+    /// lines and — worse — freezes today's defaults forever, so the user never
+    /// receives a later improvement to one. Pruning is safe because `Config`
+    /// and its sub-structs deserialize with `#[serde(default)]`, so an omitted
+    /// key round-trips back to the same value.
+    pub(crate) fn to_pruned_toml(&self) -> anyhow::Result<String> {
+        let current = toml::Value::try_from(self)?;
+        let defaults = toml::Value::try_from(Self::default())?;
+        let pruned =
+            prune_defaults(current, &defaults).unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        Ok(toml::to_string_pretty(&pruned)?)
     }
 
     /// Mark the process-cached config as stale and notify dependent caches.
@@ -808,5 +825,118 @@ impl Config {
             ));
         }
         Ok(())
+    }
+}
+
+/// Recursively drop entries of `current` that are identical to `defaults`.
+///
+/// Returns `None` when nothing is left to write, so empty sub-tables vanish
+/// instead of leaving `[section]` headers behind. Non-table values (including
+/// arrays of tables such as `[[cron]]`) are compared whole: merging them
+/// element-wise would be wrong, since a user array that happens to start with
+/// the default element is still a deliberate override.
+fn prune_defaults(current: toml::Value, defaults: &toml::Value) -> Option<toml::Value> {
+    match (current, defaults) {
+        (toml::Value::Table(table), toml::Value::Table(default_table)) => {
+            let mut pruned = toml::map::Map::new();
+            for (key, value) in table {
+                match default_table.get(&key) {
+                    Some(default_value) => {
+                        if let Some(kept) = prune_defaults(value, default_value) {
+                            pruned.insert(key, kept);
+                        }
+                    }
+                    // No shipped default for this key: always keep it.
+                    None => {
+                        pruned.insert(key, value);
+                    }
+                }
+            }
+            (!pruned.is_empty()).then_some(toml::Value::Table(pruned))
+        }
+        (value, default_value) => (value != *default_value).then_some(value),
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn value(toml_str: &str) -> toml::Value {
+        toml_str.parse().expect("valid toml")
+    }
+
+    #[test]
+    fn default_config_prunes_to_nothing() {
+        let rendered = Config::default()
+            .to_pruned_toml()
+            .expect("default config serializes");
+        assert_eq!(
+            rendered.trim(),
+            "",
+            "a config holding only defaults should write an empty file, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn overrides_survive_and_round_trip() {
+        let mut config = Config::default();
+        config.provider.copilot_premium = Some("premium".to_string());
+
+        let rendered = config.to_pruned_toml().expect("serializes");
+        assert!(
+            rendered.contains("copilot_premium"),
+            "the override must be written, got:\n{rendered}"
+        );
+
+        let reloaded: Config = toml::from_str(&rendered).expect("pruned output parses");
+        assert_eq!(
+            reloaded.provider.copilot_premium,
+            Some("premium".to_string())
+        );
+    }
+
+    #[test]
+    fn pruned_output_reparses_to_the_same_config() {
+        let mut config = Config::default();
+        config.provider.copilot_premium = Some("standard".to_string());
+
+        let rendered = config.to_pruned_toml().expect("serializes");
+        let reloaded: Config = toml::from_str(&rendered).expect("pruned output parses");
+        let reloaded_rendered = reloaded.to_pruned_toml().expect("serializes");
+        assert_eq!(
+            rendered, reloaded_rendered,
+            "pruning must be idempotent across a save/load round trip"
+        );
+    }
+
+    #[test]
+    fn empty_sub_tables_are_dropped() {
+        let pruned = prune_defaults(
+            value("[a]\nx = 1\n[b]\ny = 2\n"),
+            &value("[a]\nx = 1\n[b]\ny = 3\n"),
+        )
+        .expect("something is kept");
+        let table = pruned.as_table().expect("table");
+        assert!(!table.contains_key("a"), "identical sub-table must vanish");
+        assert!(table.contains_key("b"), "differing sub-table must remain");
+    }
+
+    #[test]
+    fn arrays_are_compared_whole() {
+        assert!(
+            prune_defaults(value("items = [1, 2]"), &value("items = [1, 2]")).is_none(),
+            "an array equal to the default is dropped"
+        );
+        assert!(
+            prune_defaults(value("items = [1, 2, 3]"), &value("items = [1, 2]")).is_some(),
+            "an array extending the default is kept whole"
+        );
+    }
+
+    #[test]
+    fn keys_absent_from_defaults_are_kept() {
+        let pruned = prune_defaults(value("custom = 1"), &value("")).expect("kept");
+        assert_eq!(pruned.get("custom").and_then(toml::Value::as_integer), Some(1));
     }
 }
