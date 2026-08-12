@@ -1605,6 +1605,8 @@ async fn run_ambient_visible() -> Result<()> {
         crossterm::terminal::SetTitle(terminal_title("🤖 jcode ambient cycle"))
     );
 
+    let session_id = app.session_id().to_string();
+
     let result = app.run(terminal).await;
 
     tui_runtime.finish(true);
@@ -1615,8 +1617,30 @@ async fn run_ambient_visible() -> Result<()> {
         eprintln!("Ambient cycle result saved.");
     }
 
+    finish_visible_cycle_session(&session_id);
+
     result?;
     Ok(())
+}
+
+/// Tear down the per-session ambient state a visible cycle leaves behind.
+///
+/// The headless runner does both of these on every exit path; the visible path
+/// did neither, even though `set_ambient_mode` registers the session exactly
+/// like the headless runner does (issue #22). The observation log is the part
+/// that actually persists: it is a file under `~/.jcode/todos/`, it is never
+/// read again once the cycle ends, and leaving it behind is the same unbounded
+/// accumulation that was fixed for headless cycles. Unregistering matters less
+/// here because the visible cycle owns its process, but the registry is a
+/// global that outlives the app in tests and in any future in-process caller,
+/// so leaving a dead session marked ambient-enabled is a latent authorisation
+/// leak rather than a harmless no-op.
+///
+/// Deliberately infallible: this runs after the cycle result has already been
+/// written, so failing here would turn successful work into a non-zero exit.
+fn finish_visible_cycle_session(session_id: &str) {
+    crate::tool::ambient::unregister_ambient_session(session_id);
+    let _ = crate::todo::clear_gate_observations(session_id);
 }
 
 pub enum MemorySubcommand {

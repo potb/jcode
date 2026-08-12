@@ -1306,3 +1306,100 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 
     assert_eq!(resumed.session_id(), original_session_id);
 }
+
+/// A visible ambient cycle registers its session (`App::set_ambient_mode`) and
+/// writes gate observations exactly like a headless one, but the headless
+/// runner is the only path that used to tear that state down. The observation
+/// log is the durable half: a file per cycle under `~/.jcode/todos/` that is
+/// never read again, which is the accumulation issue #22 fixed for headless.
+#[test]
+fn finishing_a_visible_cycle_clears_the_gate_observation_log() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let session = "visible-cycle-cleanup";
+
+    crate::todo::append_gate_observations(
+        session,
+        &[crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".to_string()),
+        }],
+    )
+    .expect("append");
+    assert!(
+        !crate::todo::load_gate_observations(session)
+            .expect("load")
+            .is_empty(),
+        "precondition: the cycle recorded an observation"
+    );
+
+    finish_visible_cycle_session(session);
+
+    assert!(
+        crate::todo::load_gate_observations(session)
+            .expect("reload")
+            .is_empty(),
+        "the visible cycle must not leave its observation log behind"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The ambient session registry is a process-global that outlives the app, so a
+/// visible cycle that exits without unregistering leaves a dead session holding
+/// ambient-only tool access.
+#[test]
+fn finishing_a_visible_cycle_unregisters_the_ambient_session() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let session = "visible-cycle-unregister";
+    let other = "visible-cycle-unregister-other";
+
+    crate::tool::ambient::register_ambient_session(session);
+    crate::tool::ambient::register_ambient_session(other);
+    assert!(crate::tool::ambient::is_ambient_session_registered(session));
+
+    finish_visible_cycle_session(session);
+
+    assert!(
+        !crate::tool::ambient::is_ambient_session_registered(session),
+        "the finished cycle's session must lose ambient access"
+    );
+    // Only this cycle's session: a concurrent ambient session in the same
+    // process must not be deauthorised as a side effect.
+    assert!(
+        crate::tool::ambient::is_ambient_session_registered(other),
+        "cleanup must be scoped to the session that ended"
+    );
+    crate::tool::ambient::unregister_ambient_session(other);
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// Cleanup runs after the cycle result has already been written, so an absent
+/// log (a cycle that recorded nothing) must not be treated as a failure.
+#[test]
+fn finishing_a_visible_cycle_is_a_no_op_without_recorded_state() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    finish_visible_cycle_session("visible-cycle-never-ran");
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

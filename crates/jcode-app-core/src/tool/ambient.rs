@@ -83,7 +83,12 @@ pub fn unregister_ambient_session(session_id: &str) {
     }
 }
 
-fn is_ambient_session_registered(session_id: &str) -> bool {
+/// Whether a session is still in the ambient-enabled set.
+///
+/// Public so callers that own their own ambient session lifecycle (the visible
+/// cycle in `jcode ambient run-visible`) can assert they cleaned up after
+/// themselves; a session left registered keeps ambient-only tool access alive.
+pub fn is_ambient_session_registered(session_id: &str) -> bool {
     ambient_session_ids()
         .lock()
         .map(|ids| ids.contains(session_id))
