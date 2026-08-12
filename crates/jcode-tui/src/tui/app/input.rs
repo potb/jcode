@@ -1609,75 +1609,75 @@ impl App {
                 return true;
             }
             let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
-            let ownership_needs_followup =
-                !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
+            // The remaining gates and their order are the shared decision in
+            // `jcode_base::todo_gates`, so this path, `jcode run` and the
+            // ambient runner cannot drift apart. Incomplete todos and the
+            // digest were already handled above with their own UI, so they are
+            // reported as already delivered here; what is left for the TUI is
+            // its own side effects: the notice, the queued turn, the attempt
+            // budget and telemetry.
+            let gate_state = crate::todo_gates::TodoGateState {
+                gate_digest_delivered: true,
+                confidence_spike_challenged: self.todo_confidence_spike_challenged,
+            };
+            let follow_up =
+                crate::todo_gates::next_todo_gate_follow_up(&todos, &goals, None, gate_state);
+            let confidence_label = super::commands::format_todo_completion_confidence(
+                super::commands::todo_confidence_summary(&todos),
+            );
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
-            if ownership_needs_followup && gate_budget_left {
-                self.todo_completion_gate_attempts =
-                    self.todo_completion_gate_attempts.saturating_add(1);
-                crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
-                self.push_display_message(DisplayMessage::system(
-                    "🔍 Checking end-to-end ownership before finishing...",
-                ));
-                self.queued_messages
-                    .push(crate::todo::build_todo_ownership_continuation_message(
-                        &todos, &goals,
+            if let Some(follow_up) = follow_up {
+                if !gate_budget_left {
+                    // The gate keeps failing but the model is no longer making
+                    // progress on it. Nudging again would loop forever, burning
+                    // an API call per turn (observed live: an unattended session
+                    // resent the same continuation every ~5s). Stop the cycle
+                    // and surface the stall instead.
+                    crate::logging::warn(&format!(
+                        "Todo completion gate ({}) exhausted after {} attempts; stopping auto-poke to avoid an infinite continuation loop",
+                        follow_up.label(),
+                        self.todo_completion_gate_attempts
                     ));
-                self.pending_queued_dispatch = true;
-                return true;
-            }
-            let confidence_summary = super::commands::todo_confidence_summary(&todos);
-            let confidence_label =
-                super::commands::format_todo_completion_confidence(confidence_summary);
-            let needs_spike_challenge = confidence_summary.confidence_spike_detected
-                && !self.todo_confidence_spike_challenged;
-            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
-                && gate_budget_left
-            {
+                    self.push_display_message(DisplayMessage::system(
+                        "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself.",
+                    ));
+                    self.auto_poke_incomplete_todos = false;
+                    self.todo_confidence_spike_challenged = false;
+                    self.todo_completion_gate_attempts = 0;
+                    self.todo_gate_digest_delivered = false;
+                    self.pending_queued_dispatch = false;
+                    return false;
+                }
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
-                let notice = if confidence_summary.completion_confidence_needs_validation {
-                    crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-                    "🔍 Double-checking confidence for you..."
-                } else {
-                    self.todo_confidence_spike_challenged = true;
-                    crate::telemetry::record_todo_gate(
-                        crate::telemetry::TodoGateKind::ConfidenceSpike,
-                    );
-                    "🔍 Double-checking a confidence jump for you..."
+                let notice = match &follow_up {
+                    crate::todo_gates::TodoGateFollowUp::Ownership { .. } => {
+                        crate::telemetry::record_todo_gate(
+                            crate::telemetry::TodoGateKind::Ownership,
+                        );
+                        "🔍 Checking end-to-end ownership before finishing..."
+                    }
+                    crate::todo_gates::TodoGateFollowUp::ConfidenceSpike { .. } => {
+                        self.todo_confidence_spike_challenged = true;
+                        crate::telemetry::record_todo_gate(
+                            crate::telemetry::TodoGateKind::ConfidenceSpike,
+                        );
+                        "🔍 Double-checking a confidence jump for you..."
+                    }
+                    _ => {
+                        crate::telemetry::record_todo_gate(
+                            crate::telemetry::TodoGateKind::Completion,
+                        );
+                        "🔍 Double-checking confidence for you..."
+                    }
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
-                let summary = super::commands::build_todo_confidence_summary_message(&todos);
-                self.queued_messages.push(summary);
+                self.queued_messages.push(follow_up.into_message());
                 self.pending_queued_dispatch = true;
                 return true;
-            }
-            if (ownership_needs_followup
-                || confidence_summary.completion_confidence_needs_validation
-                || needs_spike_challenge)
-                && !gate_budget_left
-            {
-                // The gate keeps failing but the model is no longer making
-                // progress on it. Nudging again would loop forever, burning an
-                // API call per turn (observed live: an unattended session
-                // resent the same continuation every ~5s). Stop the cycle and
-                // surface the stall instead.
-                crate::logging::warn(&format!(
-                    "Todo completion gate exhausted after {} attempts; stopping auto-poke to avoid an infinite continuation loop",
-                    self.todo_completion_gate_attempts
-                ));
-                self.push_display_message(DisplayMessage::system(
-                    "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself.",
-                ));
-                self.auto_poke_incomplete_todos = false;
-                self.todo_confidence_spike_challenged = false;
-                self.todo_completion_gate_attempts = 0;
-                self.todo_gate_digest_delivered = false;
-                self.pending_queued_dispatch = false;
-                return false;
             }
             // Cycle finished cleanly. When auto-poke is the configured default
             // it stays armed so the next batch of work is covered too; only an

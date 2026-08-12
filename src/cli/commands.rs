@@ -2660,6 +2660,14 @@ fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
     crate::todo::load_todos(session_id).unwrap_or_default()
 }
 
+/// Goal assessments for the run's session, for the end-to-end ownership gate.
+///
+/// A session with no goals recorded yields an empty slice, which is exactly
+/// what the ownership check treats as "not carried far enough".
+fn run_goals(session_id: &str) -> Vec<crate::todo::TodoGoal> {
+    crate::todo::load_goals(session_id).unwrap_or_default()
+}
+
 /// Build the deferred quality-check reminder for a headless run, consuming the
 /// turn's observation log.
 ///
@@ -2702,83 +2710,87 @@ fn take_run_gate_digest_if_turn_ended(
     take_run_gate_digest(session_id, already_delivered)
 }
 
+/// Test shorthand for the gates *after* ownership.
+///
+/// Unifying the three gate implementations gave `jcode run` the end-to-end
+/// ownership check it never had, and ownership outranks the confidence gates.
+/// These tests are about the confidence gates specifically, so the shorthand
+/// supplies a goal that already passes ownership for the ungrouped list;
+/// otherwise every one of them would be answered by the new gate and would
+/// silently stop testing what it was written to test. Ownership itself is
+/// covered by `jcode_base::todo_gates`.
+#[cfg(test)]
 fn build_run_auto_poke_follow_up_from_todos(
     todos: &[crate::todo::TodoItem],
     confidence_spike_challenged: bool,
     gate_digest: Option<String>,
 ) -> Option<RunAutoPokeFollowUp> {
-    let incomplete: Vec<_> = todos
-        .iter()
-        .filter(|todo| {
-            !crate::todo::todo_status_is_completed(&todo.status)
-                && !crate::todo::todo_status_is_cancelled(&todo.status)
-        })
-        .cloned()
-        .collect();
-    if !incomplete.is_empty() {
-        return Some(RunAutoPokeFollowUp::Incomplete {
-            count: incomplete.len(),
-            message: build_run_poke_message(&incomplete),
-        });
-    }
-    // Verify the weak points before judging completion confidence: the digest
-    // may prompt work that changes those very assessments.
-    if let Some(message) = gate_digest {
-        return Some(RunAutoPokeFollowUp::GateDigest { message });
-    }
-    if !todos.is_empty()
-        && let Some((message, confidence_spike_challenge)) =
-            build_run_todo_validation_message(todos, !confidence_spike_challenged)
-    {
-        return Some(RunAutoPokeFollowUp::ConfidenceSummary {
-            total_todos: todos.len(),
-            message,
-            confidence_spike_challenge,
-        });
-    }
-    None
+    let owned = crate::todo::TodoGoal {
+        group: None,
+        delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+        autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+        iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::AcceptanceAligned),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+        ..Default::default()
+    };
+    build_run_auto_poke_follow_up_with_goals(
+        todos,
+        std::slice::from_ref(&owned),
+        confidence_spike_challenged,
+        gate_digest,
+    )
 }
 
-fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
-    crate::todo::build_auto_poke_message(incomplete.len())
-}
-
-fn build_run_todo_validation_message(
+/// Decide the next headless-run follow-up, using the shared gate decision.
+///
+/// The ordering and criteria live in `jcode_base::todo_gates` so this path, the
+/// TUI and the ambient runner cannot drift apart again; only the run-specific
+/// wrapper type and its telemetry stay here. Ownership, completion confidence
+/// and the confidence spike all surface as `ConfidenceSummary` because every
+/// call site treats them identically: send the message and count the turn.
+fn build_run_auto_poke_follow_up_with_goals(
     todos: &[crate::todo::TodoItem],
-    allow_confidence_spike_challenge: bool,
-) -> Option<(String, bool)> {
-    let completed: Vec<&crate::todo::TodoItem> = todos
-        .iter()
-        .filter(|todo| crate::todo::todo_status_is_completed(&todo.status))
-        .collect();
-    if completed.is_empty() {
-        return None;
-    }
-
-    let completion_confidence_needs_validation = completed
-        .iter()
-        .any(|todo| !crate::todo::completion_confidence_passes(todo.completion_confidence));
-    let confidence_spike_detected =
-        allow_confidence_spike_challenge && !crate::todo::spike_completed_todos(todos).is_empty();
-
-    if !completion_confidence_needs_validation && !confidence_spike_detected {
-        // Nothing actionable: completing the loop with a generic summary just
-        // spends tokens on "all good" theater, so send nothing and end the run.
-        return None;
-    }
-
-    if completion_confidence_needs_validation {
-        crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-        Some((
-            crate::todo::build_todo_completion_continuation_message(todos),
-            false,
-        ))
-    } else {
-        crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
-        Some((
-            crate::todo::build_todo_confidence_spike_continuation_message(todos),
-            true,
-        ))
+    goals: &[crate::todo::TodoGoal],
+    confidence_spike_challenged: bool,
+    gate_digest: Option<String>,
+) -> Option<RunAutoPokeFollowUp> {
+    let state = crate::todo_gates::TodoGateState {
+        gate_digest_delivered: false,
+        confidence_spike_challenged,
+    };
+    match crate::todo_gates::next_todo_gate_follow_up(todos, goals, gate_digest, state)? {
+        crate::todo_gates::TodoGateFollowUp::Incomplete { count, message } => {
+            Some(RunAutoPokeFollowUp::Incomplete { count, message })
+        }
+        crate::todo_gates::TodoGateFollowUp::GateDigest { message } => {
+            Some(RunAutoPokeFollowUp::GateDigest { message })
+        }
+        crate::todo_gates::TodoGateFollowUp::Ownership { message } => {
+            crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
+            Some(RunAutoPokeFollowUp::ConfidenceSummary {
+                total_todos: todos.len(),
+                message,
+                confidence_spike_challenge: false,
+            })
+        }
+        crate::todo_gates::TodoGateFollowUp::CompletionConfidence { message } => {
+            crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
+            Some(RunAutoPokeFollowUp::ConfidenceSummary {
+                total_todos: todos.len(),
+                message,
+                confidence_spike_challenge: false,
+            })
+        }
+        crate::todo_gates::TodoGateFollowUp::ConfidenceSpike { message } => {
+            crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
+            Some(RunAutoPokeFollowUp::ConfidenceSummary {
+                total_todos: todos.len(),
+                message,
+                confidence_spike_challenge: true,
+            })
+        }
     }
 }
 
@@ -2800,8 +2812,9 @@ async fn run_single_message_command_plain_with_auto_poke(
         let todos = run_todos(agent.session_id());
         let gate_digest =
             take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        match build_run_auto_poke_follow_up_with_goals(
             &todos,
+            &run_goals(agent.session_id()),
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -2882,8 +2895,9 @@ async fn run_single_message_command_capture_with_auto_poke(
         let todos = run_todos(agent.session_id());
         let gate_digest =
             take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        match build_run_auto_poke_follow_up_with_goals(
             &todos,
+            &run_goals(agent.session_id()),
             confidence_spike_challenged,
             gate_digest,
         ) {
@@ -3018,8 +3032,9 @@ async fn run_single_message_command_ndjson(
         let todos = run_todos(&session_id);
         let gate_digest =
             take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
-        match build_run_auto_poke_follow_up_from_todos(
+        match build_run_auto_poke_follow_up_with_goals(
             &todos,
+            &run_goals(agent.session_id()),
             confidence_spike_challenged,
             gate_digest,
         ) {
