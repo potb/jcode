@@ -505,6 +505,7 @@ rctrl - g : echo right ctrl\n\
         use jcode_config_types::KeybindingsConfig;
 
         let snapshot = KeymapSnapshot {
+            alt_delivery: Default::default(),
             version: 1,
             captured_at: String::new(),
             os: "macos".to_string(),

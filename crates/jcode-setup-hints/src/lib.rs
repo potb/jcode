@@ -2586,7 +2586,16 @@ pub(crate) fn keymap_conflict_hint_for(
     state: &mut SetupHintsState,
 ) -> (Option<StartupHints>, bool) {
     let conflicts = keymap::detect_conflicts(keybindings, snapshot);
-    let signature = keymap::conflict_signature(&conflicts);
+    let mut signature = keymap::conflict_signature(&conflicts);
+    // A terminal that swallows Option is not a conflict, so it contributes no
+    // signature of its own; fold it in explicitly or the notice would be
+    // debounced away as "nothing to report".
+    if let Some(alt_sig) = keymap::alt_notice_signature(keybindings, snapshot) {
+        if !signature.is_empty() {
+            signature.push(';');
+        }
+        signature.push_str(&alt_sig);
+    }
 
     match conflict_hint_decision(&signature, &state.keymap_conflict_signature) {
         ConflictHintDecision::Unchanged => (None, false),

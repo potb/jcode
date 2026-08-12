@@ -422,6 +422,7 @@ fn keymap_conflict_hint_full_path_debounces_and_persists_signature() {
 
     fn snapshot(bindings: Vec<DiscoveredBinding>) -> KeymapSnapshot {
         KeymapSnapshot {
+            alt_delivery: Default::default(),
             version: 1,
             captured_at: "0".to_string(),
             os: "macos".to_string(),

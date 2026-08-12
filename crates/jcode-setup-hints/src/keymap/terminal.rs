@@ -14,6 +14,9 @@
 //! every Alacritty default was invisible to conflict detection: a jcode chord
 //! like `cmd+b` (which Alacritty consumes for `SearchBackward`) looked free
 //! while never reaching the TUI.
+//!
+//! Whether the terminal delivers the Option/Alt modifier *at all* is a separate
+//! question, answered by the sibling [`super::alt`] module.
 
 use super::chord::KeyChord;
 use super::source::{DiscoveredBinding, KeySource};
@@ -298,9 +301,10 @@ const ALACRITTY_CONFIG_CANDIDATES: [&str; 3] = [
     ".config/alacritty.toml",
 ];
 
-/// Layer the user's `alacritty.toml` (first match in the documented search
-/// order) on top of `defaults`.
-fn apply_alacritty_user_config(mut effective: Vec<DiscoveredBinding>) -> Vec<DiscoveredBinding> {
+/// The user's `alacritty.toml`, from the first path in the documented search
+/// order that exists and is readable, or `None` when the user has no config at
+/// all (in which case Alacritty's compiled-in defaults apply unmodified).
+pub fn read_alacritty_config() -> Option<String> {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = std::path::PathBuf::from(xdg);
@@ -310,17 +314,22 @@ fn apply_alacritty_user_config(mut effective: Vec<DiscoveredBinding>) -> Vec<Dis
     if let Some(home) = dirs::home_dir() {
         paths.extend(ALACRITTY_CONFIG_CANDIDATES.iter().map(|rel| home.join(rel)));
     }
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let (user, unbound) = parse_alacritty_bindings(&text);
-        effective.retain(|b| !unbound.contains(&b.chord));
-        for binding in user {
-            effective.retain(|b| b.chord != binding.chord);
-            effective.push(binding);
-        }
-        break;
+    paths
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+/// Layer the user's `alacritty.toml` (first match in the documented search
+/// order) on top of `defaults`.
+fn apply_alacritty_user_config(mut effective: Vec<DiscoveredBinding>) -> Vec<DiscoveredBinding> {
+    let Some(text) = read_alacritty_config() else {
+        return effective;
+    };
+    let (user, unbound) = parse_alacritty_bindings(&text);
+    effective.retain(|b| !unbound.contains(&b.chord));
+    for binding in user {
+        effective.retain(|b| b.chord != binding.chord);
+        effective.push(binding);
     }
     effective
 }
@@ -573,6 +582,7 @@ keybind = super+enter=new_window
         use jcode_config_types::KeybindingsConfig;
 
         let snapshot = KeymapSnapshot {
+            alt_delivery: Default::default(),
             version: 1,
             captured_at: String::new(),
             os: "linux".to_string(),
@@ -654,6 +664,7 @@ action = "ReceiveChar"
         use jcode_config_types::KeybindingsConfig;
 
         let snapshot = KeymapSnapshot {
+            alt_delivery: Default::default(),
             version: 1,
             captured_at: String::new(),
             os: "macos".to_string(),

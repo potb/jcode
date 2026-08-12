@@ -10,6 +10,7 @@
 //! Conflict detection against jcode's own bindings is built on top of this in a
 //! later layer.
 
+pub mod alt;
 pub mod chord;
 pub mod conflicts;
 pub mod external;
@@ -18,15 +19,16 @@ pub mod report;
 pub mod source;
 pub mod terminal;
 
+pub use alt::AltDelivery;
 pub use chord::KeyChord;
 pub use conflicts::{Conflict, JcodeBinding, conflict_signature, detect_conflicts, jcode_bindings};
-pub use report::{render_report, render_status_line};
+pub use report::{alt_notice_signature, render_report, render_status_line};
 pub use source::{DiscoveredBinding, KeySource};
 
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the on-disk snapshot. Bump when the format changes.
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// A durable record of the key bindings discovered on this machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,11 @@ pub struct KeymapSnapshot {
     /// Terminal version string if known.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub terminal_version: String,
+    /// Whether this terminal actually delivers Option/Alt to the application.
+    /// Defaults to [`AltDelivery::Unknown`] so a snapshot written by an older
+    /// jcode stays silent instead of claiming Alt is dead.
+    #[serde(default)]
+    pub alt_delivery: AltDelivery,
     /// All discovered bindings, across every source.
     pub bindings: Vec<DiscoveredBinding>,
 }
@@ -101,11 +108,13 @@ pub fn collect_snapshot() -> KeymapSnapshot {
     bindings.extend(terminal::read_alacritty_keybinds());
     bindings.extend(external::read_external_bindings());
 
+    let terminal = detect_terminal_label();
     KeymapSnapshot {
         version: SNAPSHOT_VERSION,
         captured_at: now_timestamp(),
         os: std::env::consts::OS.to_string(),
-        terminal: detect_terminal_label(),
+        alt_delivery: alt::detect_alt_delivery(&terminal),
+        terminal,
         terminal_version: std::env::var("TERM_PROGRAM_VERSION").unwrap_or_default(),
         bindings,
     }
@@ -179,6 +188,7 @@ mod tests {
             os: "macos".to_string(),
             terminal: "Ghostty".to_string(),
             terminal_version: "1.3.1".to_string(),
+            alt_delivery: AltDelivery::Unknown,
             bindings: vec![DiscoveredBinding {
                 chord: KeyChord::new(true, false, false, false, "k"),
                 source: KeySource::Terminal,

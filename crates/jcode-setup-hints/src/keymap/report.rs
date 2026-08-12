@@ -23,6 +23,10 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
     ));
     out.push_str(&format!("OS: {}\n", snapshot.os));
 
+    if let Some(note) = super::alt::explain(snapshot.alt_delivery, &snapshot.terminal) {
+        out.push_str(&format!("\n⚠ {note}\n"));
+    }
+
     let term_count = snapshot.from_source(KeySource::Terminal).count();
     let sys_count = snapshot.from_source(KeySource::MacosSystem).count();
     let app_count = snapshot.from_source(KeySource::ExternalApp).count();
@@ -116,6 +120,15 @@ fn render_conflict_block(c: &Conflict) -> String {
 pub fn render_status_line(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Option<String> {
     let conflicts = detect_conflicts(cfg, snapshot);
     if conflicts.is_empty() {
+        // A degraded Option key is not a conflict, but it has the same symptom:
+        // the binding silently does nothing. Surface it on its own rather than
+        // reporting a clean bill of health.
+        if alt_warning_applies(snapshot.alt_delivery, jcode_has_alt_binding(cfg)) {
+            return Some(format!(
+                "{} does not send Option as Alt, so your `alt+` keybindings never arrive. Run /keys for details.",
+                snapshot.terminal
+            ));
+        }
         return None;
     }
     let keys: Vec<String> = conflicts
@@ -128,6 +141,34 @@ pub fn render_status_line(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) ->
         "Keybinding conflict: {} may be intercepted by your terminal/OS/apps. Run /keys for details.",
         keys.join(", ")
     ))
+}
+
+/// Whether any configured jcode binding uses Alt. Without one, a terminal that
+/// swallows Option costs the user nothing and must not be reported.
+fn jcode_has_alt_binding(cfg: &KeybindingsConfig) -> bool {
+    super::conflicts::jcode_bindings(cfg)
+        .iter()
+        .any(|b| b.chord.alt)
+}
+
+/// Whether a degraded Option key is worth warning about: only when it is
+/// actually degraded *and* the user has an `alt+` binding that it would break.
+fn alt_warning_applies(delivery: super::AltDelivery, has_alt_binding: bool) -> bool {
+    delivery.is_degraded() && has_alt_binding
+}
+
+/// The Alt-delivery contribution to the startup-hint debounce signature, or
+/// `None` when there is nothing to say. Without this, a machine with zero
+/// conflicts produces an empty signature and the notice is treated as
+/// "resolved silently", i.e. never shown.
+pub fn alt_notice_signature(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Option<String> {
+    alt_warning_applies(snapshot.alt_delivery, jcode_has_alt_binding(cfg)).then(|| {
+        format!(
+            "alt-delivery|{}|{}",
+            snapshot.terminal,
+            snapshot.alt_delivery.token()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -143,6 +184,7 @@ mod tests {
             os: "macos".to_string(),
             terminal: "Ghostty".to_string(),
             terminal_version: "1.3.1".to_string(),
+            alt_delivery: crate::keymap::AltDelivery::Unknown,
             bindings,
         }
     }
@@ -186,5 +228,66 @@ mod tests {
         let line = render_status_line(&cfg, &dirty).unwrap();
         assert!(line.contains("Ctrl+Tab"));
         assert!(line.contains("/keys"));
+    }
+
+    #[test]
+    fn dead_option_key_is_reported_even_with_zero_conflicts() {
+        // The gap this closes: nothing intercepts the chord, so the old report
+        // said "no conflicts" while every alt+ binding was silently dead.
+        use crate::keymap::AltDelivery;
+        let cfg = KeybindingsConfig::default();
+        assert!(
+            jcode_has_alt_binding(&cfg),
+            "defaults must contain an alt+ chord for this test to mean anything"
+        );
+
+        let mut snap = snapshot_with(vec![term("cmd+t", "new_tab")]);
+        snap.terminal = "Alacritty".to_string();
+        snap.alt_delivery = AltDelivery::Never;
+
+        let line = render_status_line(&cfg, &snap).expect("should warn about the dead Option key");
+        assert!(line.contains("Alacritty"), "got {line}");
+        assert!(line.contains("alt+"), "got {line}");
+
+        let report = render_report(&cfg, &snap);
+        assert!(report.contains("never sends Option as Alt"), "got {report}");
+        // It must still say the conflict search itself came back clean.
+        assert!(report.contains("No conflicts found"), "got {report}");
+    }
+
+    #[test]
+    fn healthy_or_unknown_option_key_stays_silent() {
+        use crate::keymap::AltDelivery;
+        let cfg = KeybindingsConfig::default();
+        for delivery in [AltDelivery::Delivered, AltDelivery::Unknown] {
+            let mut snap = snapshot_with(vec![term("cmd+t", "new_tab")]);
+            snap.alt_delivery = delivery;
+            assert!(
+                render_status_line(&cfg, &snap).is_none(),
+                "{delivery:?} must not warn"
+            );
+            assert!(!render_report(&cfg, &snap).contains("Option as Alt"));
+        }
+    }
+
+    #[test]
+    fn dead_option_key_is_silent_when_no_alt_binding_is_configured() {
+        use crate::keymap::AltDelivery;
+        // Every alt+ default rebound away: the terminal setting now costs the
+        // user nothing, so warning would be pure noise.
+        let mut cfg = KeybindingsConfig::default();
+        cfg.scroll_prompt_up = "none".to_string();
+        for b in super::super::conflicts::jcode_bindings(&cfg) {
+            assert!(
+                !b.chord.alt || b.field != "keybindings.scroll_prompt_up",
+                "disabled binding still enumerated"
+            );
+        }
+        // The predicate, exercised directly: with no alt chord in the list the
+        // degraded terminal must not produce a warning.
+        assert!(!alt_warning_applies(AltDelivery::Never, false));
+        assert!(alt_warning_applies(AltDelivery::Never, true));
+        assert!(!alt_warning_applies(AltDelivery::Delivered, true));
+        assert!(!alt_warning_applies(AltDelivery::Unknown, true));
     }
 }
