@@ -633,6 +633,131 @@ pub fn read_hammerspoon() -> Vec<DiscoveredBinding> {
 }
 
 // ---------------------------------------------------------------------------
+// Rectangle
+// ---------------------------------------------------------------------------
+
+/// Human-facing label for a Rectangle action key, e.g. `leftHalf` → "left half".
+/// Rectangle's action names are camelCase identifiers; unknown ones (Rectangle
+/// keeps adding commands) are de-camelized rather than dropped, so a binding is
+/// never hidden just because we do not recognize its name.
+fn rectangle_action_label(name: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i != 0 {
+                out.push(' ');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    format!("Rectangle: {out}")
+}
+
+/// Parse Rectangle's preferences, as JSON produced by [`export_domain_json`].
+///
+/// Rectangle stores each shortcut under the top-level `shortcuts` dictionary as
+/// `{ "leftHalf": { "keyCode": 123, "modifierFlags": 786432 } }`, where
+/// `modifierFlags` is a raw `NSEventModifierFlags` mask — the same encoding the
+/// macOS symbolic-hotkeys decoder already understands, so the two share their
+/// flag constants and keycode table instead of duplicating them.
+///
+/// Two cases are deliberately skipped rather than guessed at:
+///
+/// * **Unmodified chords.** Rectangle can technically store a shortcut with no
+///   modifiers, but a bare key cannot be a global hotkey in practice and a
+///   zero mask is also what a cleared shortcut leaves behind. Reporting `h` as
+///   globally taken would manufacture a conflict on nearly every jcode key.
+/// * **Chords carrying `fn`.** jcode's [`KeyChord`] has no `fn` modifier, so
+///   the flag could only be dropped — which would make `fn+f1` compare equal to
+///   a plain `f1` and silently claim an unrelated key is taken.
+pub fn parse_rectangle(json: &str) -> Vec<DiscoveredBinding> {
+    use super::macos_hotkeys::{
+        NS_COMMAND, NS_CONTROL, NS_FUNCTION, NS_OPTION, NS_SHIFT, keycode_to_token,
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(shortcuts) = value.get("shortcuts").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for (action, spec) in shortcuts {
+        let Some(keycode) = spec.get("keyCode").and_then(plist_number) else {
+            continue;
+        };
+        let mask = spec
+            .get("modifierFlags")
+            .and_then(plist_number)
+            .unwrap_or(0) as u64;
+
+        // A shortcut with no modifiers is either unset or unusable as a global
+        // hotkey; either way it is not evidence that the key is taken.
+        if mask & (NS_COMMAND | NS_CONTROL | NS_OPTION | NS_SHIFT) == 0 {
+            continue;
+        }
+        // `fn` cannot be represented, and dropping it would change the chord.
+        if mask & NS_FUNCTION != 0 {
+            continue;
+        }
+        let Some(key) = keycode_to_token(keycode) else {
+            continue;
+        };
+
+        out.push(DiscoveredBinding {
+            chord: KeyChord::new(
+                mask & NS_COMMAND != 0,
+                mask & NS_CONTROL != 0,
+                mask & NS_OPTION != 0,
+                mask & NS_SHIFT != 0,
+                key,
+            ),
+            source: KeySource::ExternalApp,
+            action: rectangle_action_label(action),
+            raw: format!("{action}: keyCode {keycode}, modifierFlags {mask}"),
+            tool: "Rectangle".to_string(),
+            alt_side: AltSide::Unspecified,
+        });
+    }
+    out.sort_by(|a, b| a.action.cmp(&b.action));
+    out
+}
+
+/// Read a number out of a `plutil`-converted plist value. Rectangle writes its
+/// shortcut fields with `-float`, so the same key can come back as `123`,
+/// `123.0` or `"123"` depending on how it was last written.
+fn plist_number(v: &serde_json::Value) -> Option<i64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        serde_json::Value::String(s) => s
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.trim().parse::<f64>().ok().map(|f| f as i64)),
+        _ => None,
+    }
+}
+
+/// Read Rectangle's live preferences from its binary plist.
+///
+/// Rectangle Pro ships under a different bundle id (`com.knollsoft.Hookshot`)
+/// with the same schema, so both domains are tried.
+pub fn read_rectangle() -> Vec<DiscoveredBinding> {
+    for domain in ["com.knollsoft.Rectangle", "com.knollsoft.Hookshot"] {
+        if let Some(json) = super::macos_hotkeys::export_domain_json(domain) {
+            let bindings = parse_rectangle(&json);
+            if !bindings.is_empty() {
+                return bindings;
+            }
+        }
+    }
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
 // Aggregation
 // ---------------------------------------------------------------------------
 
@@ -649,6 +774,7 @@ pub fn read_external_bindings() -> Vec<DiscoveredBinding> {
     out.extend(read_skhd());
     out.extend(read_karabiner());
     out.extend(read_hammerspoon());
+    out.extend(read_rectangle());
     out
 }
 
@@ -1045,5 +1171,84 @@ rctrl - g : echo right ctrl\n\
     fn malformed_toml_yields_nothing() {
         assert!(parse_omniwm("this is = = not toml").is_empty());
         assert!(parse_aerospace("[[[bad").is_empty());
+    }
+
+    /// A trimmed but faithful sample of `defaults export com.knollsoft.Rectangle`
+    /// piped through `plutil -convert json`, including the numeric-string and
+    /// float shapes `plutil` emits for fields Rectangle writes with `-float`.
+    const RECTANGLE_SAMPLE: &str = r#"{
+      "alternateDefaultShortcuts": true,
+      "shortcuts": {
+        "leftHalf": { "keyCode": 123, "modifierFlags": 786432 },
+        "maximize": { "keyCode": 36, "modifierFlags": 1572864 },
+        "center": { "keyCode": "8", "modifierFlags": "1966080" },
+        "nextDisplay": { "keyCode": 124.0, "modifierFlags": 1835008.0 }
+      }
+    }"#;
+
+    #[test]
+    fn parses_rectangle_shortcuts() {
+        let binds = parse_rectangle(RECTANGLE_SAMPLE);
+        let by_action = |needle: &str| -> String {
+            binds
+                .iter()
+                .find(|b| b.action.contains(needle))
+                .unwrap_or_else(|| panic!("no binding for {needle}"))
+                .chord
+                .canonical()
+        };
+        // ctrl+option = 0x40000 | 0x80000 = 786432
+        assert_eq!(by_action("left half"), "ctrl+alt+left");
+        // option+cmd = 0x80000 | 0x100000 = 1572864
+        assert_eq!(by_action("maximize"), "cmd+alt+enter");
+        // Numeric strings decode identically. shift+ctrl+option+cmd = 1966080
+        assert_eq!(by_action("center"), "cmd+ctrl+alt+shift+c");
+        // Floats (Rectangle writes with -float) decode identically.
+        // ctrl+option+cmd = 1835008
+        assert_eq!(by_action("next display"), "cmd+ctrl+alt+right");
+        for b in &binds {
+            assert_eq!(b.source, KeySource::ExternalApp);
+            assert_eq!(b.tool, "Rectangle");
+        }
+    }
+
+    #[test]
+    fn rectangle_skips_unmodified_and_fn_chords() {
+        // A cleared shortcut leaves a zero mask behind; reporting it would
+        // claim a bare key is globally taken.
+        let json = r#"{"shortcuts": {"leftHalf": {"keyCode": 123, "modifierFlags": 0}}}"#;
+        assert!(parse_rectangle(json).is_empty());
+
+        // `fn` cannot be represented in a KeyChord, so the binding is skipped
+        // rather than silently downgraded to a plain f1.
+        let json = r#"{"shortcuts": {"maximize": {"keyCode": 122, "modifierFlags": 8388608}}}"#;
+        assert!(parse_rectangle(json).is_empty());
+    }
+
+    #[test]
+    fn rectangle_tolerates_missing_and_malformed_input() {
+        assert!(parse_rectangle("not json").is_empty());
+        // A preferences domain with no shortcuts dictionary at all.
+        assert!(parse_rectangle(r#"{"windowSnapping": 1}"#).is_empty());
+        // A shortcut entry with no keyCode is skipped, not defaulted to 0/"a".
+        assert!(
+            parse_rectangle(r#"{"shortcuts": {"leftHalf": {"modifierFlags": 786432}}}"#).is_empty()
+        );
+        // An unmapped keycode is skipped rather than guessed at.
+        assert!(
+            parse_rectangle(r#"{"shortcuts": {"x": {"keyCode": 9999, "modifierFlags": 786432}}}"#)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rectangle_action_labels_are_de_camelized() {
+        assert_eq!(rectangle_action_label("leftHalf"), "Rectangle: left half");
+        assert_eq!(rectangle_action_label("maximize"), "Rectangle: maximize");
+        // An action Rectangle adds later still gets a legible label.
+        assert_eq!(
+            rectangle_action_label("topLeftNinth"),
+            "Rectangle: top left ninth"
+        );
     }
 }

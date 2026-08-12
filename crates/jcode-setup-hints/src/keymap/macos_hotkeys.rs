@@ -17,10 +17,16 @@ use super::chord::KeyChord;
 use super::source::{AltSide, DiscoveredBinding, KeySource};
 
 /// NSEvent modifier flag bits used in the symbolic-hotkeys `modmask`.
-const NS_SHIFT: u64 = 0x0002_0000;
-const NS_CONTROL: u64 = 0x0004_0000;
-const NS_OPTION: u64 = 0x0008_0000;
-const NS_COMMAND: u64 = 0x0010_0000;
+/// These are the same `NSEventModifierFlags` values that third-party apps store
+/// in their own preference plists, so they are shared rather than re-declared.
+pub const NS_SHIFT: u64 = 0x0002_0000;
+pub const NS_CONTROL: u64 = 0x0004_0000;
+pub const NS_OPTION: u64 = 0x0008_0000;
+pub const NS_COMMAND: u64 = 0x0010_0000;
+/// The `fn` modifier. jcode has no vocabulary for it, so a chord carrying it
+/// cannot be represented; callers must skip such bindings rather than drop the
+/// flag, which would make `fn+f1` compare equal to a bare `f1`.
+pub const NS_FUNCTION: u64 = 0x0080_0000;
 
 /// Human-readable names for well-known symbolic-hotkey IDs. Only used to make
 /// the snapshot and warnings legible; unknown IDs still get decoded.
@@ -57,7 +63,7 @@ fn action_name(id: i64) -> String {
 /// Map a macOS virtual keycode to a normalized key token. Covers the common
 /// keys that appear in default system shortcuts. Returns `None` for keys we do
 /// not have a stable mapping for (we then fall back to the ASCII parameter).
-fn keycode_to_token(keycode: i64) -> Option<&'static str> {
+pub fn keycode_to_token(keycode: i64) -> Option<&'static str> {
     Some(match keycode {
         0 => "a",
         1 => "s",
@@ -250,33 +256,35 @@ pub fn hotkeys_to_bindings(raw: &[RawHotkey]) -> Vec<DiscoveredBinding> {
     out
 }
 
-/// Read and decode the live macOS symbolic hotkeys via `defaults` + `plutil`.
-/// Returns an empty vec on any failure (missing tools, non-macOS, parse error).
+/// Export a macOS preference domain as JSON, via `defaults export` piped
+/// through `plutil -convert json`.
+///
+/// Most third-party apps (Rectangle, Raycast, …) persist their preferences as
+/// **binary** plists, which cannot be read as text, so this two-step pipeline is
+/// the only portable way to see inside them without linking a plist parser.
+/// Returns `None` on any failure — missing tools, absent domain, non-zero exit —
+/// because a domain we cannot read is not evidence of anything and must produce
+/// silence rather than a guess.
 #[cfg(target_os = "macos")]
-pub fn read_symbolic_hotkeys() -> Vec<DiscoveredBinding> {
+pub fn export_domain_json(domain: &str) -> Option<String> {
     use std::process::Command;
 
     let export = Command::new("/usr/bin/defaults")
-        .args(["export", "com.apple.symbolichotkeys", "-"])
-        .output();
-    let Ok(export) = export else {
-        return Vec::new();
-    };
+        .args(["export", domain, "-"])
+        .output()
+        .ok()?;
     if !export.status.success() || export.stdout.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     // Pipe the exported plist through plutil to get JSON.
-    let mut child = match Command::new("/usr/bin/plutil")
+    let mut child = Command::new("/usr/bin/plutil")
         .args(["-convert", "json", "-o", "-", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+        .ok()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
@@ -284,20 +292,26 @@ pub fn read_symbolic_hotkeys() -> Vec<DiscoveredBinding> {
         // stdin dropped here, closing the pipe.
     }
 
-    let Ok(output) = child.wait_with_output() else {
-        return Vec::new();
-    };
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    let json = String::from_utf8_lossy(&output.stdout);
-    let raw = parse_symbolic_hotkeys_json(&json);
-    hotkeys_to_bindings(&raw)
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(not(target_os = "macos"))]
+pub fn export_domain_json(_domain: &str) -> Option<String> {
+    None
+}
+
+/// Read and decode the live macOS symbolic hotkeys via `defaults` + `plutil`.
+/// Returns an empty vec on any failure (missing tools, non-macOS, parse error).
 pub fn read_symbolic_hotkeys() -> Vec<DiscoveredBinding> {
-    Vec::new()
+    let Some(json) = export_domain_json("com.apple.symbolichotkeys") else {
+        return Vec::new();
+    };
+    let raw = parse_symbolic_hotkeys_json(&json);
+    hotkeys_to_bindings(&raw)
 }
 
 #[cfg(test)]
