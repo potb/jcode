@@ -45,8 +45,23 @@ fn cached_anthropic_usage_entry_for_active_account() -> Option<UsageData> {
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
+    let active_label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+
+    // Another jcode process on this machine may have fetched moments ago.
+    // Adopting its result is the whole point of the shared snapshot: without
+    // it, every process runs its own five-minute poller against a single burst
+    // limiter, and they all re-fetch at the same instant when a window resets.
+    if let Some(shared) = super::snapshot::fresh_shared_snapshot(Some(&active_label)) {
+        *usage.write().await = shared;
+        return;
+    }
+
     match fetch_usage().await {
         Ok(new_data) => {
+            // Publish before storing so the next process to wake sees it even
+            // if this one exits immediately afterwards.
+            super::snapshot::publish(&new_data, Some(&active_label));
             *usage.write().await = new_data;
         }
         Err(e) => {
