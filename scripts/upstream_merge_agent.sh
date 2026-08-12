@@ -3,7 +3,8 @@
 #
 # Keeps a fork's custom code mergeable with upstream by running a dedicated
 # jcode agent on an isolated git worktree. It never touches the working tree the
-# user is actively editing, and it never pushes.
+# user is actively editing, and it never writes to upstream. The merged result
+# is published to the fork through a pull request (see publish_fork_if_ahead).
 #
 # Install a schedule with scripts/install_upstream_merge_schedule.sh.
 #
@@ -39,6 +40,11 @@ PUSH_FORK="${JCODE_UPSTREAM_PUSH:-1}"
 # longer be reachable, `git merge-base` would still report the old fork point,
 # and every later run would try to merge the same upstream history again.
 PR_MERGE_METHOD="${JCODE_UPSTREAM_MERGE_METHOD:-merge}"
+# Whether this job merges its own pull request. Defaults to 0: the pull request
+# is opened and left for review, and every later run force-pushes the refreshed
+# base onto the same pull request branch, so successive upstream updates
+# accumulate in one pull request until it is merged by hand.
+AUTO_MERGE_PR="${JCODE_UPSTREAM_AUTO_MERGE:-0}"
 # Branch the pull request is opened from. Owned entirely by this job.
 PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # Keep GitHub Actions disabled on the fork.
@@ -258,6 +264,16 @@ publish_fork_if_ahead() {
     log "fork $FORK_REMOTE/$BASE already matches local $BASE"
     return 0
   fi
+  # The fork is AHEAD of local: the pull request from an earlier run was merged
+  # on GitHub, so its merge commit exists only on the remote. That is not a
+  # history rewrite and there is nothing new to publish, so adopt it and stop.
+  # Without this the check below would send an ordinary merged pull request
+  # through reconcile_rewritten_base.
+  if [ -n "$remote_sha" ] && git merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+    log "$FORK_REMOTE/$BASE is ahead of local $BASE (a pull request was merged); adopting it"
+    sync_local_base_to_fork
+    return 0
+  fi
   if [ -n "$remote_sha" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
     reconcile_rewritten_base "$remote_sha" "$local_sha" || return 1
     local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
@@ -273,40 +289,105 @@ publish_fork_if_ahead() {
     log "WARNING: gh is required to open a pull request but is not installed"
     return 1
   fi
+  # A locked login keyring, which is the normal state right after boot until the
+  # desktop session unlocks it, leaves gh installed but unable to reach its
+  # credentials. Checking before the push matters: otherwise the push succeeds,
+  # every later gh call fails, and the branch is left on the fork with no pull
+  # request behind it.
+  local auth_out
+  if ! auth_out=$(gh auth status 2>&1); then
+    log "WARNING: gh is not authenticated; not opening a pull request"
+    log "$(printf '%s' "$auth_out" | tail -3)"
+    notify "Upstream merge needs GitHub auth" "The merge is committed locally, but gh could not authenticate, so nothing was published.
+
+Unlock the login keyring (or run 'gh auth login'), then rerun the job.
+
+Log: $LOG" "high"
+    return 1
+  fi
   local slug
   slug=$(fork_slug) || { log "WARNING: could not derive the fork slug"; return 1; }
 
-  # Force-push is safe here and nowhere else: the PR branch is owned entirely by
-  # this job and is recreated from the fork's base on every run.
-  if ! git push --force-with-lease "$FORK_REMOTE" "$BASE:refs/heads/$PR_BRANCH"; then
+  # Force-push is safe here and nowhere else: the pull request branch is owned
+  # entirely by this job and is rebuilt from the fork's base on every run.
+  #
+  # The lease is stated explicitly from ls-remote rather than left to the
+  # remote-tracking ref. The fork's fetch refspec need only cover the base
+  # branch, and then no refs/remotes entry for the pull request branch ever
+  # exists, so a bare --force-with-lease has nothing to compare and rejects the
+  # push as "stale info" on every run after the one that created the branch.
+  local pr_remote_sha lease
+  pr_remote_sha=$(git ls-remote "$FORK_REMOTE" "refs/heads/$PR_BRANCH" 2>/dev/null | awk '{print $1}')
+  if [ -n "$pr_remote_sha" ]; then
+    lease="--force-with-lease=refs/heads/$PR_BRANCH:$pr_remote_sha"
+  else
+    # The branch does not exist yet, so there is nothing to clobber.
+    lease="--force"
+  fi
+  if ! git push "$lease" "$FORK_REMOTE" "$BASE:refs/heads/$PR_BRANCH"; then
     log "WARNING: push of $PR_BRANCH to $FORK_REMOTE failed"
     return 1
   fi
   log "pushed $local_sha to $FORK_REMOTE/$PR_BRANCH"
 
-  local pr
-  pr=$(gh pr list --repo "$slug" --head "$PR_BRANCH" --base "$BASE" --state open \
-    --json number --jq '.[0].number' 2>/dev/null)
-  if [ -z "$pr" ] || [ "$pr" = "null" ]; then
-    pr=$(gh pr create --repo "$slug" --head "$PR_BRANCH" --base "$BASE" \
-      --title "Merge upstream into $BASE" \
-      --body "Automated upstream merge from \`$UPSTREAM_REF\` ($UP_SHA).
+  # The pull request branch is rebuilt from the current base on every run, so an
+  # open pull request nobody merged yet gains the newer upstream commits instead
+  # of a second pull request appearing beside it. Updates accumulate in one pull
+  # request until it is merged.
+  local pr body
+  body="Automated upstream merge from \`$UPSTREAM_REF\` ($UP_SHA).
 
 **Merge this, do not squash.** The fork is meant to sit on top of upstream, which
 requires upstream's commits to stay genuine ancestors of \`$BASE\`. A squash would
 replace them with one new commit containing the same code, leaving upstream SHAs
 unreachable and every later run re-merging the same history.
 
-Opened by scripts/upstream_merge_agent.sh." \
-      2>&1 | tail -1)
+While this stays open, later runs force-push the refreshed merge onto
+\`$PR_BRANCH\`, so further upstream updates accumulate here.
+
+Last updated $(date -u +%Y-%m-%dT%H:%M:%SZ) by scripts/upstream_merge_agent.sh."
+
+  pr=$(gh pr list --repo "$slug" --head "$PR_BRANCH" --base "$BASE" --state open \
+    --json number --jq '.[0].number' 2>/dev/null)
+  if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+    # Capture the exit status rather than piping to `tail`, whose own status
+    # would hide the failure and report a nonexistent pull request as opened.
+    local create_out create_status
+    create_out=$(gh pr create --repo "$slug" --head "$PR_BRANCH" --base "$BASE" \
+      --title "Merge upstream into $BASE" \
+      --body "$body" 2>&1)
+    create_status=$?
+    if [ "$create_status" -ne 0 ]; then
+      log "WARNING: could not open a pull request for $PR_BRANCH"
+      log "$(printf '%s' "$create_out" | tail -3)"
+      notify "Upstream merge could not open a pull request" "$PR_BRANCH is pushed to the fork, but 'gh pr create' failed, so no pull request exists for it.
+
+$(printf '%s' "$create_out" | tail -3)
+
+Log: $LOG" "high"
+      return 1
+    fi
+    pr=$(printf '%s' "$create_out" | tail -1)
     log "opened pull request: $pr"
     pr=$(printf '%s' "$pr" | sed -E 's#.*/pull/([0-9]+).*#\1#')
   else
-    log "reusing open pull request #$pr"
+    log "reusing open pull request #$pr; it now carries upstream $UP_SHA"
+    # The force-push above already updated the diff. This only keeps the
+    # description from still naming an older upstream commit.
+    gh pr edit "$pr" --repo "$slug" --body "$body" >/dev/null 2>&1 \
+      || log "WARNING: could not refresh the body of pull request #$pr"
   fi
   case "$pr" in
     ''|*[!0-9]*) log "WARNING: could not determine the pull request number"; return 1 ;;
   esac
+
+  if [ "$AUTO_MERGE_PR" != "1" ]; then
+    log "pull request #$pr left open for review (JCODE_UPSTREAM_AUTO_MERGE=$AUTO_MERGE_PR)"
+    notify "Upstream merge pull request ready" "Pull request #$pr on $slug carries upstream $UP_SHA and is waiting for you.
+
+https://github.com/$slug/pull/$pr" "default"
+    return 0
+  fi
 
   # --merge, not --squash: see PR_MERGE_METHOD. Output is captured rather
   # than piped, because a pipeline's status is the last command's and would
@@ -338,9 +419,9 @@ Opened by scripts/upstream_merge_agent.sh." \
   fi
 }
 
-# Fast-forward the real repo's base branch onto the fork remote after a PR
-# merge. Guarded hard: the user may be mid-edit, and moving their branch under
-# them is exactly the regret this job must avoid.
+# Fast-forward the real repo's base branch onto the fork remote after a pull
+# request merge. Guarded hard: the user may be mid-edit, and moving their branch
+# under them is exactly the regret this job must avoid.
 sync_local_base_to_fork() {
   local remote_sha local_sha
   remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null) || return 0
@@ -360,6 +441,52 @@ sync_local_base_to_fork() {
   else
     log "WARNING: local $BASE could not fast-forward to $FORK_REMOTE/$BASE"
   fi
+}
+
+# Pull whatever the fork's base branch gained on GitHub into the local base
+# before anything else happens.
+#
+# The normal source of that is the user merging this job's own pull request:
+# the merge commit exists only on the remote. Merging upstream on top of a stale
+# local base would then produce a branch that diverges from the fork for no
+# reason, and the publish step would read the missing merge commit as data loss
+# and refuse to push. Runs before the upstream merge so the merge is built on
+# the base the fork actually has.
+integrate_fork_base() {
+  git remote get-url "$FORK_REMOTE" >/dev/null 2>&1 || return 0
+  [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ] || return 0
+
+  local remote_sha local_sha
+  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null) || return 0
+  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
+  [ "$remote_sha" != "$local_sha" ] || return 0
+  # Nothing on the remote that the local base lacks. Publishing what is only
+  # local is publish_fork_if_ahead's job, not this one's.
+  git -C "$REPO" merge-base --is-ancestor "$remote_sha" "$local_sha" && return 0
+
+  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+    log "repo has uncommitted changes; not integrating $FORK_REMOTE/$BASE"
+    return 0
+  fi
+  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
+    log "repo is not on $BASE; not integrating $FORK_REMOTE/$BASE"
+    return 0
+  fi
+
+  if git -C "$REPO" merge --ff-only "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
+    log "fast-forwarded local $BASE onto $FORK_REMOTE/$BASE ($remote_sha)"
+    return 0
+  fi
+  # Diverged: the remote gained the pull request merge while the local base
+  # gained commits of its own. A real merge is the honest resolution, and it is
+  # the same merge GitHub would show. Conflicts here are the user's to settle.
+  if git -C "$REPO" merge --no-edit "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
+    log "merged $FORK_REMOTE/$BASE into local $BASE"
+    return 0
+  fi
+  git -C "$REPO" merge --abort >/dev/null 2>&1
+  log "WARNING: local $BASE and $FORK_REMOTE/$BASE diverged and do not merge cleanly"
+  return 1
 }
 
 cd "$REPO" || { log "repo missing: $REPO"; exit 1; }
@@ -383,6 +510,10 @@ git fetch --prune "$UPSTREAM_REMOTE" || { log "fetch $UPSTREAM_REMOTE failed"; e
 if [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ]; then
   git fetch --prune "$FORK_REMOTE" || log "WARNING: fetch $FORK_REMOTE failed"
 fi
+
+# Adopt anything the fork gained on GitHub (typically a merged pull request from
+# an earlier run) before deciding what upstream still owes this branch.
+integrate_fork_base
 
 BASE_SHA=$(git rev-parse "$BASE") || exit 1
 UP_SHA=$(git rev-parse "$UPSTREAM_REF") || exit 1
@@ -435,10 +566,17 @@ REASON=""
 if git merge --no-ff --no-edit "$UP_SHA"; then
   log "clean merge; verifying with: $CHECK_CMD"
   if eval "$CHECK_CMD"; then
+    # A verified merge still has to be adopted and published, exactly like one
+    # the agent produced. Exiting here instead left the most common case of all,
+    # an upstream change that merges cleanly, sitting in the worktree forever
+    # while the fork was never updated.
     log "clean merge verified on branch $BRANCH in $WORKTREE"
-    exit 0
+    STATUS="merged"
+    DETAIL="Upstream merged cleanly with no conflicts. '$CHECK_CMD' passes."
+    MECHANICAL_MERGE=1
+  else
+    REASON="merge was clean but '$CHECK_CMD' failed"
   fi
-  REASON="merge was clean but '$CHECK_CMD' failed"
 else
   CONFLICTS=$(git diff --name-only --diff-filter=U)
   if [ -z "$CONFLICTS" ]; then
@@ -452,7 +590,7 @@ else
         log "rerere-resolved merge verified on branch $BRANCH"
         STATUS="merged"
         DETAIL="All conflicts were replayed from git rerere (you resolved them before). '$CHECK_CMD' passes."
-        RERERE_MERGE=1
+        MECHANICAL_MERGE=1
       else
         REASON="rerere replayed resolutions but the commit or check failed"
         log "$REASON; handing to agent"
@@ -486,11 +624,13 @@ for q in d.get("questions", []) or []:
 PY
 }
 
-RERERE_MERGE="${RERERE_MERGE:-0}"
+# Set when git itself produced a verified merge, either cleanly or by replaying
+# rerere resolutions. No agent is needed in that case.
+MECHANICAL_MERGE="${MECHANICAL_MERGE:-0}"
 
-# Everything from here to the verdict is the agent path. rerere already produced
-# a verified merge, so skip straight to reporting it.
-if [ "$RERERE_MERGE" = "0" ]; then
+# Everything from here to the verdict is the agent path, which a merge git
+# already completed and verified skips entirely.
+if [ "$MECHANICAL_MERGE" = "0" ]; then
 log "$REASON; handing to agent"
 
 CONFLICTS=$(git diff --name-only --diff-filter=U | head -50)
