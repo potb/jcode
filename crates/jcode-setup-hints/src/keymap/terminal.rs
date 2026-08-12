@@ -21,6 +21,11 @@
 //! WezTerm sits with Ghostty rather than Alacritty: `wezterm show-keys` prints
 //! the effective key tables (defaults merged with the user's Lua config), so we
 //! ask it instead of encoding a table that would drift.
+//!
+//! kitty sits with Alacritty: `kitty.conf` is plain text, but the defaults are
+//! compiled in and `kitty --debug-config` prints only the *diff* against them,
+//! so [`read_kitty_keybinds`] encodes the upstream table and layers the user's
+//! `map` directives (including `clear_all_shortcuts` and unbinds) on top.
 
 use super::chord::KeyChord;
 use super::source::{DiscoveredBinding, KeySource};
@@ -556,6 +561,352 @@ pub fn read_wezterm_keybinds() -> Vec<DiscoveredBinding> {
     parse_wezterm_keys(&String::from_utf8_lossy(&output.stdout))
 }
 
+// ---------------------------------------------------------------------------
+// kitty
+// ---------------------------------------------------------------------------
+
+/// kitty's default value for `kitty_mod`, the modifier alias every built-in
+/// shortcut is written against. A user can rebind it in `kitty.conf`, which
+/// moves the *entire* default table onto a different modifier at once — so it
+/// has to be read before any default chord can be resolved.
+const KITTY_MOD_DEFAULT: &str = "ctrl+shift";
+
+/// kitty's compiled-in shortcuts that apply on every platform, transcribed from
+/// upstream `kitty/options/definition.py`.
+///
+/// kitty sits with Alacritty rather than Ghostty/WezTerm: `kitty.conf` is plain
+/// text, but the defaults are compiled into the binary and the config file that
+/// ships is entirely commented out, so a user's config says nothing about which
+/// chords are actually taken. There is no "dump my effective keymap" command
+/// either (`kitty --debug-config` prints only the *diff* against defaults), so
+/// the table has to be encoded.
+///
+/// Multi-key sequences (`kitty_mod+p>f` and friends) are excluded: they are
+/// two-chord sequences, and only the first chord is consumed, which we do not
+/// model. Mouse maps are not key input.
+const KITTY_COMMON_DEFAULTS: &[(&str, &str)] = &[
+    ("kitty_mod+c", "copy_to_clipboard"),
+    ("kitty_mod+v", "paste_from_clipboard"),
+    ("kitty_mod+s", "paste_from_selection"),
+    ("shift+insert", "paste_from_selection"),
+    ("kitty_mod+o", "pass_selection_to_program"),
+    ("kitty_mod+up", "scroll_line_up"),
+    ("kitty_mod+k", "scroll_line_up"),
+    ("kitty_mod+down", "scroll_line_down"),
+    ("kitty_mod+j", "scroll_line_down"),
+    ("kitty_mod+page_up", "scroll_page_up"),
+    ("kitty_mod+page_down", "scroll_page_down"),
+    ("kitty_mod+home", "scroll_home"),
+    ("kitty_mod+end", "scroll_end"),
+    ("kitty_mod+z", "scroll_to_prompt"),
+    ("kitty_mod+h", "show_scrollback"),
+    ("kitty_mod+g", "show_last_command_output"),
+    ("kitty_mod+/", "search_scrollback"),
+    ("kitty_mod+enter", "new_window"),
+    ("kitty_mod+n", "new_os_window"),
+    ("kitty_mod+w", "close_window"),
+    ("kitty_mod+]", "next_window"),
+    ("kitty_mod+[", "previous_window"),
+    ("kitty_mod+f", "move_window_forward"),
+    ("kitty_mod+b", "move_window_backward"),
+    ("kitty_mod+`", "move_window_to_top"),
+    ("kitty_mod+r", "start_resizing_window"),
+    ("kitty_mod+1", "first_window"),
+    ("kitty_mod+2", "second_window"),
+    ("kitty_mod+3", "third_window"),
+    ("kitty_mod+4", "fourth_window"),
+    ("kitty_mod+5", "fifth_window"),
+    ("kitty_mod+6", "sixth_window"),
+    ("kitty_mod+7", "seventh_window"),
+    ("kitty_mod+8", "eighth_window"),
+    ("kitty_mod+9", "ninth_window"),
+    ("kitty_mod+0", "tenth_window"),
+    ("kitty_mod+f7", "focus_visible_window"),
+    ("kitty_mod+f8", "swap_with_window"),
+    ("kitty_mod+right", "next_tab"),
+    ("ctrl+tab", "next_tab"),
+    ("kitty_mod+left", "previous_tab"),
+    ("ctrl+shift+tab", "previous_tab"),
+    ("kitty_mod+t", "new_tab"),
+    ("kitty_mod+q", "close_tab"),
+    ("kitty_mod+.", "move_tab_forward"),
+    ("kitty_mod+,", "move_tab_backward"),
+    ("kitty_mod+alt+t", "set_tab_title"),
+    ("kitty_mod+l", "next_layout"),
+    ("kitty_mod+equal", "change_font_size"),
+    ("kitty_mod+plus", "change_font_size"),
+    ("kitty_mod+minus", "change_font_size"),
+    ("kitty_mod+backspace", "change_font_size"),
+    ("kitty_mod+e", "open_url_with_hints"),
+    ("kitty_mod+f11", "toggle_fullscreen"),
+    ("kitty_mod+f10", "toggle_maximized"),
+    ("kitty_mod+u", "input_unicode_character"),
+    ("kitty_mod+f2", "edit_config_file"),
+    ("kitty_mod+escape", "kitty_shell"),
+    ("kitty_mod+delete", "clear_terminal"),
+    ("kitty_mod+f5", "load_config_file"),
+    ("kitty_mod+f6", "debug_config"),
+];
+
+/// kitty's compiled-in shortcuts that exist only on macOS (the `only='macos'`
+/// entries upstream). These are Cmd-based and must not leak onto other
+/// platforms, where the physical key produces no Cmd modifier at all.
+const KITTY_MACOS_DEFAULTS: &[(&str, &str)] = &[
+    ("cmd+c", "copy_or_noop"),
+    ("cmd+v", "paste_from_clipboard"),
+    ("opt+cmd+page_up", "scroll_line_up"),
+    ("cmd+up", "scroll_line_up"),
+    ("opt+cmd+page_down", "scroll_line_down"),
+    ("cmd+down", "scroll_line_down"),
+    ("cmd+page_up", "scroll_page_up"),
+    ("cmd+page_down", "scroll_page_down"),
+    ("cmd+home", "scroll_home"),
+    ("cmd+end", "scroll_end"),
+    ("cmd+enter", "new_window"),
+    ("cmd+n", "new_os_window"),
+    ("shift+cmd+d", "close_window"),
+    ("cmd+r", "start_resizing_window"),
+    ("cmd+1", "first_window"),
+    ("cmd+2", "second_window"),
+    ("cmd+3", "third_window"),
+    ("cmd+4", "fourth_window"),
+    ("cmd+5", "fifth_window"),
+    ("cmd+6", "sixth_window"),
+    ("cmd+7", "seventh_window"),
+    ("cmd+8", "eighth_window"),
+    ("cmd+9", "ninth_window"),
+    ("shift+cmd+]", "next_tab"),
+    ("shift+cmd+[", "previous_tab"),
+    ("cmd+t", "new_tab"),
+    ("cmd+w", "close_tab"),
+    ("shift+cmd+w", "close_os_window"),
+    ("shift+cmd+i", "set_tab_title"),
+    ("cmd+plus", "change_font_size"),
+    ("cmd+equal", "change_font_size"),
+    ("shift+cmd+equal", "change_font_size"),
+    ("cmd+minus", "change_font_size"),
+    ("shift+cmd+minus", "change_font_size"),
+    ("cmd+0", "change_font_size"),
+    ("ctrl+cmd+f", "toggle_fullscreen"),
+    ("opt+cmd+s", "toggle_macos_secure_keyboard_entry"),
+    ("ctrl+cmd+space", "input_unicode_character"),
+    ("cmd+,", "edit_config_file"),
+    ("opt+cmd+r", "clear_terminal"),
+    ("cmd+k", "clear_terminal"),
+    ("opt+cmd+k", "clear_terminal"),
+    ("cmd+l", "clear_terminal"),
+    ("ctrl+cmd+l", "clear_terminal"),
+    ("cmd+h", "hide_macos_app"),
+    ("opt+cmd+h", "hide_macos_other_apps"),
+    ("cmd+m", "minimize_macos_window"),
+    ("cmd+q", "quit"),
+];
+
+/// Expand a kitty chord spec into a [`KeyChord`], substituting `kitty_mod` for
+/// the effective modifier alias.
+///
+/// Returns `None` for multi-key sequences (`a>b`) and for specs that name no
+/// key at all — `map kitty_mod+space` with no action is kitty's syntax for
+/// *removing* a binding, which frees the chord rather than taking it.
+fn kitty_chord(spec: &str, kitty_mod: &str) -> Option<KeyChord> {
+    if spec.contains('>') {
+        return None;
+    }
+    let expanded = spec.replace("kitty_mod", kitty_mod);
+    let mut cmd = false;
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut key: Option<String> = None;
+
+    for tok in split_trigger_tokens(&expanded) {
+        match tok.to_ascii_lowercase().as_str() {
+            "super" | "cmd" | "command" => cmd = true,
+            "ctrl" | "control" => ctrl = true,
+            "alt" | "opt" | "option" => alt = true,
+            "shift" => shift = true,
+            // kitty spells hyper/meta as distinct modifiers; jcode has no
+            // vocabulary for them, and a chord we cannot represent would
+            // compare equal to a different one if we dropped the modifier.
+            "hyper" | "meta" => return None,
+            other => key = Some(kitty_key(other)),
+        }
+    }
+
+    Some(KeyChord::new(cmd, ctrl, alt, shift, &key?))
+}
+
+/// Translate kitty's key spellings onto jcode's vocabulary. Most names already
+/// match after [`KeyChord::normalize_key`]; these are the ones that do not.
+fn kitty_key(raw: &str) -> String {
+    match raw {
+        "plus" => "+".to_string(),
+        "equal" => "=".to_string(),
+        "minus" => "-".to_string(),
+        // Numpad keys are physically distinct from the main-row ones and
+        // never collide with a jcode chord, so they are dropped upstream of
+        // here by never appearing in the tables.
+        other => other.to_string(),
+    }
+}
+
+/// Build [`DiscoveredBinding`]s from a kitty `(spec, action)` table.
+fn kitty_table_bindings(table: &[(&str, &str)], kitty_mod: &str) -> Vec<DiscoveredBinding> {
+    table
+        .iter()
+        .filter_map(|(spec, action)| {
+            Some(DiscoveredBinding {
+                chord: kitty_chord(spec, kitty_mod)?,
+                source: KeySource::Terminal,
+                action: (*action).to_string(),
+                raw: (*spec).to_string(),
+                tool: "kitty".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// kitty's documented defaults for this platform, resolved against `kitty_mod`.
+fn kitty_default_bindings(kitty_mod: &str) -> Vec<DiscoveredBinding> {
+    let mut binds = kitty_table_bindings(KITTY_COMMON_DEFAULTS, kitty_mod);
+    if cfg!(target_os = "macos") {
+        binds.extend(kitty_table_bindings(KITTY_MACOS_DEFAULTS, kitty_mod));
+    }
+    binds
+}
+
+/// The value of `kitty_mod` declared in a `kitty.conf`, or kitty's default.
+pub fn parse_kitty_mod(text: &str) -> String {
+    text.lines()
+        .rev()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let rest = line.strip_prefix("kitty_mod")?;
+            // Guard against `kitty_mod_something`: the option name must be
+            // followed by whitespace.
+            if !rest.starts_with(char::is_whitespace) {
+                return None;
+            }
+            let value = rest.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+        .next()
+        .unwrap_or_else(|| KITTY_MOD_DEFAULT.to_string())
+}
+
+/// Parse the `map` directives of a `kitty.conf`.
+///
+/// Returns `(bindings, unbound_chords, cleared_all)`.
+///
+/// Three kitty behaviours matter for conflict detection:
+/// - `map <chord>` with no action *unbinds* the chord, handing it back to the
+///   program running in the terminal. That frees a default, so it is recorded
+///   as a removal rather than a binding.
+/// - `map <chord> no_op` does the same thing under kitty's older spelling.
+///   `discard_event`, by contrast, swallows the key, so it still conflicts.
+/// - `clear_all_shortcuts yes` drops every default declared *above* it, which
+///   is the documented way to start from a blank slate.
+pub fn parse_kitty_maps(text: &str) -> (Vec<DiscoveredBinding>, Vec<KeyChord>, bool) {
+    let kitty_mod = parse_kitty_mod(text);
+    let mut bindings = Vec::new();
+    let mut unbound = Vec::new();
+    let mut cleared = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("clear_all_shortcuts") {
+            let value = rest.trim().to_ascii_lowercase();
+            if value == "yes" || value == "y" || value == "true" {
+                cleared = true;
+                bindings.clear();
+                unbound.clear();
+            }
+            continue;
+        }
+        // `map [--options] <chord> [action...]`
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("map") {
+            continue;
+        }
+        let mut parts = parts.skip_while(|t| t.starts_with("--"));
+        let Some(spec) = parts.next() else {
+            continue;
+        };
+        let Some(chord) = kitty_chord(spec, &kitty_mod) else {
+            continue;
+        };
+        let action = parts.collect::<Vec<_>>().join(" ");
+        if action.is_empty() || action == "no_op" {
+            unbound.push(chord);
+            continue;
+        }
+        bindings.push(DiscoveredBinding {
+            chord,
+            source: KeySource::Terminal,
+            action,
+            raw: line.to_string(),
+            tool: "kitty".to_string(),
+        });
+    }
+
+    (bindings, unbound, cleared)
+}
+
+/// kitty's config search order. `$KITTY_CONFIG_DIRECTORY` wins when set, then
+/// `$XDG_CONFIG_HOME/kitty`, then `~/.config/kitty`.
+pub fn read_kitty_config() -> Option<String> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("KITTY_CONFIG_DIRECTORY") {
+        paths.push(std::path::PathBuf::from(dir).join("kitty.conf"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        paths.push(std::path::PathBuf::from(xdg).join("kitty/kitty.conf"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".config/kitty/kitty.conf"));
+    }
+    paths
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+/// Layer a `kitty.conf` on top of the compiled-in defaults.
+pub fn apply_kitty_user_config(text: &str) -> Vec<DiscoveredBinding> {
+    let kitty_mod = parse_kitty_mod(text);
+    let (user, unbound, cleared) = parse_kitty_maps(text);
+    let mut effective = if cleared {
+        Vec::new()
+    } else {
+        kitty_default_bindings(&kitty_mod)
+    };
+    effective.retain(|b| !unbound.contains(&b.chord));
+    for binding in user {
+        effective.retain(|b| b.chord != binding.chord);
+        effective.push(binding);
+    }
+    effective
+}
+
+/// Effective kitty bindings for this machine: documented defaults with the
+/// user's `kitty.conf` layered on top. Returns nothing when kitty is not the
+/// active terminal, so an unused terminal never generates conflict noise.
+pub fn read_kitty_keybinds() -> Vec<DiscoveredBinding> {
+    // kitty exports KITTY_WINDOW_ID (and KITTY_PID) into every shell it spawns.
+    if std::env::var_os("KITTY_WINDOW_ID").is_none() {
+        return Vec::new();
+    }
+    match read_kitty_config() {
+        Some(text) => apply_kitty_user_config(&text),
+        None => kitty_default_bindings(KITTY_MOD_DEFAULT),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,6 +1245,190 @@ action = "ReceiveChar"
                 .iter()
                 .any(|c| c.jcode.field == "keybindings.open_resume"),
             "expected cmd+b to conflict with Alacritty SearchBackward, got {conflicts:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // kitty
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn kitty_defaults_cover_the_chords_that_shadow_jcode() {
+        let binds = kitty_default_bindings(KITTY_MOD_DEFAULT);
+        let find = |c: &str| binds.iter().find(|b| b.chord.canonical() == c);
+
+        // ctrl+shift+k / ctrl+shift+j are the interesting pair: kitty scrolls
+        // by line on them, so a jcode binding there never reaches the TUI.
+        assert_eq!(
+            find("ctrl+shift+k").map(|b| b.action.as_str()),
+            Some("scroll_line_up")
+        );
+        assert_eq!(
+            find("ctrl+shift+j").map(|b| b.action.as_str()),
+            Some("scroll_line_down")
+        );
+        // ctrl+tab is bound without kitty_mod and is a very common TUI chord.
+        assert_eq!(
+            find("ctrl+tab").map(|b| b.action.as_str()),
+            Some("next_tab")
+        );
+        assert_eq!(
+            find("ctrl+shift+tab").map(|b| b.action.as_str()),
+            Some("previous_tab")
+        );
+        assert!(binds.iter().all(|b| b.tool == "kitty"));
+        assert!(binds.iter().all(|b| b.source == KeySource::Terminal));
+    }
+
+    #[test]
+    fn kitty_macos_only_defaults_do_not_leak_onto_other_platforms() {
+        // The Cmd table is `only='macos'` upstream. On Linux those physical
+        // keys produce no Cmd modifier at all, so reporting them would be a
+        // pure fabrication.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let binds = kitty_default_bindings(KITTY_MOD_DEFAULT);
+        assert!(
+            binds
+                .iter()
+                .all(|b| !b.chord.canonical().starts_with("cmd+")),
+            "cmd bindings leaked onto a non-macOS platform"
+        );
+    }
+
+    #[test]
+    fn kitty_mod_defaults_to_ctrl_shift_and_is_overridable() {
+        assert_eq!(parse_kitty_mod(""), "ctrl+shift");
+        assert_eq!(parse_kitty_mod("font_size 12\n"), "ctrl+shift");
+        assert_eq!(parse_kitty_mod("kitty_mod ctrl+alt\n"), "ctrl+alt");
+        // A commented-out sample line must not be mistaken for a setting; the
+        // shipped kitty.conf is entirely comments.
+        assert_eq!(parse_kitty_mod("# kitty_mod ctrl+alt\n"), "ctrl+shift");
+        // Last one wins, matching kitty's own last-wins option semantics.
+        assert_eq!(
+            parse_kitty_mod("kitty_mod ctrl+alt\nkitty_mod super\n"),
+            "super"
+        );
+    }
+
+    #[test]
+    fn kitty_mod_override_moves_the_whole_default_table() {
+        // This is the reason kitty_mod has to be read before resolving any
+        // default: rebinding it relocates every built-in shortcut at once, so
+        // a table hardcoded to ctrl+shift would report conflicts on chords
+        // that are actually free and miss the ones that are taken.
+        let binds = apply_kitty_user_config("kitty_mod ctrl+alt\n");
+        let chords: Vec<String> = binds.iter().map(|b| b.chord.canonical()).collect();
+        assert!(chords.contains(&"ctrl+alt+k".to_string()), "got {chords:?}");
+        assert!(!chords.contains(&"ctrl+shift+k".to_string()));
+    }
+
+    #[test]
+    fn kitty_map_with_no_action_frees_the_chord() {
+        // `map kitty_mod+space` with no action is kitty's documented way to
+        // hand a chord back to the program running in the terminal, so it must
+        // stop being reported as a conflict rather than start being one.
+        let (binds, unbound, cleared) = parse_kitty_maps("map kitty_mod+k\n");
+        assert!(binds.is_empty());
+        assert!(!cleared);
+        assert_eq!(unbound.len(), 1);
+        assert_eq!(unbound[0].canonical(), "ctrl+shift+k");
+
+        let effective = apply_kitty_user_config("map kitty_mod+k\n");
+        assert!(
+            effective
+                .iter()
+                .all(|b| b.chord.canonical() != "ctrl+shift+k")
+        );
+    }
+
+    #[test]
+    fn kitty_no_op_frees_but_discard_event_does_not() {
+        // no_op passes the key through; discard_event swallows it, so only the
+        // former frees the chord.
+        let (_, unbound, _) = parse_kitty_maps("map ctrl+alt+f1 no_op\n");
+        assert_eq!(unbound.len(), 1);
+
+        let (binds, unbound, _) = parse_kitty_maps("map ctrl+alt+f1 discard_event\n");
+        assert!(unbound.is_empty());
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].action, "discard_event");
+    }
+
+    #[test]
+    fn kitty_clear_all_shortcuts_empties_the_defaults() {
+        let binds = apply_kitty_user_config("clear_all_shortcuts yes\n");
+        assert!(binds.is_empty(), "got {binds:?}");
+        // Bindings declared after the clear survive it.
+        let binds = apply_kitty_user_config("clear_all_shortcuts yes\nmap ctrl+g new_window\n");
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].chord.canonical(), "ctrl+g");
+    }
+
+    #[test]
+    fn kitty_user_map_overrides_a_default_on_the_same_chord() {
+        let binds = apply_kitty_user_config("map kitty_mod+k new_window\n");
+        let hit: Vec<&DiscoveredBinding> = binds
+            .iter()
+            .filter(|b| b.chord.canonical() == "ctrl+shift+k")
+            .collect();
+        assert_eq!(hit.len(), 1, "duplicate entries for one chord: {hit:?}");
+        assert_eq!(hit[0].action, "new_window");
+    }
+
+    #[test]
+    fn kitty_multi_key_sequences_are_not_reported() {
+        // `kitty_mod+p>f` is a two-chord sequence, which we do not model. The
+        // defaults table has several; none may surface as a single chord.
+        assert!(kitty_chord("kitty_mod+p>f", KITTY_MOD_DEFAULT).is_none());
+        let (binds, _, _) = parse_kitty_maps("map kitty_mod+p>f kitten hints\n");
+        assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn kitty_map_options_are_skipped_before_the_chord() {
+        // Every upstream default carries `--allow-fallback=shifted,ascii`, so
+        // a parser that took the first token as the chord would read nothing.
+        let (binds, _, _) =
+            parse_kitty_maps("map --allow-fallback=shifted,ascii ctrl+g new_window\n");
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].chord.canonical(), "ctrl+g");
+        assert_eq!(binds[0].action, "new_window");
+    }
+
+    #[test]
+    fn kitty_hyper_and_meta_chords_are_skipped_not_downgraded() {
+        // jcode has no vocabulary for hyper/meta. Dropping the modifier would
+        // make `hyper+k` compare equal to plain `k` and manufacture a conflict.
+        assert!(kitty_chord("hyper+k", KITTY_MOD_DEFAULT).is_none());
+        assert!(kitty_chord("meta+k", KITTY_MOD_DEFAULT).is_none());
+    }
+
+    #[test]
+    fn jcode_binding_on_ctrl_shift_k_conflicts_with_kitty_scroll() {
+        use crate::keymap::{KeymapSnapshot, detect_conflicts};
+        use jcode_config_types::KeybindingsConfig;
+
+        let snapshot = KeymapSnapshot {
+            alt_delivery: Default::default(),
+            version: 1,
+            captured_at: String::new(),
+            os: "linux".to_string(),
+            terminal: "kitty".to_string(),
+            terminal_version: String::new(),
+            bindings: kitty_default_bindings(KITTY_MOD_DEFAULT),
+        };
+        let cfg = KeybindingsConfig {
+            open_resume: "ctrl+shift+k".to_string(),
+            ..Default::default()
+        };
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.jcode.field == "keybindings.open_resume"),
+            "expected ctrl+shift+k to conflict with kitty scroll_line_up, got {conflicts:?}"
         );
     }
 }
