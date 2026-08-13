@@ -247,7 +247,25 @@ impl MultiProvider {
             );
         }
 
-        let initial_provider = Self::initial_provider_from_env();
+        // A login inside a running process writes the activation env globally,
+        // so in a shared `jcode serve` it would otherwise repoint every later
+        // session away from the configured `default_provider`. Only a
+        // process-level (CLI) selection outranks config.
+        let env_selection = Self::initial_provider_from_env_with_source();
+        let config_default_provider_wins = env_selection.is_some_and(|(_, source)| {
+            !source.overrides_config_default()
+                && provider_state
+                    .preferred_provider_is_configured(availability)
+                    .unwrap_or(false)
+        });
+        let initial_provider = env_selection
+            .filter(|_| !config_default_provider_wins)
+            .map(|(provider, _)| provider);
+        if config_default_provider_wins {
+            crate::logging::info(
+                "Ignoring the login-selected provider for this session because config default_provider is set",
+            );
+        }
         if let Some(initial) = initial_provider {
             active = initial;
             let is_configured = availability.is_configured(initial);

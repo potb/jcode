@@ -2417,7 +2417,7 @@ impl App {
                             ],
                         );
                         if key_name == crate::provider::bedrock::API_KEY_ENV {
-                            crate::provider::activation::select_initial_runtime_provider_key(
+                            crate::provider::activation::select_login_runtime_provider_key(
                                 "bedrock",
                             );
                             if let Some(default_model) = default_model.as_deref() {

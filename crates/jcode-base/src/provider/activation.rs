@@ -1,6 +1,8 @@
 use anyhow::Result;
 use jcode_provider_core::{ActiveProvider, provider_key};
 
+use super::selection::InitialProviderSource;
+
 /// Stable product/runtime identity selected by login or provider initialization.
 ///
 /// This intentionally differs from the lower-level [`ActiveProvider`] execution slot.
@@ -109,6 +111,9 @@ pub struct ProviderActivation {
     pub runtime_id: RuntimeProviderId,
     pub selection: RuntimeSelection,
     pub model_hint: Option<RuntimeModelHint>,
+    /// Whether this activation was requested by a login inside an already
+    /// running process rather than by process startup.
+    from_login: bool,
 }
 
 impl ProviderActivation {
@@ -117,12 +122,30 @@ impl ProviderActivation {
             runtime_id,
             selection,
             model_hint: None,
+            from_login: false,
         }
     }
 
     pub fn with_model_hint(mut self, env_key: &'static str, model: impl Into<String>) -> Self {
         self.model_hint = Some(RuntimeModelHint::new(env_key, model));
         self
+    }
+
+    /// Mark this activation as coming from an interactive login in a running
+    /// process. Such a selection stays a hint: it must not outrank an explicit
+    /// `default_provider` in config for sessions created later, because in a
+    /// shared `jcode serve` the activation env is process-global.
+    pub fn from_login(mut self) -> Self {
+        self.from_login = true;
+        self
+    }
+
+    fn initial_provider_source(&self) -> InitialProviderSource {
+        if self.from_login {
+            InitialProviderSource::Login
+        } else {
+            InitialProviderSource::Cli
+        }
     }
 
     pub fn initial(runtime_id: RuntimeProviderId, active_provider: ActiveProvider) -> Self {
@@ -186,7 +209,10 @@ impl ProviderActivation {
             RuntimeSelection::Initial(active_provider) => {
                 active_key_for_log = provider_key(active_provider);
                 crate::env::set_var("JCODE_ACTIVE_PROVIDER", active_key_for_log);
-                crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
+                crate::env::set_var(
+                    "JCODE_INITIAL_PROVIDER_EXPLICIT",
+                    self.initial_provider_source().env_value(),
+                );
             }
             RuntimeSelection::Unlocked { active_hint } => {
                 crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
@@ -226,12 +252,23 @@ impl ProviderActivation {
 /// Select the provider used when a new multi-provider runtime starts.
 /// Later model switches remain free to select any configured provider.
 pub fn select_initial_runtime_provider_key(provider_key_raw: &str) {
+    set_initial_runtime_provider_key(provider_key_raw, InitialProviderSource::Cli);
+}
+
+/// Same as [`select_initial_runtime_provider_key`], but for a login performed
+/// inside a running process: the selection applies to the current runtime and
+/// still yields to an explicit `default_provider` in config for new sessions.
+pub fn select_login_runtime_provider_key(provider_key_raw: &str) {
+    set_initial_runtime_provider_key(provider_key_raw, InitialProviderSource::Login);
+}
+
+fn set_initial_runtime_provider_key(provider_key_raw: &str, source: InitialProviderSource) {
     crate::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key_raw);
-    crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
+    crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", source.env_value());
     crate::logging::auth_event(
         "runtime_activation_initial_provider",
         provider_key_raw,
-        &[("selection", "initial")],
+        &[("selection", "initial"), ("source", source.env_value())],
     );
 }
 

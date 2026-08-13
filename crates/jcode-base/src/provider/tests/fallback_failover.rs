@@ -114,6 +114,34 @@ fn test_active_provider_env_only_seeds_sessions_when_explicitly_selected() {
 }
 
 #[test]
+fn test_login_selected_provider_is_a_weaker_hint_than_a_cli_selection() {
+    use crate::provider::selection::InitialProviderSource;
+
+    with_clean_provider_test_env(|| {
+        // A login inside a running process still selects the provider for the
+        // current runtime, but must not outrank config `default_provider` for
+        // sessions created afterwards (a shared `jcode serve` would otherwise
+        // repoint every later session).
+        crate::provider::activation::select_login_runtime_provider_key("openai");
+        assert_eq!(
+            MultiProvider::initial_provider_from_env_with_source(),
+            Some((ActiveProvider::OpenAI, InitialProviderSource::Login))
+        );
+        assert!(!InitialProviderSource::Login.overrides_config_default());
+
+        crate::provider::activation::select_initial_runtime_provider_key("openai");
+        assert_eq!(
+            MultiProvider::initial_provider_from_env_with_source(),
+            Some((ActiveProvider::OpenAI, InitialProviderSource::Cli))
+        );
+        assert!(InitialProviderSource::Cli.overrides_config_default());
+
+        crate::provider::activation::clear_initial_runtime_provider();
+        assert_eq!(MultiProvider::initial_provider_from_env_with_source(), None);
+    });
+}
+
+#[test]
 fn test_cursor_models_are_included_in_available_models_display_when_configured() {
     with_clean_provider_test_env(|| {
         let provider = test_multi_provider_with_cursor();

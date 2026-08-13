@@ -42,6 +42,38 @@ pub struct DefaultModelSelection {
     pub provider_key: Option<String>,
 }
 
+/// Who selected the initial provider recorded in `JCODE_INITIAL_PROVIDER_EXPLICIT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InitialProviderSource {
+    /// Process-level choice (CLI flag, `--provider`, environment setup).
+    Cli,
+    /// A login performed inside an already running process.
+    Login,
+}
+
+impl InitialProviderSource {
+    /// Value written to `JCODE_INITIAL_PROVIDER_EXPLICIT` for this source.
+    pub(super) const fn env_value(self) -> &'static str {
+        match self {
+            Self::Cli => "1",
+            Self::Login => "login",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "cli" => Some(Self::Cli),
+            "login" | "runtime" => Some(Self::Login),
+            _ => None,
+        }
+    }
+
+    /// Whether this selection outranks an explicit `default_provider` in config.
+    pub(super) const fn overrides_config_default(self) -> bool {
+        matches!(self, Self::Cli)
+    }
+}
+
 impl MultiProvider {
     pub(super) fn auto_default_provider(availability: ProviderAvailability) -> ActiveProvider {
         jcode_provider_core::auto_default_provider(availability)
@@ -51,22 +83,31 @@ impl MultiProvider {
         jcode_provider_core::parse_provider_hint(value)
     }
 
+    #[cfg(test)]
     pub(super) fn initial_provider_from_env() -> Option<ActiveProvider> {
-        let explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+        Self::initial_provider_from_env_with_source().map(|(provider, _)| provider)
+    }
+
+    /// Resolve the explicitly selected initial provider along with the origin
+    /// of that selection. The origin matters because the two writers of
+    /// `JCODE_INITIAL_PROVIDER_EXPLICIT` have different authority:
+    ///
+    /// * `Cli` comes from this process being started with an explicit provider
+    ///   choice, so it outranks the config file.
+    /// * `Login` comes from an interactive `/login` inside an already running
+    ///   process. In a long-lived `jcode serve` that env write is global and
+    ///   would otherwise silently repoint every future session away from the
+    ///   configured `default_provider`.
+    pub(super) fn initial_provider_from_env_with_source()
+    -> Option<(ActiveProvider, InitialProviderSource)> {
+        let source = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
-        if !explicit {
-            return None;
-        }
+            .and_then(|value| InitialProviderSource::parse(value.trim()))?;
 
         std::env::var("JCODE_ACTIVE_PROVIDER")
             .ok()
             .and_then(|value| Self::parse_provider_hint(&value))
+            .map(|provider| (provider, source))
     }
 
     pub(super) fn provider_label(provider: ActiveProvider) -> &'static str {

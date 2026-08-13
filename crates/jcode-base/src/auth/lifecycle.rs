@@ -1098,7 +1098,7 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
         }
         Some(provider_id) => {
             if let Some(activation) = direct_provider_activation(provider_id)
-                && let Err(error) = activation.apply_env()
+                && let Err(error) = activation.from_login().apply_env()
             {
                 let message = error.to_string();
                 crate::logging::auth_event(
