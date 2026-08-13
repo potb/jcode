@@ -443,16 +443,15 @@ pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageDat
 /// always populates this through `refresh_usage`.
 #[cfg(feature = "test-support")]
 pub fn seed_for_test(data: UsageData) {
-    let cell = Arc::new(RwLock::new(data));
     // OnceCell may already be initialized by an earlier call; overwrite the
     // inner value in that case so repeated seeding works.
     if let Some(existing) = USAGE.get() {
         if let Ok(mut guard) = existing.try_write() {
-            *guard = cell.try_read().expect("fresh lock").clone();
+            *guard = data;
         }
         return;
     }
-    let _ = USAGE.set(cell);
+    let _ = USAGE.set(Arc::new(RwLock::new(data)));
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)

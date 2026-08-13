@@ -62,7 +62,20 @@ PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # conflict with upstream on every single future merge, forever.
 ENFORCE_ACTIONS_OFF="${JCODE_UPSTREAM_DISABLE_ACTIONS:-1}"
 LOG_DIR="${JCODE_UPSTREAM_LOG_DIR:-$STATE_DIR/logs}"
-CHECK_CMD="${JCODE_UPSTREAM_CHECK_CMD:-cargo check --workspace}"
+# Verification for a merge, mechanical or agent-produced.
+#
+# `cargo check --workspace` alone is not enough: the ratchet gates
+# (scripts/*_budget.json) are baselines that only upstream's own CI would
+# enforce, and Actions are deliberately disabled on the fork (see
+# ENFORCE_ACTIONS_OFF above). So an upstream merge that adds oversized files,
+# panic-prone calls or swallowed errors compiles fine, lands on master, and
+# leaves every ratchet script failing from then on — at which point the gates
+# report a red baseline no matter what the *next* change does, and stop being
+# able to reject anything. That is how all four drifted red before this was
+# added. Checking them at merge time keeps the baselines describing the fork's
+# real state, and makes the growth visible in the merge's own log.
+RATCHET_CMD='python3 scripts/check_code_size_budget.py && python3 scripts/check_test_size_budget.py && python3 scripts/check_panic_budget.py && python3 scripts/check_swallowed_error_budget.py && python3 scripts/check_wildcard_reexport_budget.py'
+CHECK_CMD="${JCODE_UPSTREAM_CHECK_CMD:-cargo check --workspace && $RATCHET_CMD}"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
@@ -724,6 +737,12 @@ Use \"failed\" if you could not resolve it for any other reason.
 ## Steps
 1. Resolve conflicts, or stop per the exception above.
 2. Run '$CHECK_CMD' until it passes.
+   The ratchet scripts in that command are baselines, not correctness checks.
+   If one fails purely because upstream's own code is bigger, or uses more
+   .unwrap()/.expect(), that growth is not yours to fix: re-baseline it with
+   'python3 scripts/<script>.py --update', commit the JSON with the merge, and
+   say so in the commit message. Only investigate when the growth comes from a
+   conflict YOU resolved.
 3. Run the tests most relevant to the files you touched.
 4. Commit the merge, message summarizing each nontrivial resolution.
 5. Write $VERDICT_FILE.
