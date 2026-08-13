@@ -10,6 +10,7 @@ mod display;
 mod lease;
 mod model;
 mod openai_helpers;
+mod poller;
 mod provider_fetch;
 mod snapshot;
 pub use accessors::*;
@@ -17,6 +18,7 @@ use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
 pub use jcode_usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
+pub use poller::{poll_once, spawn_server_usage_poller};
 use provider_fetch::*;
 
 use anyhow::{Context, Result};

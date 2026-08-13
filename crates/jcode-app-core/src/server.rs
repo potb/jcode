@@ -1340,6 +1340,15 @@ impl Server {
             }
         });
 
+        // Own usage polling from the daemon. Clients refresh lazily from their
+        // render loop, so before this the fetch was driven by whichever
+        // short-lived process happened to notice staleness first. The server is
+        // the one process that is always up, so giving it a steady tick makes
+        // it the usual winner of the cross-process fetch lease, and clients
+        // adopt the snapshot it publishes instead of racing for the fetch.
+        // See issue #24.
+        crate::usage::spawn_server_usage_poller();
+
         // Spawn reload monitor (event-driven via in-process channel).
         // In the unified server design, self-dev sessions share the main server,
         // so the shared server must always listen for reload signals.
