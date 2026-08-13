@@ -60,14 +60,16 @@ A first-class integration cannot be shipped only as a remote detection manifest.
 6. Keep screen-manifest detection authoritative until Jcode exposes complete blocked, approval-result, interrupt, and exit transitions.
 7. Add integration versioning, replacement-source handling, schema/UI wiring, install/uninstall tests, restore-plan tests, detection fixtures, and documentation.
 
-Relevant upstream files as of Herdr commit `eacea2daf0b72973173b728936b27478374f2cd2`:
+Relevant files **in the Herdr repository** (not this one) as of Herdr commit
+`eacea2daf0b72973173b728936b27478374f2cd2`, written relative to the Herdr
+checkout root:
 
-- `src/integration/{mod.rs,registry.rs,targets.rs,actions.rs,version.rs}`
-- `src/integration/assets/`
-- `src/api/schema/integrations.rs`
-- `src/agent_resume.rs`
-- `src/detect/mod.rs`
-- `src/terminal/state.rs`
+- `herdr/src/integration/{mod.rs,registry.rs,targets.rs,actions.rs,version.rs}`
+- `herdr/src/integration/assets/`
+- `herdr/src/api/schema/integrations.rs`
+- `herdr/src/agent_resume.rs`
+- `herdr/src/detect/mod.rs`
+- `herdr/src/terminal/state.rs`
 
 ## Future full lifecycle authority
 

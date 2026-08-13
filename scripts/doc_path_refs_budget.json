@@ -1,5 +1,5 @@
 {
-  "total": 24,
+  "total": 20,
   "files": {
     "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
       "src/usage.rs"
@@ -33,12 +33,6 @@
     ],
     "docs/HARNESS_API_AND_DESKTOP_REWRITE.md": [
       "crates/jcode-desktop"
-    ],
-    "docs/HERDR.md": [
-      "src/agent_resume.rs",
-      "src/api/schema/integrations.rs",
-      "src/detect/mod.rs",
-      "src/terminal/state.rs"
     ],
     "docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md": [
       "crates/jcode-tui/src/tui/app/sponsor_disclosure.rs"
