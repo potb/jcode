@@ -144,7 +144,7 @@ Windows is covered by:
 
 ## Architecture notes
 
-Unix domain sockets are replaced by Windows named pipes under `crates/jcode-base/src/transport/windows.rs`. Platform-specific filesystem, process, update, and replacement behavior is selected at compile time with `#[cfg(windows)]`, so Windows support does not add runtime branching to Unix builds.
+Unix domain sockets are replaced by Windows named pipes under `crates/jcode-transport/src/windows.rs`. Platform-specific filesystem, process, update, and replacement behavior is selected at compile time with `#[cfg(windows)]`, so Windows support does not add runtime branching to Unix builds.
 
 Windows launch-hotkey setup is implemented in `crates/jcode-setup-hints/src/windows_setup.rs` and is only installed after explicit user consent.
 

@@ -1,0 +1,83 @@
+{
+  "total": 52,
+  "files": {
+    "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
+      "crates/jcode-core/src/usage_types.rs",
+      "src/ambient.rs",
+      "src/catchup.rs",
+      "src/env.rs",
+      "src/gateway.rs",
+      "src/goal.rs",
+      "src/id.rs",
+      "src/session.rs",
+      "src/stdin_detect.rs",
+      "src/todo.rs",
+      "src/usage.rs",
+      "src/util.rs"
+    ],
+    "docs/DESKTOP_APP_ARCHITECTURE.md": [
+      "crates/jcode-desktop"
+    ],
+    "docs/DESKTOP_CODEBASE_ARCHITECTURE.md": [
+      "crates/jcode-desktop",
+      "src/protocol.rs",
+      "src/tui",
+      "src/tui/app.rs",
+      "src/tui/app/remote/server_events.rs",
+      "src/tui/markdown.rs",
+      "src/tui/ui.rs",
+      "src/tui/ui_messages.rs",
+      "src/tui/ui_prepare.rs"
+    ],
+    "docs/DESKTOP_FIRST_PROTOTYPE.md": [
+      "crates/jcode-desktop"
+    ],
+    "docs/DESKTOP_SINGLE_SESSION_DESIGN.md": [
+      "crates/jcode-desktop"
+    ],
+    "docs/DESKTOP_STABLE_HOST_RELOAD_STARTUP.md": [
+      "crates/jcode-desktop",
+      "crates/jcode-desktop/src/main.rs"
+    ],
+    "docs/DISCOVERY_ELICITATION_SPEC.md": [
+      "scripts/discovery_elicitation_cases.json"
+    ],
+    "docs/HARNESS_API_AND_DESKTOP_REWRITE.md": [
+      "crates/jcode-desktop"
+    ],
+    "docs/HERDR.md": [
+      "src/agent_resume.rs",
+      "src/api/schema/integrations.rs",
+      "src/detect/mod.rs",
+      "src/terminal/state.rs"
+    ],
+    "docs/MEMORY_BUDGET.md": [
+      "src/runtime_memory_log.rs",
+      "src/session.rs",
+      "src/tui/app/debug_cmds.rs",
+      "src/tui/markdown.rs",
+      "src/tui/memory_profile.rs",
+      "src/tui/mermaid.rs",
+      "src/tui/mermaid_cache_render.rs"
+    ],
+    "docs/MODULAR_ARCHITECTURE_RFC.md": [
+      "src/auth",
+      "src/id.rs",
+      "src/protocol.rs",
+      "src/provider",
+      "src/provider/mod.rs",
+      "src/server",
+      "src/server.rs",
+      "src/session.rs",
+      "src/tool",
+      "src/tui"
+    ],
+    "docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md": [
+      "crates/jcode-tui/src/tui/app/sponsor_disclosure.rs"
+    ],
+    "docs/dev/crate-splitting-plan.md": [
+      "src/provider/anthropic.rs",
+      "src/storage.rs"
+    ]
+  }
+}

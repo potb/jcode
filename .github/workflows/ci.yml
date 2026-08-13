@@ -102,6 +102,10 @@ jobs:
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
 
+      - name: Enforce stale doc path reference ratchet
+        shell: bash
+        run: python3 scripts/check_doc_path_refs.py
+
       # Frame-cost gate for desktop2. `build_scene` is a pure function of its
       # model and `states::NODES` enumerates the app's visual states, so frame
       # cost is something CI can evaluate rather than something a person has to
