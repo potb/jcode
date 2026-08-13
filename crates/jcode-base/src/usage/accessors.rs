@@ -4,6 +4,64 @@ use super::*;
 static USAGE: tokio::sync::OnceCell<Arc<RwLock<UsageData>>> = tokio::sync::OnceCell::const_new();
 static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Set once this process has adopted a server-pushed snapshot.
+///
+/// This is the "client staleness must be neutralized" decision from issue #24.
+/// Without it the push is pointless: a pushed snapshot ages past
+/// `CACHE_DURATION` like any other, `get_sync` would notice from the render
+/// loop and spawn a fetch, and every connected client would be back to polling
+/// the endpoint on its own timer.
+///
+/// A latch rather than a config flag, because it is keyed on evidence rather
+/// than intent: the only thing that can set it is an actual pushed snapshot
+/// arriving, which is proof that a server is attached and polling on this
+/// process's behalf. A process that never receives one (menubar, one-shot CLI,
+/// a client before `Subscribe`) is unaffected and keeps its own refresh path.
+///
+/// Never cleared. If the server goes away the client keeps serving the last
+/// pushed snapshot as stale, which is the same thing it already does for a
+/// failed refresh, and is strictly better than having every orphaned client
+/// resume polling at the same instant.
+static PUSH_FED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process is being fed usage snapshots by the server.
+pub fn is_push_fed() -> bool {
+    PUSH_FED.load(Ordering::SeqCst)
+}
+
+/// Adopt a usage snapshot pushed by the server, and stop self-refreshing.
+///
+/// Returns whether the snapshot was adopted. A snapshot describing a different
+/// account than the one active here is ignored, so account A can never be shown
+/// B's quota; that mirrors the on-disk snapshot's rule.
+pub fn adopt_pushed_snapshot(snapshot: &jcode_protocol::UsageSnapshot) -> bool {
+    let active =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    if !super::push::snapshot_matches_account(snapshot.account_label.as_deref(), &active) {
+        return false;
+    }
+
+    let data = super::push::usage_from_snapshot(snapshot);
+
+    // Mark push-fed before storing: a render on another thread that observes the
+    // new data must not be able to see it as stale-and-unowned in between.
+    PUSH_FED.store(true, Ordering::SeqCst);
+
+    match USAGE.get() {
+        Some(cell) => match cell.try_write() {
+            Ok(mut guard) => *guard = data,
+            // A refresh holds the lock right now. Dropping this push is safe:
+            // the poller republishes every round, so the next one lands.
+            Err(_) => return false,
+        },
+        None => {
+            let _ = USAGE.set(Arc::new(RwLock::new(data)));
+        }
+    }
+
+    true
+}
+
 pub(super) async fn get_usage() -> Arc<RwLock<UsageData>> {
     USAGE
         .get_or_init(|| async { Arc::new(RwLock::new(UsageData::default())) })
@@ -104,6 +162,15 @@ async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
 }
 
 fn try_spawn_refresh(usage: Arc<RwLock<UsageData>>) {
+    // A push-fed process must never fetch: the server polls on its behalf and
+    // pushes the result, and the whole point of issue #24 is that N clients
+    // refreshing on their own timers is what trips the burst limiter. Checked
+    // here, at the single choke point every refresh path funnels through, rather
+    // than at each caller, so a future call site cannot forget it.
+    if !super::push::should_self_refresh(is_push_fed()) {
+        return;
+    }
+
     if REFRESH_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -468,7 +535,13 @@ pub fn get_sync() -> UsageData {
     }
 
     // Not initialized yet - trigger initialization
-    if tokio::runtime::Handle::try_current().is_ok() {
+    // `get()` reaches the network through its own path rather than
+    // `try_spawn_refresh`, so the push-fed guard has to be repeated here. A
+    // push-fed process with a not-yet-initialized cell simply waits for the next
+    // pushed snapshot, which is at most one server poll interval away.
+    if super::push::should_self_refresh(is_push_fed())
+        && tokio::runtime::Handle::try_current().is_ok()
+    {
         tokio::spawn(async {
             let _ = get().await;
         });

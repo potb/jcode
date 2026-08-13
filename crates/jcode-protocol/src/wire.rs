@@ -1197,6 +1197,11 @@ pub enum ServerEvent {
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
 
+    /// Server-owned usage snapshot, pushed so clients never poll the provider
+    /// usage endpoint themselves (see issue #24).
+    #[serde(rename = "usage_snapshot")]
+    UsageSnapshot { snapshot: UsageSnapshot },
+
     /// Server is reloading (clients should reconnect)
     #[serde(rename = "reloading")]
     Reloading {

@@ -171,7 +171,9 @@ impl AuthChanged {
 
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
+mod usage_snapshot;
 mod wire;
+pub use usage_snapshot::{UsageSnapshot, UsageSnapshotWindow};
 pub use wire::TaskGraphNodeSpec;
 pub use wire::{Request, ServerEvent};
 

@@ -882,6 +882,13 @@ pub(super) async fn handle_client(
                             });
                         }
                     }
+                    Ok(BusEvent::UsageSnapshotRefreshed(snapshot)) => {
+                        // Not session-scoped, unlike the two arms above: usage
+                        // quota is a property of the account, so every attached
+                        // client wants it. This is the push that lets clients
+                        // stop polling the provider themselves (issue #24).
+                        let _ = client_event_tx.send(ServerEvent::UsageSnapshot { snapshot });
+                    }
                     Ok(BusEvent::CompactionFinished) => {
                         let agent = Arc::clone(&agent);
                         let tx = client_event_tx.clone();

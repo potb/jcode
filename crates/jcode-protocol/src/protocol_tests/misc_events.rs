@@ -501,3 +501,72 @@ fn test_message_end_carries_provider_stop_reason() -> Result<()> {
     assert!(!json.contains("stop_reason"), "unexpected field: {json}");
     Ok(())
 }
+
+#[test]
+fn test_usage_snapshot_survives_the_wire() -> Result<()> {
+    // The push exists so clients stop polling the provider usage endpoint
+    // themselves (issue #24). If any window silently failed to encode, the
+    // client would adopt a snapshot missing that window and render it as unused
+    // quota, which is worse than not pushing at all.
+    let event = ServerEvent::UsageSnapshot {
+        snapshot: UsageSnapshot {
+            account_label: Some("work".to_string()),
+            fetched_at_ms: 1_700_000_000_000,
+            five_hour: 0.42,
+            five_hour_resets_at: Some("2099-01-01T00:00:00Z".to_string()),
+            seven_day: 0.13,
+            seven_day_resets_at: Some("2099-01-02T00:00:00Z".to_string()),
+            seven_day_opus: Some(0.5),
+            model_scoped: vec![UsageSnapshotWindow {
+                model_name: "Fable".to_string(),
+                utilization: 0.25,
+                resets_at: Some("2099-01-03T00:00:00Z".to_string()),
+            }],
+            extra_usage_enabled: true,
+        },
+    };
+
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"usage_snapshot\""));
+
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::UsageSnapshot { snapshot } = decoded else {
+        return Err(anyhow!("expected UsageSnapshot event"));
+    };
+    assert_eq!(snapshot.account_label.as_deref(), Some("work"));
+    // The fetch time is the one field that cannot be an `Instant` on the wire,
+    // so pin that it crosses intact rather than being re-stamped.
+    assert_eq!(snapshot.fetched_at_ms, 1_700_000_000_000);
+    assert_eq!(snapshot.five_hour, 0.42);
+    assert_eq!(
+        snapshot.five_hour_resets_at.as_deref(),
+        Some("2099-01-01T00:00:00Z")
+    );
+    assert_eq!(snapshot.seven_day, 0.13);
+    assert_eq!(
+        snapshot.seven_day_resets_at.as_deref(),
+        Some("2099-01-02T00:00:00Z")
+    );
+    assert_eq!(snapshot.seven_day_opus, Some(0.5));
+    assert!(snapshot.extra_usage_enabled);
+    assert_eq!(snapshot.model_scoped.len(), 1);
+    assert_eq!(snapshot.model_scoped[0].model_name, "Fable");
+    assert_eq!(snapshot.model_scoped[0].utilization, 0.25);
+    assert_eq!(
+        snapshot.model_scoped[0].resets_at.as_deref(),
+        Some("2099-01-03T00:00:00Z")
+    );
+
+    // A minimal snapshot must decode from a producer that omits every optional
+    // field, so an older server cannot break a newer client.
+    let decoded = parse_event_json(
+        r#"{"type":"usage_snapshot","snapshot":{"fetched_at_ms":1,"five_hour":0.0,"seven_day":0.0}}"#,
+    )?;
+    let ServerEvent::UsageSnapshot { snapshot } = decoded else {
+        return Err(anyhow!("expected UsageSnapshot event"));
+    };
+    assert!(snapshot.account_label.is_none());
+    assert!(snapshot.model_scoped.is_empty());
+    assert!(!snapshot.extra_usage_enabled);
+    Ok(())
+}

@@ -42,3 +42,36 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Running clippy
+
+Run clippy inside the `full` dev shell, not the default `selfdev` one:
+
+```bash
+nix develop .#full --command cargo clippy -p <crate> --lib
+```
+
+In `selfdev`, `cargo clippy` produces a flood of errors that look alarming and
+have nothing to do with your change:
+
+```
+error[E0514]: found crate `std` compiled by an incompatible version of rustc
+error: cannot find macro `format` in this scope
+```
+
+That is a toolchain mismatch, not a code problem. `selfdev` deliberately excludes
+`developerTools` (where the flake puts nightly clippy), so `clippy-driver` falls
+through to the system one on `/run/current-system/sw/bin` — currently 1.97.1 —
+while `rustc` and every artifact in `target/` come from the flake's nightly,
+currently 1.99.0. Clippy then refuses to read metadata another compiler wrote.
+
+`nix develop .#full` puts the matching `clippy-preview` on `PATH`, so versions
+line up and the same crate lints cleanly. Check with `cargo clippy --version`: it
+must match `rustc --version`.
+
+Do not "fix" this with `cargo clean`. The mismatch is in which driver is on
+`PATH`, not in `target/`, so a clean costs a full rebuild and changes nothing.
+
+`scripts/check_guardrails.sh` checks this before it runs clippy and skips the
+lint with an explanation rather than printing the flood, so the usual way to
+meet this is a one-line gate failure rather than several hundred errors.

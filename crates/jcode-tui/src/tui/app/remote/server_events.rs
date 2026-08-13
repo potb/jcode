@@ -2116,6 +2116,14 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_side_panel_snapshot(snapshot);
             false
         }
+        ServerEvent::UsageSnapshot { snapshot } => {
+            // Adopting also latches this process out of self-refreshing, so the
+            // pinned usage footer stops driving its own fetches from the render
+            // loop (issue #24). Returning whether it was adopted keeps the
+            // redraw tied to something actually changing: a snapshot for another
+            // account is dropped and must not cost a frame.
+            crate::usage::adopt_pushed_snapshot(&snapshot)
+        }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 // Surface member lifecycle transitions (done/failed/blocked/

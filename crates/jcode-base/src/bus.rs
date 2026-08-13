@@ -411,6 +411,13 @@ pub enum BusEvent {
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
     UsageReportProgress(jcode_usage_types::ProviderUsageProgress),
+    /// A fresh server-owned usage snapshot, for pushing to attached clients.
+    ///
+    /// Deliberately *not* named `UsageReport`: that variant above is the
+    /// `/usage` command's multi-provider report, which is a different payload
+    /// with a different lifecycle. Reusing the name would silently route quota
+    /// snapshots into the `/usage` overlay's handlers.
+    UsageSnapshotRefreshed(jcode_protocol::UsageSnapshot),
     /// OAuth/login flow completed in the background
     LoginCompleted(LoginCompleted),
     /// First-run onboarding finished validating the auto-selected default model.

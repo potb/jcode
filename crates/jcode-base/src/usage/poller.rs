@@ -67,10 +67,27 @@ fn openai_decision() -> PollDecision {
 /// exists to prevent.
 pub async fn poll_once() {
     if anthropic_decision() == PollDecision::Poll {
-        let _ = get().await;
+        let data = get().await;
+        publish_anthropic_snapshot(&data);
     }
     if openai_decision() == PollDecision::Poll {
         let _ = get_openai_usage().await;
+    }
+}
+
+/// Fan the refreshed Anthropic snapshot out to attached clients.
+///
+/// Published unconditionally each round rather than only on change: a client
+/// that connected mid-round, or reconnected after a server reload, needs a
+/// snapshot without waiting for the quota numbers to happen to move. The bus is
+/// process-local and the payload is small, so a per-minute publish costs
+/// nothing, and `snapshot_from_usage` already refuses to emit error or empty
+/// states.
+fn publish_anthropic_snapshot(data: &UsageData) {
+    let account_label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    if let Some(snapshot) = super::push::snapshot_from_usage(data, Some(&account_label)) {
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UsageSnapshotRefreshed(snapshot));
     }
 }
 
