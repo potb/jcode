@@ -44,6 +44,8 @@ enum Syntax {
     CStyle,
     /// `#` only, plus `"""`/`'''` docstrings.
     Hash,
+    /// `#`, but only at a word start, so `$#` and `${#a[@]}` stay code.
+    Shell,
     /// `#`, but only at line start or after whitespace, plus block scalars.
     Yaml,
     /// No comment syntax worth scanning.
@@ -75,11 +77,10 @@ fn syntax_for_extension(ext: &str) -> Syntax {
     match ext {
         "java" | "kt" | "kts" | "swift" | "scala" | "dart" | "zig" | "cs" | "php" | "proto"
         | "sol" | "hcl" | "tf" | "groovy" | "gradle" => Syntax::CStyle,
-        "sh" | "bash" | "zsh" | "fish" | "rb" | "toml" | "nix" | "pl" | "pm" | "r" | "jl"
-        | "ex" | "exs" | "tcl" | "awk" | "dockerfile" | "mk" | "makefile" | "cmake" | "ps1"
-        | "gitignore" | "dockerignore" | "env" | "ini" | "cfg" | "conf" | "properties" => {
-            Syntax::Hash
-        }
+        "sh" | "bash" | "zsh" | "fish" | "ps1" | "pl" | "pm" => Syntax::Shell,
+        "rb" | "toml" | "nix" | "r" | "jl" | "ex" | "exs" | "tcl" | "awk" | "dockerfile" | "mk"
+        | "makefile" | "cmake" | "gitignore" | "dockerignore" | "env" | "ini" | "cfg" | "conf"
+        | "properties" => Syntax::Hash,
         _ => Syntax::None,
     }
 }
@@ -209,8 +210,9 @@ fn scan_with(content: &str, syntax: Syntax) -> Vec<CommentSpan> {
     }
     let spans = match syntax {
         Syntax::CStyle => scan_c_style(content),
-        Syntax::Hash => scan_hash(content, false),
-        Syntax::Yaml => scan_hash(content, true),
+        Syntax::Hash => scan_hash(content, Syntax::Hash),
+        Syntax::Shell => scan_hash(content, Syntax::Shell),
+        Syntax::Yaml => scan_hash(content, Syntax::Yaml),
         Syntax::None => Vec::new(),
     };
     merge_runs(spans)
@@ -382,10 +384,15 @@ fn line_end(bytes: &[u8], from: usize) -> usize {
     i
 }
 
-/// Scan `#`-comment syntax. `yaml` selects the YAML dialect: a `#` only opens
-/// a comment at line start or after whitespace, block scalars are literal
-/// text, and there are no docstrings.
-fn scan_hash(content: &str, yaml: bool) -> Vec<CommentSpan> {
+/// Scan `#`-comment syntax in one of three dialects.
+///
+/// [`Syntax::Hash`] is Python's rule, where `x = 1#c` is a comment.
+/// [`Syntax::Shell`] requires the `#` to start a word, so the parameter
+/// expansions `$#` and `${#a[@]}` stay code. [`Syntax::Yaml`] adds that rule
+/// plus literal block scalars, and has no docstrings.
+fn scan_hash(content: &str, dialect: Syntax) -> Vec<CommentSpan> {
+    let yaml = dialect == Syntax::Yaml;
+    let require_word_start = dialect != Syntax::Hash;
     let mut out = Vec::new();
     let mut in_docstring: Option<&str> = None;
     let mut block_indent: Option<usize> = None;
@@ -402,7 +409,7 @@ fn scan_hash(content: &str, yaml: bool) -> Vec<CommentSpan> {
             }
             block_indent = None;
         }
-        if !yaml {
+        if dialect == Syntax::Hash {
             if let Some(delim) = in_docstring {
                 if trimmed.contains(delim) {
                     in_docstring = None;
@@ -420,7 +427,7 @@ fn scan_hash(content: &str, yaml: bool) -> Vec<CommentSpan> {
         if line == 1 && trimmed.starts_with("#!") {
             continue;
         }
-        let start = hash_comment_start(raw_line, yaml);
+        let start = hash_comment_start(raw_line, require_word_start);
         if yaml {
             let code = &raw_line[..start.unwrap_or(raw_line.len())];
             if ends_with_block_indicator(code) {
@@ -466,10 +473,11 @@ fn ends_with_block_indicator(code: &str) -> bool {
 
 /// Byte offset of a `#` that starts a comment, skipping ones inside quotes.
 ///
-/// `require_space` applies YAML's rule that a `#` only opens a comment at the
-/// start of a line or after whitespace, so `.../#frag` in a URL is not one.
-/// Python has no such rule: `x = 1#c` is a comment.
-fn hash_comment_start(line: &str, require_space: bool) -> Option<usize> {
+/// `require_word_start` applies the shell and YAML rule that a `#` only opens
+/// a comment at the start of a line or after whitespace, so `$#`, `${#a[@]}`
+/// and a `.../#frag` URL are code. Python has no such rule: `x = 1#c` is a
+/// comment.
+fn hash_comment_start(line: &str, require_word_start: bool) -> Option<usize> {
     let mut in_string: Option<u8> = None;
     let mut escaped = false;
     let mut prev: Option<u8> = None;
@@ -493,7 +501,7 @@ fn hash_comment_start(line: &str, require_space: bool) -> Option<usize> {
             None => match b {
                 b'"' | b'\'' => in_string = Some(b),
                 b'#' => {
-                    if !require_space || prev.is_none_or(|p| p.is_ascii_whitespace()) {
+                    if !require_word_start || prev.is_none_or(|p| p.is_ascii_whitespace()) {
                         return Some(i);
                     }
                 }
@@ -532,6 +540,10 @@ pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spans_for(content: &str, path: &Path) -> Vec<CommentSpan> {
+        scan_with(content, syntax_for_path(path))
+    }
 
     fn texts(content: &str, lang: &str) -> Vec<String> {
         scan(content, lang).into_iter().map(|s| s.text).collect()
@@ -623,6 +635,37 @@ mod tests {
     #[test]
     fn clean_file_yields_no_notice() {
         assert!(comment_notice("a.rs", "let x = 1;\n", Path::new("a.rs")).is_none());
+    }
+
+    #[test]
+    fn shell_parameter_expansions_are_not_comments() {
+        let src = "if [ $# -lt 2 ]; then\n  echo \"n=${#args[@]}\"\nfi\n";
+        assert!(spans_for(src, Path::new("deploy.sh")).is_empty());
+    }
+
+    #[test]
+    fn shell_comments_are_still_found() {
+        let src = "cp a b # keep the original\n# why this runs twice\nrun\n";
+        assert_eq!(
+            spans_for(src, Path::new("deploy.sh"))
+                .into_iter()
+                .map(|s| s.line)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn perl_and_powershell_use_the_shell_rule() {
+        assert_eq!(syntax_for_path(Path::new("a.pl")), Syntax::Shell);
+        assert_eq!(syntax_for_path(Path::new("a.ps1")), Syntax::Shell);
+        assert!(spans_for("my $n = $#list;\n", Path::new("a.pl")).is_empty());
+    }
+
+    #[test]
+    fn python_keeps_its_no_space_rule() {
+        assert_eq!(syntax_for_path(Path::new("a.py")), Syntax::Hash);
+        assert_eq!(texts("x = 1#c\n", "python"), vec!["c"]);
     }
 
     #[test]
