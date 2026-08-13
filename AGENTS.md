@@ -8,6 +8,10 @@
   and its base (e.g. `main`) otherwise. Never integrate branches owned by non-maintainers
   or other agents yourself; tell the user and let them decide how to proceed.
 
+- **Comments explain why, not what.** Doc comments on `pub` items are expected. Do not
+  leave memo comments describing what you changed; git history covers that. The write and
+  edit tools report a file's non-doc comments back to you as advice, never as a block.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.

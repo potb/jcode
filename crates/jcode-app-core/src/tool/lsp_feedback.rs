@@ -43,3 +43,21 @@ pub(crate) async fn diagnostics_after_write(path: &Path) -> Option<String> {
     }
     jcode_lsp::diagnostics_block(path).await
 }
+
+/// Advisory comment notice for a file that was just written. Returns the
+/// `<comments>` block, or `None` when the check is disabled, the language is
+/// not scanned, or nothing is reportable. Never affects the tool call.
+///
+/// Reads the file back rather than taking the tool's payload, so it sees what
+/// `format_after_write` left on disk and so every call site is identical.
+pub(crate) async fn comment_notice_after_write(path: &Path) -> Option<String> {
+    if !crate::config::config().comment_check.enabled {
+        return None;
+    }
+    let content = tokio::fs::read_to_string(path).await.ok()?;
+    let display = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    super::comment_check::comment_notice(&display, &content, path)
+}

@@ -295,6 +295,26 @@ impl Tool for ApplyPatchTool {
                     Ok(None) => {}
                     Err(_) => break,
                 }
+                // Shares the same deadline: the scan is local work, but the
+                // read-back it does is still file I/O per touched file.
+                let Some(remaining) =
+                    diagnostics_deadline.checked_duration_since(tokio::time::Instant::now())
+                else {
+                    break;
+                };
+                match tokio::time::timeout(
+                    remaining,
+                    lsp_feedback::comment_notice_after_write(diag_path),
+                )
+                .await
+                {
+                    Ok(Some(block)) => {
+                        body.push_str("\n\n");
+                        body.push_str(&block);
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
             }
 
             let output = ToolOutput::new(body);

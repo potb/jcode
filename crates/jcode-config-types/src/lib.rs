@@ -1262,6 +1262,22 @@ impl Default for FeatureConfig {
     }
 }
 
+/// Comment-check integration: advisory notice listing non-doc comments in a
+/// file that was just written. See potb/jcode#49 for the decision record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CommentCheckConfig {
+    /// Master switch. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CommentCheckConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Language Server Protocol integration configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -24,6 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::Url;
 
+pub use client::language_id;
 pub use config_compat::{LspConfig, LspServerConfig};
 pub use format::{format_all_severities, format_file_diagnostics, format_write_feedback};
 
