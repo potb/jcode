@@ -983,6 +983,39 @@ configure_parallel_frontend() {
 }
 
 configure_linux_linker() {
+  _configure_linux_linker_impl "$@"
+}
+
+# Verify the compiler driver can actually link with `-fuse-ld=<name>` before we
+# commit every rustc invocation to it. Some environments export flags or ship a
+# gcc that rejects the option, which otherwise fails the whole build at the
+# first build-script link with an unrecognized-option error.
+declare -A __jcode_linker_probe_cache=()
+
+linker_driver_accepts() {
+  local driver="$1" linker="$2"
+  local key="${driver}:${linker}"
+  if [[ -n "${__jcode_linker_probe_cache[$key]-}" ]]; then
+    [[ "${__jcode_linker_probe_cache[$key]}" == "ok" ]]
+    return
+  fi
+  local tmpdir
+  tmpdir=$(mktemp -d) || return 1
+  printf 'int main(void){return 0;}\n' >"$tmpdir/probe.c"
+  local rc=0
+  "$driver" "-fuse-ld=$linker" "$tmpdir/probe.c" -o "$tmpdir/probe" \
+    >/dev/null 2>&1 || rc=$?
+  rm -rf "$tmpdir"
+  if [[ "$rc" -eq 0 ]]; then
+    __jcode_linker_probe_cache[$key]="ok"
+  else
+    __jcode_linker_probe_cache[$key]="bad"
+    log "$driver cannot link with -fuse-ld=$linker; skipping it"
+  fi
+  [[ "${__jcode_linker_probe_cache[$key]}" == "ok" ]]
+}
+
+_configure_linux_linker_impl() {
   local requested_mode="${JCODE_FAST_LINKER:-auto}"
   local mode="$requested_mode"
   local driver="${JCODE_LINKER_DRIVER:-}"
@@ -1007,9 +1040,11 @@ configure_linux_linker() {
       # (~300 MB .text), mold links the jcode bin in ~2.0s vs lld's ~2.9s
       # (measured, warm, selfdev profile). The bin relinks on every build, so
       # that ~0.8s is a per-build win.
-      if command -v mold >/dev/null 2>&1 && [[ -n "$driver" ]]; then
+      if command -v mold >/dev/null 2>&1 && [[ -n "$driver" ]] \
+        && linker_driver_accepts "$driver" mold; then
         mode="mold"
-      elif command -v ld.lld >/dev/null 2>&1 && [[ -n "$driver" ]]; then
+      elif command -v ld.lld >/dev/null 2>&1 && [[ -n "$driver" ]] \
+        && linker_driver_accepts "$driver" lld; then
         mode="lld"
       else
         mode="system"
