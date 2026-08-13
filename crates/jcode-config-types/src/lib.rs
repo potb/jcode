@@ -1217,6 +1217,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeatureConfig {
+    /// Check for and install jcode updates during startup (default: true).
+    /// Set this to false for the persistent equivalent of `--no-update`.
+    pub check_updates: bool,
     /// Enable memory retrieval/extraction features (default: true)
     pub memory: bool,
     /// Enable swarm coordination features (default: true)
@@ -1246,6 +1249,7 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
+            check_updates: true,
             memory: true,
             swarm: true,
             mermaid: true,
@@ -1641,6 +1645,12 @@ pub struct ProviderConfig {
     /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
     /// Default: 180. Overridable via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
     pub stream_idle_timeout_secs: u64,
+    /// Maximum request attempts for transient provider errors, including the
+    /// initial attempt. Default: 8. Overridable via `JCODE_MAX_RETRIES`.
+    pub max_retries: u32,
+    /// Maximum exponential-backoff delay between transient-error retries.
+    /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
+    pub retry_backoff_cap_secs: u64,
 }
 
 impl Default for ProviderConfig {
@@ -1660,6 +1670,8 @@ impl Default for ProviderConfig {
             copilot_premium: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
+            max_retries: 8,
+            retry_backoff_cap_secs: 30,
         }
     }
 }

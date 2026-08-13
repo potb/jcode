@@ -187,7 +187,13 @@ fn is_telemetry_subcommand_invocation(
 pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::GROK_BUILD_RUNTIME,
-        || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
+        || {
+            let mut process = jcode_provider_grok_build_runtime::GrokBuildProcess::from_env();
+            process.command = crate::auth::grok_build::cli_path();
+            std::sync::Arc::new(
+                jcode_provider_grok_build_runtime::GrokBuildProvider::with_process(process),
+            )
+        },
     );
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
@@ -436,7 +442,15 @@ fn spawn_background_update_check(args: &Args) {
 }
 
 fn should_spawn_background_update_check(args: &Args) -> bool {
-    !args.quiet
+    should_spawn_background_update_check_with_config(
+        args,
+        crate::config::config().features.check_updates,
+    )
+}
+
+fn should_spawn_background_update_check_with_config(args: &Args, check_updates: bool) -> bool {
+    check_updates
+        && !args.quiet
         && !args.no_update
         && !matches!(
             args.command,
@@ -541,6 +555,17 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Update)));
         assert!(!should_spawn_background_update_check(&args));
         assert!(should_auto_install_update(&args));
+    }
+
+    #[test]
+    fn config_can_permanently_disable_background_update_checks() {
+        let args = parse_args(&["jcode", "login"]);
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
+        assert!(!should_spawn_background_update_check_with_config(
+            &args, false
+        ));
     }
 
     #[test]
