@@ -699,6 +699,14 @@ $FORK_LOG
 ## Conflicted files
 $CONFLICTS
 
+## Read this first
+'docs/UPSTREAM_DIVERGENCE.md' in the worktree records how this fork diverges:
+which files replace upstream behaviour (fork side wins), which upstream files
+the fork deleted as orphans (keep them deleted), which files diverge through
+formatting only (always take upstream), and the resolutions already agreed in
+earlier merges. Read it before resolving anything; it will answer most of the
+conflicts below directly.
+
 ## Default: resolve it yourself
 Resolve conflicts by default. You have the judgment for it. For each conflict,
 decide deliberately whether the fork's behavior, upstream's behavior, or a
