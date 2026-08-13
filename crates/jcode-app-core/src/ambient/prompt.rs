@@ -1054,6 +1054,22 @@ pub fn build_ambient_system_prompt(
     prompt.push_str(crate::ambient::gates::AMBIENT_TODO_GUIDANCE);
     prompt.push('\n');
 
+    // Same reason, for skills. `system_prompt_override` skips the "Available
+    // Skills" catalogue an interactive session gets, so a cycle had the
+    // `skill_manage` tool and no idea what it could load: an installed skill
+    // such as gh-stack was invisible unless the user named it in their
+    // instructions.
+    let installed_skills: Vec<crate::prompt::SkillInfo> =
+        crate::skill::SkillRegistry::shared_snapshot()
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect();
+    append_available_skills(&mut prompt, &installed_skills);
+
     prompt.push_str(
         "## Messaging Check-ins\n\n\
          You have a `send_message` tool. Use it to keep the user informed \
@@ -1383,6 +1399,31 @@ pub fn build_ambient_system_prompt(
     }
 
     prompt
+}
+
+/// Append the installed-skill catalogue, if there is one.
+///
+/// The caller reads the registry fresh rather than caching it, so a skill
+/// installed between two cycles is visible on the next wake without restarting
+/// the daemon. Only global skills are listed: a cycle has no working directory
+/// of its own, and picks its project after reading this prompt, so a
+/// project-local overlay cannot be resolved at this point.
+pub(crate) fn append_available_skills(
+    prompt: &mut String,
+    skills: &[crate::prompt::SkillInfo],
+) {
+    let Some(section) = crate::prompt::build_available_skills_section(skills) else {
+        return;
+    };
+    prompt.push_str(&section);
+    prompt.push_str(
+        "\n\nNobody types a slash command at you, so load a skill yourself with \
+         `skill_manage` (action=\"load\", name=\"<skill>\") when the cycle's work \
+         matches one, and `skill_manage` (action=\"read\") to read it without \
+         activating it. A skill you did not load is guidance you do not have: \
+         check this list before improvising a workflow one of them already \
+         documents.\n\n",
+    );
 }
 
 /// Standing ambient instructions written by the user, if any.

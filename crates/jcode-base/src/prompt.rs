@@ -247,7 +247,14 @@ fn clip_skill_description(description: &str) -> String {
     clipped
 }
 
-fn build_available_skills_section(available_skills: &[SkillInfo]) -> Option<String> {
+/// Render the "Available Skills" catalogue for a system prompt.
+///
+/// Public because the ambient cycle builds its whole system prompt itself via
+/// `system_prompt_override`, which bypasses [`build_system_prompt_split`]
+/// entirely. Without a shared builder the unattended path silently had no
+/// skills at all: the registry was loaded, the `skill_manage` tool was
+/// registered, and nothing ever told the agent which skills existed.
+pub fn build_available_skills_section(available_skills: &[SkillInfo]) -> Option<String> {
     if available_skills.is_empty() {
         return None;
     }

@@ -1865,3 +1865,42 @@ fn per_project_instructions_render_under_the_project_root() {
     }
     crate::config::invalidate_config_cache();
 }
+
+/// A cycle gets its whole system prompt from `system_prompt_override`, so the
+/// "Available Skills" catalogue an interactive session receives never reached
+/// it: the `skill_manage` tool was registered and the agent had no way to know
+/// what it could load. An installed skill is only useful if it is named.
+#[test]
+fn ambient_prompt_lists_installed_skills_and_how_to_load_them() {
+    let skills = vec![
+        crate::prompt::SkillInfo {
+            name: "gh-stack".into(),
+            description: "Manage stacked branches and pull requests with the gh-stack CLI.".into(),
+        },
+        crate::prompt::SkillInfo {
+            name: "garden-memory".into(),
+            description: "Consolidate and prune the memory graph.".into(),
+        },
+    ];
+
+    let mut prompt = String::new();
+    crate::ambient::prompt::append_available_skills(&mut prompt, &skills);
+
+    assert!(prompt.contains("# Available Skills"));
+    assert!(prompt.contains("`/gh-stack `"));
+    assert!(prompt.contains("`/garden-memory `"));
+    // Nobody types slash commands at an unattended cycle, so the catalogue is
+    // useless without the tool call that actually loads one.
+    assert!(prompt.contains("skill_manage"));
+    assert!(prompt.contains("action=\"load\""));
+}
+
+/// With no skills installed the section is omitted entirely rather than
+/// rendered as an empty heading, which would read as "skills exist but none
+/// apply" and waste prompt budget on every cycle.
+#[test]
+fn ambient_prompt_omits_skills_section_when_none_installed() {
+    let mut prompt = String::new();
+    crate::ambient::prompt::append_available_skills(&mut prompt, &[]);
+    assert!(prompt.is_empty());
+}
