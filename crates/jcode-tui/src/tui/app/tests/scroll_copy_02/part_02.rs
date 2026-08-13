@@ -110,10 +110,17 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
         KeyCode::Char('I'),
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
-    assert!(!app.inline_images_visible, "Alt+Shift+I should hide images");
+    assert!(
+        !app.inline_images_visible,
+        "{} should hide images",
+        jcode_tui_core::keybind::alt_chord("Shift+I")
+    );
     assert_eq!(
         app.status_notice(),
-        Some("Inline images: hidden (Alt+Shift+I to show)".to_string())
+        Some(format!(
+            "Inline images: hidden ({} to show)",
+            jcode_tui_core::keybind::alt_chord("Shift+I")
+        ))
     );
 
     // The flag persists for the next app (e.g. resume after restart).

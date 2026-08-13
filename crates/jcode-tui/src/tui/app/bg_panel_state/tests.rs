@@ -462,7 +462,13 @@ fn the_status_hints_name_the_configured_chord() {
         .keybindings
         .background_panel_focus
         .clone();
-    let expected = configured.to_lowercase();
+    // The hints render the Alt modifier with the platform keycap (`⌥` on
+    // macOS), while the config stores it spelled out, so compare against the
+    // configured chord translated into the platform label.
+    let expected = configured
+        .rsplit_once('+')
+        .map(|(_, key)| jcode_tui_core::keybind::alt_chord_lower(key))
+        .unwrap_or_else(|| configured.to_lowercase());
 
     for (name, hint) in [("strip", &view), ("page", &page)] {
         assert!(

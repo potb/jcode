@@ -368,9 +368,10 @@ fn the_unfocused_strip_advertises_the_configured_focus_chord() {
         .to_lowercase();
 
     assert!(
-        text.contains(&format!("alt+{expected_letter}")),
-        "the strip must advertise the configured chord alt+{expected_letter} \
-         (config: {configured:?}):\n{text}"
+        text.contains(&jcode_tui_core::keybind::alt_chord_lower(&expected_letter)),
+        "the strip must advertise the configured chord {} \
+         (config: {configured:?}):\n{text}",
+        jcode_tui_core::keybind::alt_chord_lower(&expected_letter)
     );
     assert!(
         text.contains("controls"),
