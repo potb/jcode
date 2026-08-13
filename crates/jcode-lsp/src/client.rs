@@ -18,10 +18,10 @@ use lsp_types::notification::PublishDiagnostics;
 use lsp_types::{
     ClientCapabilities, Diagnostic, DiagnosticClientCapabilities, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentDiagnosticReportResult, GeneralClientCapabilities, InitializeParams,
-    InitializedParams, PositionEncodingKind, PublishDiagnosticsClientCapabilities,
-    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, Url, VersionedTextDocumentIdentifier, WorkspaceFolder,
+    DocumentDiagnosticReportResult, GeneralClientCapabilities, InitializeParams, InitializedParams,
+    PositionEncodingKind, PublishDiagnosticsClientCapabilities, TextDocumentClientCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
+    VersionedTextDocumentIdentifier, WorkspaceFolder,
 };
 use tokio::sync::{Mutex, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -505,7 +505,11 @@ impl LspClient {
 }
 
 pub fn fingerprint(d: &Diagnostic) -> Fingerprint {
-    (d.range.start.line, d.range.start.character, d.message.clone())
+    (
+        d.range.start.line,
+        d.range.start.character,
+        d.message.clone(),
+    )
 }
 
 pub fn file_uri(path: &Path) -> Result<Url> {

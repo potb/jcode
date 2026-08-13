@@ -1955,7 +1955,11 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'sta
 }
 
 fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
-    let Some(cache) = data.cache_hit_info.as_ref().filter(|_| kv_cache_widget_visible()) else {
+    let Some(cache) = data
+        .cache_hit_info
+        .as_ref()
+        .filter(|_| kv_cache_widget_visible())
+    else {
         return Vec::new();
     };
     let mut lines = vec![render_kv_cache_summary_line(cache)];

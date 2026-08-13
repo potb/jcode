@@ -218,22 +218,24 @@ fn resolve_builtin(
             if !effective_binary_available("gofmt") {
                 return None;
             }
-            let command = override_command
-                .map(|c| c.to_vec())
-                .unwrap_or_else(|| vec!["gofmt".to_string(), "-w".to_string(), "$FILE".to_string()]);
+            let command = override_command.map(|c| c.to_vec()).unwrap_or_else(|| {
+                vec!["gofmt".to_string(), "-w".to_string(), "$FILE".to_string()]
+            });
             Some(ResolvedFormatter {
                 id: spec.id.clone(),
                 command,
                 workspace_dir: dir.to_path_buf(),
             })
         }
-        EvidenceKind::Prettier => resolve_node_tool(spec, "prettier", override_command, dir, |bin| {
-            vec![
-                bin.to_string_lossy().into_owned(),
-                "--write".to_string(),
-                "$FILE".to_string(),
-            ]
-        }),
+        EvidenceKind::Prettier => {
+            resolve_node_tool(spec, "prettier", override_command, dir, |bin| {
+                vec![
+                    bin.to_string_lossy().into_owned(),
+                    "--write".to_string(),
+                    "$FILE".to_string(),
+                ]
+            })
+        }
         EvidenceKind::Biome => resolve_node_tool(spec, "biome", override_command, dir, |bin| {
             vec![
                 bin.to_string_lossy().into_owned(),
@@ -258,9 +260,13 @@ fn resolve_builtin(
                 cache_put(key, None);
                 return None;
             };
-            let command = override_command
-                .map(|c| c.to_vec())
-                .unwrap_or_else(|| vec!["ruff".to_string(), "format".to_string(), "$FILE".to_string()]);
+            let command = override_command.map(|c| c.to_vec()).unwrap_or_else(|| {
+                vec![
+                    "ruff".to_string(),
+                    "format".to_string(),
+                    "$FILE".to_string(),
+                ]
+            });
             cache_put(key.clone(), Some(command.clone()));
             record_ws(&key, &evidence_dir);
             Some(ResolvedFormatter {
@@ -274,7 +280,12 @@ fn resolve_builtin(
                 return None;
             }
             let command = override_command.map(|c| c.to_vec()).unwrap_or_else(|| {
-                vec!["uv".to_string(), "format".to_string(), "--".to_string(), "$FILE".to_string()]
+                vec![
+                    "uv".to_string(),
+                    "format".to_string(),
+                    "--".to_string(),
+                    "$FILE".to_string(),
+                ]
             });
             Some(ResolvedFormatter {
                 id: spec.id.clone(),
@@ -298,9 +309,13 @@ fn resolve_builtin(
                 cache_put(key, None);
                 return None;
             };
-            let command = override_command
-                .map(|c| c.to_vec())
-                .unwrap_or_else(|| vec!["clang-format".to_string(), "-i".to_string(), "$FILE".to_string()]);
+            let command = override_command.map(|c| c.to_vec()).unwrap_or_else(|| {
+                vec![
+                    "clang-format".to_string(),
+                    "-i".to_string(),
+                    "$FILE".to_string(),
+                ]
+            });
             cache_put(key.clone(), Some(command.clone()));
             record_ws(&key, &evidence_dir);
             Some(ResolvedFormatter {
@@ -447,10 +462,7 @@ mod tests {
         servers.insert(
             "rustfmt".to_string(),
             FormatterServerConfig {
-                command: Some(vec![
-                    "/usr/bin/true".to_string(),
-                    "$FILE".to_string(),
-                ]),
+                command: Some(vec!["/usr/bin/true".to_string(), "$FILE".to_string()]),
                 ..Default::default()
             },
         );
@@ -462,7 +474,11 @@ mod tests {
         let file = dir.path().join("x.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
         let resolved = resolve_for_path(&file);
-        assert_eq!(resolved.len(), 1, "override with absolute binary must resolve");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "override with absolute binary must resolve"
+        );
         assert_eq!(resolved[0].command[0], "/usr/bin/true");
 
         // And an override naming a nonexistent binary must NOT resolve.
@@ -511,6 +527,9 @@ mod tests {
         std::fs::write(&file, "x=1\n").unwrap();
         let resolved = resolve_for_path(&file);
         let ids: Vec<&str> = resolved.iter().map(|r| r.id.as_str()).collect();
-        assert!(!(ids.contains(&"ruff") && ids.contains(&"uv")), "got: {ids:?}");
+        assert!(
+            !(ids.contains(&"ruff") && ids.contains(&"uv")),
+            "got: {ids:?}"
+        );
     }
 }

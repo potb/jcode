@@ -534,10 +534,15 @@ mod sleep_guard_tests {
     fn an_idle_enabled_guard_checks_tasks_but_not_the_battery() {
         let battery_reads = Cell::new(0);
 
-        let hold = sleep_guard_should_hold(true, false, || false, || {
-            battery_reads.set(battery_reads.get() + 1);
-            false
-        });
+        let hold = sleep_guard_should_hold(
+            true,
+            false,
+            || false,
+            || {
+                battery_reads.set(battery_reads.get() + 1);
+                false
+            },
+        );
 
         assert!(!hold);
         assert_eq!(
@@ -563,7 +568,11 @@ mod sleep_guard_tests {
         );
 
         assert!(hold);
-        assert_eq!(scans.get(), 0, "streaming already proves the client is busy");
+        assert_eq!(
+            scans.get(),
+            0,
+            "streaming already proves the client is busy"
+        );
     }
 
     /// The behaviour all of the above must preserve: a draining laptop releases

@@ -1431,10 +1431,11 @@ fn test_render_tool_message_hides_duration_badge_by_default() {
     let timed = DisplayMessage::tool_with_duration("hello\n", tool.clone(), 340);
     let untimed = DisplayMessage::tool("hello\n", tool);
 
-    let timed_lines: Vec<String> = render_tool_message(&timed, 120, crate::config::DiffDisplayMode::Off)
-        .iter()
-        .map(extract_line_text)
-        .collect();
+    let timed_lines: Vec<String> =
+        render_tool_message(&timed, 120, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect();
     let untimed_lines: Vec<String> =
         render_tool_message(&untimed, 120, crate::config::DiffDisplayMode::Off)
             .iter()

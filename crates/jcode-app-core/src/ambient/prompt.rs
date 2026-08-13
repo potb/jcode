@@ -1408,10 +1408,7 @@ pub fn build_ambient_system_prompt(
 /// the daemon. Only global skills are listed: a cycle has no working directory
 /// of its own, and picks its project after reading this prompt, so a
 /// project-local overlay cannot be resolved at this point.
-pub(crate) fn append_available_skills(
-    prompt: &mut String,
-    skills: &[crate::prompt::SkillInfo],
-) {
+pub(crate) fn append_available_skills(prompt: &mut String, skills: &[crate::prompt::SkillInfo]) {
     let Some(section) = crate::prompt::build_available_skills_section(skills) else {
         return;
     };

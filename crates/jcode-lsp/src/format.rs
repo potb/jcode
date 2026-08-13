@@ -157,7 +157,12 @@ mod tests {
     #[test]
     fn errors_only_when_errors_present() {
         let diags = vec![
-            diag(11, 4, DiagnosticSeverity::ERROR, "cannot find value `x` in this scope"),
+            diag(
+                11,
+                4,
+                DiagnosticSeverity::ERROR,
+                "cannot find value `x` in this scope",
+            ),
             diag(2, 0, DiagnosticSeverity::WARNING, "unused variable"),
         ];
         let out = format_file_diagnostics("src/foo.rs", &diags).unwrap();
@@ -259,6 +264,9 @@ mod tests {
         for label in ["ERROR", "WARN", "INFO", "HINT"] {
             assert!(out.contains(label), "missing {label}");
         }
-        assert_eq!(format_all_severities("a.rs", &[]), "No diagnostics for a.rs");
+        assert_eq!(
+            format_all_severities("a.rs", &[]),
+            "No diagnostics for a.rs"
+        );
     }
 }

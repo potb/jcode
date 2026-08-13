@@ -232,7 +232,15 @@ mod tests {
         let ids: Vec<&str> = catalog.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["rustfmt", "gofmt", "prettier", "biome", "ruff", "uv", "clang-format"]
+            vec![
+                "rustfmt",
+                "gofmt",
+                "prettier",
+                "biome",
+                "ruff",
+                "uv",
+                "clang-format"
+            ]
         );
     }
 

@@ -37,7 +37,10 @@ fn server_config(scenario: &str) -> LspServerConfig {
 fn rename_notif_log() -> &'static std::path::Path {
     static LOG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     LOG.get_or_init(|| {
-        std::env::temp_dir().join(format!("jcode-lsp-rename-notifs-{}.log", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "jcode-lsp-rename-notifs-{}.log",
+            std::process::id()
+        ))
     })
 }
 
@@ -120,7 +123,10 @@ async fn clean_scenario_returns_none() {
     let (_dir, file) = workspace("clean");
 
     let out = jcode_lsp::diagnostics_block(&file).await;
-    assert!(out.is_none(), "expected None for clean scenario, got {out:?}");
+    assert!(
+        out.is_none(),
+        "expected None for clean scenario, got {out:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,7 +138,10 @@ async fn silent_scenario_times_out_within_cold_cap() {
     let out = jcode_lsp::diagnostics_block(&file).await;
     let elapsed = start.elapsed();
 
-    assert!(out.is_none(), "expected None for silent scenario, got {out:?}");
+    assert!(
+        out.is_none(),
+        "expected None for silent scenario, got {out:?}"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(8),
         "silent scenario took too long: {elapsed:?}"
@@ -192,7 +201,11 @@ async fn handle_for_definition_returns_fixed_location() {
     let loc = &locations[0];
     // Fake server always answers line 0, col 0 (0-based) -> 1-based (1, 1).
     assert_eq!(loc.line, 1, "expected 1-based line 1, got {}", loc.line);
-    assert_eq!(loc.column, 1, "expected 1-based column 1, got {}", loc.column);
+    assert_eq!(
+        loc.column, 1,
+        "expected 1-based column 1, got {}",
+        loc.column
+    );
     assert_eq!(
         loc.path.file_name().and_then(|n| n.to_str()),
         file.file_name().and_then(|n| n.to_str())
@@ -233,7 +246,10 @@ async fn hang_scenario_times_out_and_does_not_block_other_servers() {
     let clean_start = Instant::now();
     let clean_out = jcode_lsp::diagnostics_block(&clean_file).await;
     let clean_elapsed = clean_start.elapsed();
-    assert!(clean_out.is_none(), "clean scenario should be clean: {clean_out:?}");
+    assert!(
+        clean_out.is_none(),
+        "clean scenario should be clean: {clean_out:?}"
+    );
     assert!(
         clean_elapsed < std::time::Duration::from_secs(8),
         "clean scenario blocked behind hung handshake: {clean_elapsed:?}"
@@ -241,7 +257,10 @@ async fn hang_scenario_times_out_and_does_not_block_other_servers() {
 
     let hang_out = hang_task.await.expect("hang task should not panic");
     let elapsed = start.elapsed();
-    assert!(hang_out.is_none(), "hang scenario should yield None: {hang_out:?}");
+    assert!(
+        hang_out.is_none(),
+        "hang scenario should yield None: {hang_out:?}"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(8),
         "hang scenario exceeded bounded wait: {elapsed:?}"
@@ -311,7 +330,11 @@ async fn workspace_handle_for_resolves_directory() {
         .workspace_symbols("anything")
         .await
         .expect("workspace_symbols should succeed");
-    assert_eq!(symbols.len(), 1, "expected the fake symbol, got {symbols:?}");
+    assert_eq!(
+        symbols.len(),
+        1,
+        "expected the fake symbol, got {symbols:?}"
+    );
     assert_eq!(symbols[0].name, "fake_symbol_anything");
     assert_eq!(symbols[0].line, 4, "line must be 1-based");
 }

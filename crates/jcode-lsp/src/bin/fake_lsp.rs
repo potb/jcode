@@ -191,12 +191,18 @@ fn main() {
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        let params = msg
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         if id.is_none()
             && !method.is_empty()
             && let Some(log) = &notif_log
-            && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log)
+            && let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
         {
             let _ = writeln!(f, "{method}");
         }

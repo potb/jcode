@@ -141,12 +141,8 @@ pub async fn client_for(path: &Path) -> Result<ClientLease> {
     if !config().enabled {
         return Err(anyhow!("lsp is disabled"));
     }
-    let (spec, root) = resolve(path).ok_or_else(|| {
-        anyhow!(
-            "no language server configured for `{}`",
-            path.display()
-        )
-    })?;
+    let (spec, root) = resolve(path)
+        .ok_or_else(|| anyhow!("no language server configured for `{}`", path.display()))?;
     client_for_spec(&spec, &root).await
 }
 
@@ -240,10 +236,7 @@ pub async fn client_for_spec(spec: &ServerSpec, root: &Path) -> Result<ClientLea
         });
     }
     clients.insert(key, client.clone());
-    Ok(ClientLease {
-        client,
-        cold: true,
-    })
+    Ok(ClientLease { client, cold: true })
 }
 
 /// Best-effort shutdown of every live client.

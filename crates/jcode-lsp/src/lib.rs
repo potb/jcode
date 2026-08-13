@@ -84,10 +84,7 @@ pub async fn diagnostics_block(path: &Path) -> Option<String> {
     match diagnostics_block_inner(path).await {
         Ok(out) => out,
         Err(err) => {
-            jcode_logging::debug(&format!(
-                "lsp diagnostics {}: {err:#}",
-                path.display()
-            ));
+            jcode_logging::debug(&format!("lsp diagnostics {}: {err:#}", path.display()));
             None
         }
     }
@@ -200,9 +197,12 @@ pub async fn handle_for(path: &Path) -> Result<LspHandle> {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    let text = read_text_for_lsp(&path)
-        .await
-        .ok_or_else(|| anyhow!("cannot read `{}` (missing, binary, or >1MB)", path.display()))?;
+    let text = read_text_for_lsp(&path).await.ok_or_else(|| {
+        anyhow!(
+            "cannot read `{}` (missing, binary, or >1MB)",
+            path.display()
+        )
+    })?;
     let lease = registry::client_for(&path).await?;
     lease.client.open_or_update(&path, &text).await?;
     let uri = file_uri(&path)?;
@@ -252,8 +252,7 @@ pub async fn workspace_handle_for(dir: &Path) -> Result<LspHandle> {
         }
         cur = d.parent();
     }
-    let (spec, root) =
-        chosen.unwrap_or_else(|| (available[0].clone(), dir.clone()));
+    let (spec, root) = chosen.unwrap_or_else(|| (available[0].clone(), dir.clone()));
 
     let lease = registry::client_for_spec(&spec, &root).await?;
     let uri = file_uri(&root)?;
@@ -369,7 +368,11 @@ impl LspHandle {
                 }
             }
             Some(lsp_types::DocumentSymbolResponse::Nested(symbols)) => {
-                fn walk(out: &mut Vec<SymbolInfo>, path: &Path, syms: Vec<lsp_types::DocumentSymbol>) {
+                fn walk(
+                    out: &mut Vec<SymbolInfo>,
+                    path: &Path,
+                    syms: Vec<lsp_types::DocumentSymbol>,
+                ) {
                     for s in syms {
                         out.push(SymbolInfo {
                             name: s.name,
@@ -673,8 +676,8 @@ async fn apply_workspace_edit(
 fn apply_text_edit(text: &str, edit: &lsp_types::TextEdit) -> Result<String> {
     let start = byte_offset(text, edit.range.start)
         .ok_or_else(|| anyhow!("rename edit start out of range"))?;
-    let end = byte_offset(text, edit.range.end)
-        .ok_or_else(|| anyhow!("rename edit end out of range"))?;
+    let end =
+        byte_offset(text, edit.range.end).ok_or_else(|| anyhow!("rename edit end out of range"))?;
     if start > end || end > text.len() {
         return Err(anyhow!("rename edit range invalid"));
     }

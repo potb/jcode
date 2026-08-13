@@ -1587,7 +1587,10 @@ async fn run_ambient_visible() -> Result<()> {
         .filter(|e| !e.is_empty())
         && let Err(e) = provider.set_reasoning_effort(effort)
     {
-        eprintln!("Ambient: could not apply ambient.effort '{}': {}", effort, e);
+        eprintln!(
+            "Ambient: could not apply ambient.effort '{}': {}",
+            effort, e
+        );
     }
 
     registry.register_ambient_tools().await;

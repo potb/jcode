@@ -21,7 +21,9 @@ pub fn find_dir_upwards<F: Fn(&Path) -> bool>(start: &Path, pred: F) -> Option<P
 /// Directory containing a `package.json` (walking up from `start`) whose
 /// `dependencies` or `devDependencies` object has a `dep_name` key.
 pub fn package_json_dep_dir(start: &Path, dep_name: &str) -> Option<PathBuf> {
-    find_dir_upwards(start, |d| package_json_has_dep(&d.join("package.json"), dep_name))
+    find_dir_upwards(start, |d| {
+        package_json_has_dep(&d.join("package.json"), dep_name)
+    })
 }
 
 fn package_json_has_dep(package_json: &Path, dep_name: &str) -> bool {
@@ -32,11 +34,7 @@ fn package_json_has_dep(package_json: &Path, dep_name: &str) -> bool {
         return false;
     };
     for key in ["dependencies", "devDependencies"] {
-        if value
-            .get(key)
-            .and_then(|deps| deps.get(dep_name))
-            .is_some()
-        {
+        if value.get(key).and_then(|deps| deps.get(dep_name)).is_some() {
             return true;
         }
     }
@@ -89,7 +87,9 @@ fn file_mentions(path: &Path, needle: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return false;
     };
-    content.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+    content
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 /// Directory containing a `.clang-format` file (walking up from `start`).
@@ -191,7 +191,10 @@ mod tests {
             r#"{"dependencies": {"prettier": "3.0.0"}}"#,
         )
         .unwrap();
-        assert_eq!(package_json_dep_dir(root, "prettier"), Some(root.to_path_buf()));
+        assert_eq!(
+            package_json_dep_dir(root, "prettier"),
+            Some(root.to_path_buf())
+        );
     }
 
     #[test]
@@ -274,7 +277,10 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         assert!(clang_format_dir(&root.join("src")).is_none());
         std::fs::write(root.join(".clang-format"), "BasedOnStyle: LLVM\n").unwrap();
-        assert_eq!(clang_format_dir(&root.join("src")), Some(root.to_path_buf()));
+        assert_eq!(
+            clang_format_dir(&root.join("src")),
+            Some(root.to_path_buf())
+        );
     }
 
     #[test]

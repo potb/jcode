@@ -75,7 +75,7 @@ LOG_DIR="${JCODE_UPSTREAM_LOG_DIR:-$STATE_DIR/logs}"
 # added. Checking them at merge time keeps the baselines describing the fork's
 # real state, and makes the growth visible in the merge's own log.
 RATCHET_CMD='python3 scripts/check_code_size_budget.py && python3 scripts/check_test_size_budget.py && python3 scripts/check_panic_budget.py && python3 scripts/check_swallowed_error_budget.py && python3 scripts/check_wildcard_reexport_budget.py'
-CHECK_CMD="${JCODE_UPSTREAM_CHECK_CMD:-cargo check --workspace && $RATCHET_CMD}"
+CHECK_CMD="${JCODE_UPSTREAM_CHECK_CMD:-cargo check --workspace && cargo fmt --all -- --check && $RATCHET_CMD}"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
@@ -743,6 +743,8 @@ Use \"failed\" if you could not resolve it for any other reason.
    'python3 scripts/<script>.py --update', commit the JSON with the merge, and
    say so in the commit message. Only investigate when the growth comes from a
    conflict YOU resolved.
+   'cargo fmt --all -- --check' in that command is mechanical: if it fails,
+   just run 'cargo fmt --all' and include the result in the merge commit.
 3. Run the tests most relevant to the files you touched.
 4. Commit the merge, message summarizing each nontrivial resolution.
 5. Write $VERDICT_FILE.

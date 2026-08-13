@@ -139,10 +139,7 @@ fn compact_model_height(data: &InfoWidgetData) -> u16 {
     // First row: the model name when the identity shows, otherwise only the
     // widget-only badges that survive the gate, and nothing at all if the
     // snapshot carries none of them.
-    if show_identity
-        || data.has_service_tier_badge()
-        || data.native_compaction_mode.is_some()
-    {
+    if show_identity || data.has_service_tier_badge() || data.native_compaction_mode.is_some() {
         lines += 1;
     }
 

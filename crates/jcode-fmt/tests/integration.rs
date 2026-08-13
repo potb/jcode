@@ -37,7 +37,8 @@ fn write_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::Pat
 
 /// Uppercases the file content in place. `$1` is the file path (the last
 /// arg, since our command template is `[script, "$FILE"]`).
-const UPPERCASE_SCRIPT: &str = "#!/bin/sh\ntr a-z A-Z < \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n";
+const UPPERCASE_SCRIPT: &str =
+    "#!/bin/sh\ntr a-z A-Z < \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n";
 
 /// Sleeps far longer than the 5s exec timeout.
 const SLEEP_SCRIPT: &str = "#!/bin/sh\nsleep 10\n";
@@ -53,7 +54,10 @@ fn full_test_config(scripts_dir: &std::path::Path) -> FormatterConfig {
         "fake".to_string(),
         FormatterServerConfig {
             command: Some(vec![
-                scripts_dir.join("uppercase.sh").to_string_lossy().into_owned(),
+                scripts_dir
+                    .join("uppercase.sh")
+                    .to_string_lossy()
+                    .into_owned(),
                 "$FILE".to_string(),
             ]),
             extensions: Some(vec!["fkfmt".to_string()]),

@@ -93,7 +93,11 @@ mod tests {
         // Line past end of file: raw passthrough, no panic.
         let p = to_lsp_position(text, 42, 7, PositionEncoding::Utf16);
         assert_eq!(p, lsp_types::Position::new(41, 6));
-        let back = from_lsp_position(text, lsp_types::Position::new(41, 6), PositionEncoding::Utf16);
+        let back = from_lsp_position(
+            text,
+            lsp_types::Position::new(41, 6),
+            PositionEncoding::Utf16,
+        );
         assert_eq!(back, (42, 7));
     }
 

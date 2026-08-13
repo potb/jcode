@@ -648,7 +648,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert!(!uninstall_hook(&path).unwrap());
-        assert!(!path.exists(), "must not create the config to remove a hook");
+        assert!(
+            !path.exists(),
+            "must not create the config to remove a hook"
+        );
     }
 
     #[cfg(not(windows))]

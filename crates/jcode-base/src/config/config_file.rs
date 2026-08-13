@@ -937,6 +937,9 @@ mod prune_tests {
     #[test]
     fn keys_absent_from_defaults_are_kept() {
         let pruned = prune_defaults(value("custom = 1"), &value("")).expect("kept");
-        assert_eq!(pruned.get("custom").and_then(toml::Value::as_integer), Some(1));
+        assert_eq!(
+            pruned.get("custom").and_then(toml::Value::as_integer),
+            Some(1)
+        );
     }
 }

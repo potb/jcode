@@ -3,7 +3,7 @@
   "tracked_files": {
     "crates/jcode-app-core/src/agent/turn_loops.rs": 1260,
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1739,
-    "crates/jcode-app-core/src/ambient/prompt.rs": 1538,
+    "crates/jcode-app-core/src/ambient/prompt.rs": 1576,
     "crates/jcode-app-core/src/ambient/runner.rs": 1751,
     "crates/jcode-app-core/src/channel.rs": 1645,
     "crates/jcode-app-core/src/notifications.rs": 1425,
@@ -100,7 +100,7 @@
     "crates/jcode-tui/src/tui/app/tui_state.rs": 2554,
     "crates/jcode-tui/src/tui/app/turn.rs": 1491,
     "crates/jcode-tui/src/tui/backend.rs": 1875,
-    "crates/jcode-tui/src/tui/info_widget.rs": 2526,
+    "crates/jcode-tui/src/tui/info_widget.rs": 2530,
     "crates/jcode-tui/src/tui/mod.rs": 1925,
     "crates/jcode-tui/src/tui/session_picker.rs": 2440,
     "crates/jcode-tui/src/tui/session_picker/loading.rs": 3051,
@@ -118,7 +118,7 @@
     "src/bin/memory_recall_bench.rs": 2667,
     "src/bin/tui_bench.rs": 1763,
     "src/cli/acp.rs": 2188,
-    "src/cli/commands.rs": 3581,
+    "src/cli/commands.rs": 3584,
     "src/cli/dispatch.rs": 1447,
     "src/cli/login.rs": 1414,
     "src/cli/provider_init.rs": 1884

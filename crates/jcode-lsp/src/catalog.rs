@@ -266,16 +266,30 @@ mod tests {
             "[workspace]\nmembers = [\"crates/*\"]\n",
         )
         .unwrap();
-        std::fs::write(root.join("crates/member-a/Cargo.toml"), "[package]\nname = \"a\"\n")
-            .unwrap();
-        std::fs::write(root.join("crates/member-b/Cargo.toml"), "[package]\nname = \"b\"\n")
-            .unwrap();
+        std::fs::write(
+            root.join("crates/member-a/Cargo.toml"),
+            "[package]\nname = \"a\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/member-b/Cargo.toml"),
+            "[package]\nname = \"b\"\n",
+        )
+        .unwrap();
 
         let catalog = resolve_catalog(&LspConfig::default());
         let rs = spec_for_path(&catalog, Path::new("f.rs")).unwrap();
 
-        let a = workspace_root(rs, &root.join("crates/member-a/src/lib.rs"), Path::new("/fb"));
-        let b = workspace_root(rs, &root.join("crates/member-b/src/lib.rs"), Path::new("/fb"));
+        let a = workspace_root(
+            rs,
+            &root.join("crates/member-a/src/lib.rs"),
+            Path::new("/fb"),
+        );
+        let b = workspace_root(
+            rs,
+            &root.join("crates/member-b/src/lib.rs"),
+            Path::new("/fb"),
+        );
         assert_eq!(a, root, "a member must resolve to the workspace root");
         assert_eq!(
             a, b,
@@ -291,7 +305,11 @@ mod tests {
         let root = tmp.path();
         std::fs::create_dir_all(root.join("outer/inner/src")).unwrap();
         // An ancestor manifest that is a plain package, not a workspace.
-        std::fs::write(root.join("outer/Cargo.toml"), "[package]\nname = \"outer\"\n").unwrap();
+        std::fs::write(
+            root.join("outer/Cargo.toml"),
+            "[package]\nname = \"outer\"\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("outer/inner/Cargo.toml"),
             "[package]\nname = \"inner\"\n",
