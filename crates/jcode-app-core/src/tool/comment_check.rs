@@ -37,6 +37,8 @@ enum Syntax {
     CStyle,
     /// `#` only, plus `"""`/`'''` docstrings.
     Hash,
+    /// `#`, but only at line start or after whitespace, plus block scalars.
+    Yaml,
     /// No comment syntax worth scanning.
     None,
 }
@@ -45,7 +47,8 @@ fn syntax_for(language_id: &str) -> Syntax {
     match language_id {
         "rust" | "typescript" | "typescriptreact" | "javascript" | "javascriptreact" | "go"
         | "c" | "cpp" | "objective-c" | "objective-cpp" | "jsonc" => Syntax::CStyle,
-        "python" | "yaml" => Syntax::Hash,
+        "python" => Syntax::Hash,
+        "yaml" => Syntax::Yaml,
         _ => Syntax::None,
     }
 }
@@ -134,11 +137,19 @@ const MEMO_PREFIXES: &[&str] = &[
     "moved",
     "refactored",
     "new:",
-    "was ",
-    "now ",
+    "was changed",
     "previously",
     "note to self",
     "todo(agent)",
+];
+
+/// Subjects that make a leading `now` a note about an edit rather than prose.
+const MEMO_NOW_SUBJECTS: &[&str] = &["we", "this", "it"];
+
+/// Verbs that, after a [`MEMO_NOW_SUBJECTS`] word, describe a change.
+const MEMO_NOW_VERBS: &[&str] = &[
+    "use", "uses", "used", "call", "calls", "return", "returns", "do", "does", "is", "are", "has",
+    "have", "also", "only",
 ];
 
 fn is_exempt(body: &str) -> bool {
@@ -151,7 +162,27 @@ fn is_exempt(body: &str) -> bool {
 
 fn is_memo(body: &str) -> bool {
     let lower = body.trim_start().to_ascii_lowercase();
-    MEMO_PREFIXES.iter().any(|p| lower.starts_with(p))
+    MEMO_PREFIXES.iter().any(|p| lower.starts_with(p)) || is_now_memo(&lower)
+}
+
+/// A bare `now` prefix matches ordinary prose ("Now that the config is
+/// loaded, ..."), so it only counts with a subject and a change verb behind it.
+fn is_now_memo(lower: &str) -> bool {
+    let Some(rest) = lower.strip_prefix("now ") else {
+        return false;
+    };
+    let mut words = rest.split_whitespace();
+    let Some(subject) = words.next() else {
+        return false;
+    };
+    if !MEMO_NOW_SUBJECTS.contains(&subject) {
+        return false;
+    }
+    let Some(verb) = words.next() else {
+        return false;
+    };
+    let verb = verb.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    MEMO_NOW_VERBS.contains(&verb)
 }
 
 /// Scan `content` and return the non-doc, non-exempt comments in it.
@@ -171,19 +202,23 @@ fn scan_with(content: &str, syntax: Syntax) -> Vec<CommentSpan> {
     }
     match syntax {
         Syntax::CStyle => scan_c_style(content),
-        Syntax::Hash => scan_hash(content),
+        Syntax::Hash => scan_hash(content, false),
+        Syntax::Yaml => scan_hash(content, true),
         Syntax::None => Vec::new(),
     }
 }
 
 /// Push a span when the comment body earns a report.
-fn push_if_reportable(out: &mut Vec<CommentSpan>, line: usize, body: &str) {
+///
+/// `text` is what the report shows (delimiter included); `body` is the same
+/// comment with its delimiter stripped, which is what the prefix lists assume.
+fn push_if_reportable(out: &mut Vec<CommentSpan>, line: usize, text: &str, body: &str) {
     if is_exempt(body) {
         return;
     }
     out.push(CommentSpan {
         line,
-        text: body.trim().to_string(),
+        text: text.trim().to_string(),
         memo: is_memo(body),
     });
 }
@@ -217,7 +252,7 @@ fn scan_c_style(content: &str) -> Vec<CommentSpan> {
                 let end = line_end(bytes, i);
                 let body = trim_block_marker(&content[i..end]);
                 if !body.trim().is_empty() {
-                    push_if_reportable(&mut out, line, body);
+                    push_if_reportable(&mut out, line, body, body);
                 }
                 i = end;
                 continue;
@@ -227,6 +262,11 @@ fn scan_c_style(content: &str) -> Vec<CommentSpan> {
         }
         if let Some(quote) = in_string {
             if b == b'\\' {
+                // An escaped newline is a line continuation: the literal stays
+                // open across it, but the line still has to be counted.
+                if bytes.get(i + 1) == Some(&b'\n') {
+                    line += 1;
+                }
                 i += 2;
                 continue;
             }
@@ -245,7 +285,7 @@ fn scan_c_style(content: &str) -> Vec<CommentSpan> {
                 let end = line_end(bytes, i);
                 let raw = &content[i..end];
                 if !is_doc_line(raw) {
-                    push_if_reportable(&mut out, line, raw.trim_start_matches('/'));
+                    push_if_reportable(&mut out, line, raw, raw.trim_start_matches('/'));
                 }
                 i = end;
             }
@@ -277,49 +317,102 @@ fn line_end(bytes: &[u8], from: usize) -> usize {
     i
 }
 
-fn scan_hash(content: &str) -> Vec<CommentSpan> {
+/// Scan `#`-comment syntax. `yaml` selects the YAML dialect: a `#` only opens
+/// a comment at line start or after whitespace, block scalars are literal
+/// text, and there are no docstrings.
+fn scan_hash(content: &str, yaml: bool) -> Vec<CommentSpan> {
     let mut out = Vec::new();
     let mut in_docstring: Option<&str> = None;
+    let mut block_indent: Option<usize> = None;
 
     for (idx, raw_line) in content.lines().enumerate() {
         let line = idx + 1;
         let trimmed = raw_line.trim_start();
 
-        if let Some(delim) = in_docstring {
-            if trimmed.contains(delim) {
-                in_docstring = None;
+        // A block scalar body is literal text, so it ends only on a line that
+        // dedents back to the indicator's own indentation.
+        if let Some(indent) = block_indent {
+            if trimmed.is_empty() || indent_of(raw_line) > indent {
+                continue;
             }
-            continue;
+            block_indent = None;
         }
-        for delim in ["\"\"\"", "'''"] {
-            if let Some(rest) = trimmed.strip_prefix(delim) {
-                // A one-line docstring opens and closes on the same line.
-                if !rest.contains(delim) {
+        if !yaml {
+            if let Some(delim) = in_docstring {
+                if trimmed.contains(delim) {
+                    in_docstring = None;
+                }
+                continue;
+            }
+            if let Some(delim) = triple_quote_on_line(raw_line) {
+                // An odd count leaves the string open past the end of the line.
+                if raw_line.matches(delim).count() % 2 == 1 {
                     in_docstring = Some(delim);
                 }
-                break;
+                continue;
             }
-        }
-        if in_docstring.is_some() || trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            continue;
         }
         if line == 1 && trimmed.starts_with("#!") {
             continue;
         }
-        if let Some(pos) = hash_comment_start(raw_line) {
-            push_if_reportable(&mut out, line, &raw_line[pos + 1..]);
+        let start = hash_comment_start(raw_line, yaml);
+        if yaml {
+            let code = &raw_line[..start.unwrap_or(raw_line.len())];
+            if ends_with_block_indicator(code) {
+                block_indent = Some(indent_of(raw_line));
+            }
+        }
+        if let Some(pos) = start {
+            let body = &raw_line[pos + 1..];
+            push_if_reportable(&mut out, line, body, body);
         }
     }
     out
 }
 
+/// The triple-quote delimiter a Python line opens or closes, if any. Unlike a
+/// docstring proper this also catches `x = """...`, whose body is still a
+/// string.
+fn triple_quote_on_line(line: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''"]
+        .into_iter()
+        .filter(|d| line.contains(d))
+        .min_by_key(|d| line.find(d).unwrap_or(usize::MAX))
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Whether a YAML line ends in a `|`/`>` block scalar indicator, including the
+/// chomping and explicit-indentation forms (`|-`, `>+`, `|2`).
+fn ends_with_block_indicator(code: &str) -> bool {
+    let head = code
+        .trim_end()
+        .trim_end_matches(|c: char| c.is_ascii_digit() || c == '+' || c == '-');
+    head.ends_with('|') || head.ends_with('>')
+}
+
 /// Byte offset of a `#` that starts a comment, skipping ones inside quotes.
-fn hash_comment_start(line: &str) -> Option<usize> {
+///
+/// `require_space` applies YAML's rule that a `#` only opens a comment at the
+/// start of a line or after whitespace, so `.../#frag` in a URL is not one.
+/// Python has no such rule: `x = 1#c` is a comment.
+fn hash_comment_start(line: &str, require_space: bool) -> Option<usize> {
     let mut in_string: Option<u8> = None;
+    let mut escaped = false;
+    let mut prev: Option<u8> = None;
     for (i, b) in line.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            prev = Some(b);
+            continue;
+        }
         match in_string {
             Some(q) => {
                 if b == b'\\' {
+                    escaped = true;
+                    prev = Some(b);
                     continue;
                 }
                 if b == q {
@@ -328,10 +421,15 @@ fn hash_comment_start(line: &str) -> Option<usize> {
             }
             None => match b {
                 b'"' | b'\'' => in_string = Some(b),
-                b'#' => return Some(i),
+                b'#' => {
+                    if !require_space || prev.is_none_or(|p| p.is_ascii_whitespace()) {
+                        return Some(i);
+                    }
+                }
                 _ => {}
             },
         }
+        prev = Some(b);
     }
     None
 }
@@ -371,7 +469,7 @@ mod tests {
     #[test]
     fn reports_ordinary_rust_comments() {
         let src = "// increment i\nlet i = i + 1;\n";
-        assert_eq!(texts(src, "rust"), vec!["increment i"]);
+        assert_eq!(texts(src, "rust"), vec!["// increment i"]);
     }
 
     #[test]
@@ -389,7 +487,7 @@ mod tests {
     #[test]
     fn unterminated_string_does_not_swallow_the_file() {
         let src = "let s = \"oops;\n// real comment\n";
-        assert_eq!(texts(src, "rust"), vec!["real comment"]);
+        assert_eq!(texts(src, "rust"), vec!["// real comment"]);
     }
 
     #[test]
@@ -489,5 +587,168 @@ mod tests {
     #[test]
     fn css_stays_unscanned_so_protocol_relative_urls_are_not_comments() {
         assert_eq!(syntax_for_path(Path::new("a.css")), Syntax::None);
+    }
+
+    #[test]
+    fn line_comment_text_keeps_its_delimiter() {
+        let src = "let x = 1; // trailing\n";
+        assert_eq!(texts(src, "rust"), vec!["// trailing"]);
+    }
+
+    #[test]
+    fn escaped_backslash_still_closes_the_string_on_its_line() {
+        let src = "let s = \"ends \\\\\";\n// after\n";
+        assert_eq!(
+            scan(src, "rust"),
+            vec![CommentSpan {
+                line: 2,
+                text: "// after".to_string(),
+                memo: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn yaml_hash_after_whitespace_is_still_a_comment() {
+        let src = "key: value # note\n# standalone\n";
+        assert_eq!(texts(src, "yaml"), vec!["note", "standalone"]);
+    }
+
+    #[test]
+    fn python_hash_without_leading_space_is_a_comment() {
+        assert_eq!(texts("x = 1#c\n", "python"), vec!["c"]);
+    }
+
+    #[test]
+    fn yaml_comment_after_a_block_scalar_dedents_is_found() {
+        let src = "script: |-\n  echo hi # inner\n\n  more\nnext: 1 # real\n";
+        assert_eq!(texts(src, "yaml"), vec!["real"]);
+    }
+
+    #[test]
+    fn now_with_a_change_verb_is_still_a_memo() {
+        let spans = scan("// now we use the pooled client\n", "rust");
+        assert!(spans[0].memo);
+    }
+}
+
+#[cfg(test)]
+mod differential_tests {
+    use super::*;
+
+    fn spans(content: &str, lang: &str) -> Vec<(usize, String)> {
+        scan(content, lang)
+            .into_iter()
+            .map(|s| (s.line, s.text))
+            .collect()
+    }
+
+    #[test]
+    fn diff_raw_string_with_hashes_is_not_a_comment() {
+        let src = "let r = r#\"has \"quotes\" and // slashes\"#;\n";
+        assert_eq!(spans(src, "rust"), Vec::<(usize, String)>::new());
+    }
+
+    #[test]
+    fn diff_lifetime_does_not_open_a_char_literal() {
+        let src = "fn f<'a>(x: &'a str) {} // trailing\n";
+        assert_eq!(spans(src, "rust").len(), 1);
+    }
+
+    #[test]
+    fn diff_nested_block_comment_terminates() {
+        let src = "/* outer /* inner */ still outer */\nlet x = 1;\n// after\n";
+        let got = spans(src, "rust");
+        assert_eq!(got.last().map(|s| s.0), Some(3));
+    }
+
+    #[test]
+    fn diff_string_line_continuation_keeps_lines_aligned() {
+        let src = "let s = \"one \\\ntwo\";\n// after\n";
+        assert_eq!(spans(src, "rust"), vec![(3, "// after".to_string())]);
+    }
+
+    #[test]
+    fn diff_yaml_url_fragment_is_not_a_comment() {
+        let src = "url: http://example.com/#frag\n";
+        assert_eq!(spans(src, "yaml"), Vec::<(usize, String)>::new());
+    }
+
+    #[test]
+    fn diff_yaml_block_scalar_body_is_not_a_comment() {
+        let src = "script: |\n  echo hi # not a comment\nnext: 1\n";
+        assert_eq!(spans(src, "yaml"), Vec::<(usize, String)>::new());
+    }
+
+    #[test]
+    fn diff_python_raw_string_then_real_comment() {
+        let src = "x = r\"\\\"\"\n# real\n";
+        assert_eq!(spans(src, "python").len(), 1);
+    }
+
+    #[test]
+    fn diff_note_that_is_not_a_memo() {
+        let flagged = scan("// Note that the range is inclusive.\n", "rust")
+            .into_iter()
+            .any(|s| s.memo);
+        assert!(!flagged, "explanatory 'Note that' should not be a memo");
+    }
+
+    #[test]
+    fn diff_now_that_is_not_a_memo() {
+        let flagged = scan(
+            "// Now that the config is loaded, the server starts.\n",
+            "rust",
+        )
+        .into_iter()
+        .any(|s| s.memo);
+        assert!(!flagged, "explanatory 'Now that' should not be a memo");
+    }
+
+    #[test]
+    fn diff_was_the_word_is_not_a_memo() {
+        let flagged = scan("// was the previous owner of the lock\n", "rust")
+            .into_iter()
+            .any(|s| s.memo);
+        assert!(!flagged);
+    }
+}
+#[cfg(test)]
+mod real_file_line_accuracy {
+    use super::*;
+
+    fn check(path: &str, lang: &str) -> Vec<String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo root");
+        let content = std::fs::read_to_string(root.join(path)).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        let mut bad = Vec::new();
+        for s in scan(&content, lang) {
+            let actual = lines.get(s.line - 1).map(|l| l.trim()).unwrap_or("<oob>");
+            let head: String = s.text.trim().chars().take(20).collect();
+            if !actual.contains(head.trim()) {
+                bad.push(format!(
+                    "line {} span={:?} actual={:?}",
+                    s.line, head, actual
+                ));
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn line_numbers_match_real_repository_files() {
+        for path in [
+            "crates/jcode-app-core/src/ambient/prompt.rs",
+            "crates/jcode-tui/src/tui/app/tests/swarm_plan_graph_inline.rs",
+            "crates/jcode-app-core/src/tool/comment_check.rs",
+            "crates/jcode-app-core/src/tool/write.rs",
+            "crates/jcode-lsp/src/lib.rs",
+        ] {
+            let bad = check(path, "rust");
+            assert!(bad.is_empty(), "{path}: {bad:#?}");
+        }
     }
 }
