@@ -28,6 +28,13 @@ pub(crate) struct CommentSpan {
     /// Matches upstream's memo patterns: a comment describing a change rather
     /// than the code. Near-certain verdict, so the report marks it.
     pub memo: bool,
+    /// The comment without its delimiter, which is what the prefix lists
+    /// assume. Kept so a merged run can be reclassified as one comment.
+    body: String,
+    /// Whether the comment is the whole line rather than a trailing note after
+    /// code. Only whole-line comments join a run: two trailing comments on
+    /// adjacent lines belong to their own statements.
+    own_line: bool,
 }
 
 /// Comment syntax family for a language id from `jcode_lsp::language_id`.
@@ -200,19 +207,62 @@ fn scan_with(content: &str, syntax: Syntax) -> Vec<CommentSpan> {
     if syntax == Syntax::None || content.len() > MAX_SCAN_BYTES {
         return Vec::new();
     }
-    match syntax {
+    let spans = match syntax {
         Syntax::CStyle => scan_c_style(content),
         Syntax::Hash => scan_hash(content, false),
         Syntax::Yaml => scan_hash(content, true),
         Syntax::None => Vec::new(),
+    };
+    merge_runs(spans)
+}
+
+/// Join runs of whole-line comments on consecutive lines into one span.
+///
+/// A wrapped paragraph is one comment that happens to be written across
+/// several lines. Classifying each line on its own reads continuations as
+/// independent comments, so a paragraph whose second line starts "removed
+/// when the next prompt begins" is flagged as a memo on that line alone, and
+/// a long paragraph can spend the whole per-file budget by itself.
+///
+/// The run is reported at its first line and keeps that line's text as the
+/// preview; only the classification sees the joined body.
+fn merge_runs(spans: Vec<CommentSpan>) -> Vec<CommentSpan> {
+    let mut out: Vec<CommentSpan> = Vec::with_capacity(spans.len());
+    // Last line absorbed into the open run, which is not the run's reported
+    // line once it spans more than one.
+    let mut run_end = 0usize;
+    for span in spans {
+        let joins = out
+            .last()
+            .is_some_and(|prev| prev.own_line && span.own_line && run_end + 1 == span.line);
+        if joins {
+            let prev = out.last_mut().expect("joins implies a previous span");
+            prev.body.push(' ');
+            prev.body.push_str(span.body.trim());
+        } else {
+            out.push(span.clone());
+        }
+        run_end = span.line;
     }
+    for span in &mut out {
+        span.memo = is_memo(&span.body);
+    }
+    out
 }
 
 /// Push a span when the comment body earns a report.
 ///
 /// `text` is what the report shows (delimiter included); `body` is the same
 /// comment with its delimiter stripped, which is what the prefix lists assume.
-fn push_if_reportable(out: &mut Vec<CommentSpan>, line: usize, text: &str, body: &str) {
+/// `own_line` says the comment occupies the whole line, which is what makes it
+/// eligible to join a wrapped run.
+fn push_if_reportable(
+    out: &mut Vec<CommentSpan>,
+    line: usize,
+    text: &str,
+    body: &str,
+    own_line: bool,
+) {
     if is_exempt(body) {
         return;
     }
@@ -220,6 +270,8 @@ fn push_if_reportable(out: &mut Vec<CommentSpan>, line: usize, text: &str, body:
         line,
         text: text.trim().to_string(),
         memo: is_memo(body),
+        body: body.trim().to_string(),
+        own_line,
     });
 }
 
@@ -252,7 +304,9 @@ fn scan_c_style(content: &str) -> Vec<CommentSpan> {
                 let end = line_end(bytes, i);
                 let body = trim_block_marker(&content[i..end]);
                 if !body.trim().is_empty() {
-                    push_if_reportable(&mut out, line, body, body);
+                    // Block bodies stay one report per line: a `/* */` block is
+                    // already delimited, so its lines need no run detection.
+                    push_if_reportable(&mut out, line, body, body, false);
                 }
                 i = end;
                 continue;
@@ -285,7 +339,8 @@ fn scan_c_style(content: &str) -> Vec<CommentSpan> {
                 let end = line_end(bytes, i);
                 let raw = &content[i..end];
                 if !is_doc_line(raw) {
-                    push_if_reportable(&mut out, line, raw, raw.trim_start_matches('/'));
+                    let own_line = only_blanks_before(bytes, i);
+                    push_if_reportable(&mut out, line, raw, raw.trim_start_matches('/'), own_line);
                 }
                 i = end;
             }
@@ -307,6 +362,16 @@ fn is_doc_line(raw: &str) -> bool {
 
 fn trim_block_marker(s: &str) -> &str {
     s.trim_start().trim_start_matches('*')
+}
+
+/// Whether only whitespace precedes `from` on its line, meaning the comment
+/// starting there owns the line rather than trailing a statement.
+fn only_blanks_before(bytes: &[u8], from: usize) -> bool {
+    bytes[..from]
+        .iter()
+        .rev()
+        .take_while(|&&b| b != b'\n')
+        .all(|b| b.is_ascii_whitespace())
 }
 
 fn line_end(bytes: &[u8], from: usize) -> usize {
@@ -364,7 +429,13 @@ fn scan_hash(content: &str, yaml: bool) -> Vec<CommentSpan> {
         }
         if let Some(pos) = start {
             let body = &raw_line[pos + 1..];
-            push_if_reportable(&mut out, line, body, body);
+            push_if_reportable(
+                &mut out,
+                line,
+                body,
+                body,
+                raw_line[..pos].trim().is_empty(),
+            );
         }
     }
     out
@@ -540,7 +611,9 @@ mod tests {
 
     #[test]
     fn notice_caps_the_list_and_states_the_policy() {
-        let src: String = (0..15).map(|i| format!("// note {i}\n")).collect();
+        // Blank-separated so each is its own comment: adjacent lines would be
+        // one wrapped paragraph and could never reach the cap.
+        let src: String = (0..15).map(|i| format!("// note {i}\n\n")).collect();
         let notice = comment_notice("a.rs", &src, Path::new("a.rs")).unwrap();
         assert!(notice.contains("... 5 more"));
         assert_eq!(notice.matches("note ").count(), MAX_COMMENTS_PER_FILE);
@@ -598,14 +671,11 @@ mod tests {
     #[test]
     fn escaped_backslash_still_closes_the_string_on_its_line() {
         let src = "let s = \"ends \\\\\";\n// after\n";
-        assert_eq!(
-            scan(src, "rust"),
-            vec![CommentSpan {
-                line: 2,
-                text: "// after".to_string(),
-                memo: false,
-            }]
-        );
+        let spans = scan(src, "rust");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].line, 2);
+        assert_eq!(spans[0].text, "// after");
+        assert!(!spans[0].memo);
     }
 
     #[test]
@@ -629,6 +699,57 @@ mod tests {
     fn now_with_a_change_verb_is_still_a_memo() {
         let spans = scan("// now we use the pooled client\n", "rust");
         assert!(spans[0].memo);
+    }
+
+    #[test]
+    fn wrapped_paragraph_is_one_comment_reported_at_its_first_line() {
+        let src = "// The cache is keyed by tenant so a lookup\n// removed when the next prompt begins cannot\n// leak across restaurants.\nlet x = 1;\n";
+        let spans = scan(src, "rust");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].line, 1);
+        assert_eq!(spans[0].text, "// The cache is keyed by tenant so a lookup");
+    }
+
+    #[test]
+    fn a_continuation_line_no_longer_reads_as_a_memo() {
+        let src = "// The cache is keyed by tenant so a lookup\n// removed when the next prompt begins cannot\n// leak across restaurants.\n";
+        assert!(!scan(src, "rust")[0].memo);
+    }
+
+    #[test]
+    fn a_run_that_really_is_a_memo_is_still_flagged() {
+        let src = "// removed the legacy path because nothing\n// called it any more.\n";
+        assert!(scan(src, "rust")[0].memo);
+    }
+
+    #[test]
+    fn a_blank_line_separates_two_comments() {
+        let src = "// first paragraph\n\n// second paragraph\n";
+        let spans = scan(src, "rust");
+        assert_eq!(spans.iter().map(|s| s.line).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    #[test]
+    fn trailing_comments_on_adjacent_lines_stay_separate() {
+        let src = "let a = 1; // first\nlet b = 2; // second\n";
+        assert_eq!(scan(src, "rust").len(), 2);
+    }
+
+    #[test]
+    fn a_wrapped_run_costs_one_entry_of_the_per_file_budget() {
+        let src = (1..=30)
+            .map(|i| format!("// wrapped line {i}\n"))
+            .collect::<String>();
+        let notice = comment_notice("a.rs", &src, Path::new("a.rs")).expect("a notice");
+        assert!(!notice.contains("more"), "{notice}");
+    }
+
+    #[test]
+    fn python_comment_runs_merge_too() {
+        let src = "# the loop keeps the last seen row\n# removed rows are skipped\n";
+        let spans = scan(src, "python");
+        assert_eq!(spans.len(), 1);
+        assert!(!spans[0].memo);
     }
 }
 
