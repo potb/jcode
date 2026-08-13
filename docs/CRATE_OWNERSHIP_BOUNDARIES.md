@@ -133,120 +133,71 @@ Measured on 2026-04-30 with `scripts/dev_cargo.sh check --profile selfdev -p jco
 | Scenario | Observed time | Interpretation |
 | --- | ---: | --- |
 | No-op check after recent doc-only commit | ~65.8s | Environment/cache state can dominate a first check. Treat as warmup/noise baseline, not pure no-op steady state. |
-| Touch root behavior module `src/usage.rs` | ~6.25s | A root-only behavior edit can be relatively cheap when dependencies are already built. |
-| Touch `crates/jcode-core/src/usage_types.rs` | ~65.35s | Editing `jcode-core` invalidates broad downstream dependents. Avoid adding high-churn domain DTOs to `jcode-core`. |
+| Touch root behavior module (usage, then at `src/usage.rs`, now `crates/jcode-base/src/usage/`) | ~6.25s | A root-only behavior edit can be relatively cheap when dependencies are already built. |
+| Touch the usage DTO module (then `jcode-core`, now `crates/jcode-usage-types/`) | ~65.35s | Editing `jcode-core` invalidates broad downstream dependents. Avoid adding high-churn domain DTOs to `jcode-core`. |
+
+The paths above are the ones measured on 2026-04-30 and are kept as recorded; both modules have since moved, which is exactly the outcome the measurement argued for.
 
 Implication: the compile-speed target is not simply "move things out of root". Moving stable, low-churn contracts out of root is good, but putting many high-churn domain DTOs into `jcode-core` can be counterproductive because `jcode-core` has high fan-out. Prefer focused leaf crates such as `jcode-usage-types`, `jcode-gateway-types`, and `jcode-ambient-types` for domain DTOs that are likely to change.
 
 ## `jcode-core` fan-out audit
 
-At this checkpoint, the root crate is the only direct Cargo dependency on `jcode-core`, but root re-exports many `jcode-core` modules and root is the high-cost recompilation target. A touch to `jcode-core` invalidated broad downstream checks in the baseline above. Therefore `jcode-core` should be treated as a high-fan-out crate even if Cargo.toml direct dependents are currently few.
+This audit is resolved. `jcode-core` now contains only general utilities — `console`, `env`, `fs`, `id`, `output_style`, `panic_util`, `stdin_detect`, `util` — and no domain DTO modules at all. Every module the table below staged for a move has moved.
 
-Observed root re-export/use paths:
+`jcode-base` keeps one-line compatibility re-exports (`crates/jcode-base/src/env.rs`, `id.rs`, `stdin_detect.rs` are each a single `pub use jcode_core::*;`), so call sites did not have to change.
 
-- `src/catchup.rs` -> `catchup_types`
-- `src/goal.rs` -> `goal_types`
-- `src/todo.rs` -> `todo_types`
-- `src/env.rs`, `src/id.rs`, `src/stdin_detect.rs`, `src/util.rs`, and panic UI helpers -> general utilities
+`jcode-core` should still be treated as a high-fan-out crate: it is cheap to compile but broadly depended on, so a touch there invalidates wide downstream checks.
 
-Compile-speed priority from this audit:
+Standing rule from this audit:
 
-1. Move clustered, likely-changing domain DTOs from `jcode-core` to focused leaf crates.
-2. Keep stable general utilities in `jcode-core`.
-3. Avoid adding new domain DTOs to `jcode-core` unless they are very stable or temporary staging.
+1. Keep stable general utilities in `jcode-core`.
+2. Do not add domain DTOs to `jcode-core`. Give them a focused leaf `*-types` crate instead.
 
-| Module | Current contents | Preferred long-term home | Notes |
-| --- | --- | --- | --- |
-| `ambient_usage_types` | Ambient scheduler usage records/rate limit DTOs | moved to `jcode-ambient-types` | Compatibility re-export remains in root module. |
-| `catchup_types` | Catch-up persisted state and rendered brief DTOs | `jcode-catchup-types` or stay in core | Small and low churn. Split only if catch-up grows. |
-| `copilot_usage_types` | Local Copilot usage counters | moved to `jcode-usage-types` | Compatibility re-export remains in root module. |
-| `gateway_types` | Paired device and pairing code persisted records | moved to `jcode-gateway-types` | Pairing/token behavior remains root. |
-| `goal_types` | Goal state, milestones, status, updates | `jcode-goal-types` or `jcode-task-types` | Larger domain. Worth splitting if goal/tool work grows. |
-| `memory_types` | Memory activity DTOs | moved to `jcode-memory-types` | Memory has enough domain weight for its own type crate. |
-| `todo_types` | Todo item DTO | `jcode-task-types`, `jcode-todo-types`, or core | Tiny. Could join goal/catchup task-state crate. |
-| `usage_types` | Provider usage report DTOs | moved to `jcode-usage-types` | Runtime fetch/cache/display remain root. |
-| `env` | Environment variable helpers | stay in core | General utility, no domain crate needed. |
-| `id` | ID helpers | stay in core | General utility. |
-| `panic_util` | Panic formatting helpers | stay in core | General runtime utility. |
-| `stdin_detect` | stdin detection helpers | stay in core | General platform/runtime utility. |
-| `util` | Misc utilities | audit later | Should not become a catch-all. |
+Historical record of the staging modules and where each one landed:
+
+| Module | Contents | Outcome |
+| --- | --- | --- |
+| `ambient_usage_types` | Ambient scheduler usage records/rate limit DTOs | moved to `jcode-ambient-types` |
+| `copilot_usage_types` | Local Copilot usage counters | moved to `jcode-usage-types` |
+| `gateway_types` | Paired device and pairing code persisted records | moved to `jcode-gateway-types`; pairing/token behavior stayed behavioral |
+| `memory_types` | Memory activity DTOs | moved to `jcode-memory-types` |
+| `usage_types` | Provider usage report DTOs | moved to `jcode-usage-types`; fetch/cache/display stayed behavioral |
+| `catchup_types`, `goal_types`, `todo_types` | Catch-up, goal, and todo state DTOs | left `jcode-core`; the optional grouped task-state crate was not created, and `jcode-task-types` exists for task DTOs |
+| `env`, `id`, `panic_util`, `stdin_detect`, `util` | General utilities | stayed in `jcode-core`, as intended. `util` should still not become a catch-all |
 
 ## Target domain type crates
 
-Completed/high-value domain type splits:
+The four planned domain type crates all exist: `jcode-usage-types`, `jcode-gateway-types`, `jcode-ambient-types`, `jcode-memory-types`, alongside `jcode-auth-types`, `jcode-background-types`, `jcode-batch-types`, `jcode-config-types`, `jcode-message-types`, `jcode-selfdev-types`, `jcode-session-types`, `jcode-side-panel-types`, `jcode-task-types`, and `jcode-tool-types`.
 
-1. `jcode-usage-types`
-   - `usage_types`
-   - `copilot_usage_types`
-   - pure account usage DTOs if/when separated from root formatting/runtime helpers
+Remaining opportunities, not commitments:
 
-2. `jcode-gateway-types`
-   - `gateway_types`
-   - possibly `GatewayConfig` after deciding whether config owns it
-   - mobile gateway protocol-safe DTOs if needed by mobile crates
-
-3. `jcode-ambient-types`
-   - `ambient_usage_types`
-   - ambient state/request/result DTOs, but only after root-only `AmbientState::load/save/record_cycle` methods are separated into root free functions or a persistence layer
-
-4. `jcode-memory-types`
-   - `memory_types`
-   - any memory protocol/activity DTOs used across server/TUI/tools
-
-5. Optional task-state crate
-   - `goal_types`
-   - `todo_types`
-   - `catchup_types` if the product model wants these grouped
+- `jcode-ambient-types` holds usage records and rate-limit DTOs only. `AmbientState` still lives in `crates/jcode-app-core/src/ambient.rs` because its load/save/record behavior is only partly separated; `persistence.rs` now owns the lock and queue, so the remaining blocker is narrower than when this was written.
+- `GatewayConfig` ownership (config crate vs gateway types) is still undecided.
+- Mobile gateway protocol-safe DTOs have not been needed yet.
 
 ## Big module refactor targets
 
-These are not simple DTO moves. Refactor behavior boundaries first.
+All four modules listed here have been split. Each is now a parent module that declares submodules and re-exports them, rather than one large file. The sections below record what landed, so the split shape is documented rather than re-planned.
 
-### `src/session.rs`
+### Session (`crates/jcode-base/src/session.rs` + `session/`)
 
-Target split:
+Split into `model.rs`, `persistence.rs`, `journal.rs`, `crash.rs`, `render.rs`, `memory_profile.rs`, `maintenance.rs`, `storage_paths.rs`, `load_telemetry.rs`. Startup stubs landed as `Session::load_startup_stub` in `persistence.rs`. DTOs live in `jcode-session-types`.
 
-- metadata/session model
-- persistence and journal replay
-- startup stubs and remote startup snapshots
-- memory profiling/cache attribution
-- rendering lives in existing `session/render.rs`
-- crash recovery lives in existing `session/crash.rs`
+The parent file still holds the `Session` struct itself and is the largest remaining file in the group, so further extraction is possible but no longer urgent.
 
-### `src/ambient.rs`
+### Ambient (`crates/jcode-app-core/src/ambient.rs` + `ambient/`)
 
-Target split:
+Split into `manager.rs`, `runner.rs`, `scheduler.rs`, `schedule_window.rs`, `persistence.rs` (lock + scheduled queue), `directives.rs`, `prompt.rs`, `paths.rs`, `gates.rs`, `headroom.rs`, `cycle_significance.rs`.
 
-- visible cycle context I/O
-- state persistence
-- directive persistence
-- schedule queue and locking
-- prompt building
-- manager/runtime orchestration
+`AmbientState` still lives in the parent module. The original constraint still applies in part: do not move it into `jcode-ambient-types` until its load/save/record behavior is fully separated.
 
-Do not move `AmbientState` as a DTO until load/save/record behavior is separated from the struct.
+### Usage (`crates/jcode-base/src/usage.rs` + `usage/`)
 
-### `src/usage.rs`
+Split into `provider_fetch.rs`, `openai_helpers.rs`, `cache.rs`, `snapshot.rs`, `push.rs`, `poller.rs`, `lease.rs`, `display.rs`, `accessors.rs`, `api_keys.rs`, `model.rs`. Public report DTOs live in `jcode-usage-types`.
 
-Target split:
+### Gateway (`crates/jcode-base/src/gateway.rs` + `gateway/`)
 
-- API fetch providers
-- provider response parsing
-- local caches/sync
-- display formatting
-- account selection/guidance
-- public report DTOs in `jcode-usage-types`
-
-### `src/gateway.rs`
-
-Target split:
-
-- registry persistence
-- pairing/token auth
-- HTTP route handling
-- WebSocket auth/extraction
-- WebSocket relay
-- public gateway DTOs in `jcode-gateway-types`
+Split into `registry.rs` (persistence), `auth.rs` (pairing/token and WebSocket auth), `control.rs` (shared logic behind `/remote` and `jcode pair`). HTTP routes and the WebSocket relay remain in the parent module. Persisted records live in `jcode-gateway-types`.
 
 ## Definition of “optimal enough”
 

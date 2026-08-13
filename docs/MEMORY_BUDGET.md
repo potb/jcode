@@ -29,12 +29,12 @@ Use existing debug surfaces instead of ad hoc instrumentation:
 - Process-lifetime timeline: `python scripts/analyze_runtime_memory_log.py --days 1`
 
 Primary sources in code:
-- `src/tui/app/debug_cmds.rs`
-- `src/tui/memory_profile.rs`
-- `src/session.rs`
-- `src/tui/markdown.rs`
-- `src/tui/mermaid.rs`
-- `src/runtime_memory_log.rs`
+- `crates/jcode-tui/src/tui/app/debug_cmds.rs`
+- `crates/jcode-tui/src/tui/memory_profile.rs`
+- `crates/jcode-base/src/session.rs`
+- `crates/jcode-tui/src/tui/markdown.rs`
+- `crates/jcode-tui/src/tui/mermaid.rs`
+- `crates/jcode-base/src/runtime_memory_log.rs`
 
 ## Budget model
 
@@ -52,7 +52,7 @@ We use two kinds of budgets:
 
 ### Markdown cache budget
 
-Source: `src/tui/markdown.rs`
+Source: `crates/jcode-tui/src/tui/markdown.rs`
 
 | Metric | Budget | Why |
 |---|---:|---|
@@ -66,8 +66,8 @@ Required review action if violated:
 ### Mermaid cache budget
 
 Sources:
-- `src/tui/mermaid.rs`
-- `src/tui/mermaid_cache_render.rs`
+- `crates/jcode-tui/src/tui/mermaid.rs`
+- `crates/jcode-tui-mermaid/src/mermaid_cache_render.rs`
 
 | Metric | Budget | Why |
 |---|---:|---|
@@ -87,7 +87,7 @@ Required review action if violated:
 
 ### Session and transcript memory
 
-Source: `src/session.rs`, `src/tui/memory_profile.rs`
+Source: `crates/jcode-base/src/session.rs`, `crates/jcode-tui/src/tui/memory_profile.rs`
 
 These are not strict caps yet, but they are expected relationships.
 
@@ -105,7 +105,7 @@ Required review action if violated:
 
 ### Runtime memory log expectations
 
-Source: `src/runtime_memory_log.rs`
+Source: `crates/jcode-base/src/runtime_memory_log.rs`
 
 Runtime memory logs are the regression detection mechanism, not just a debug feature.
 

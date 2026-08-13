@@ -1,19 +1,8 @@
 {
-  "total": 52,
+  "total": 34,
   "files": {
     "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
-      "crates/jcode-core/src/usage_types.rs",
-      "src/ambient.rs",
-      "src/catchup.rs",
-      "src/env.rs",
-      "src/gateway.rs",
-      "src/goal.rs",
-      "src/id.rs",
-      "src/session.rs",
-      "src/stdin_detect.rs",
-      "src/todo.rs",
-      "src/usage.rs",
-      "src/util.rs"
+      "src/usage.rs"
     ],
     "docs/DESKTOP_APP_ARCHITECTURE.md": [
       "crates/jcode-desktop"
@@ -50,15 +39,6 @@
       "src/api/schema/integrations.rs",
       "src/detect/mod.rs",
       "src/terminal/state.rs"
-    ],
-    "docs/MEMORY_BUDGET.md": [
-      "src/runtime_memory_log.rs",
-      "src/session.rs",
-      "src/tui/app/debug_cmds.rs",
-      "src/tui/markdown.rs",
-      "src/tui/memory_profile.rs",
-      "src/tui/mermaid.rs",
-      "src/tui/mermaid_cache_render.rs"
     ],
     "docs/MODULAR_ARCHITECTURE_RFC.md": [
       "src/auth",
