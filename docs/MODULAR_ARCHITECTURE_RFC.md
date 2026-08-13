@@ -2,7 +2,9 @@
 
 Status: Draft
 
-This RFC describes a modular target architecture for jcode that matches the current codebase, preserves the existing product model, and gives us a safe migration path from today's mostly-monolithic root crate to a layered workspace.
+This RFC describes a modular target architecture for jcode that matches the current codebase, preserves the existing product model, and gives us a safe migration path from the historically monolithic root crate to a layered workspace.
+
+The root crate is no longer the monolith it was when this RFC was first written: `jcode-base`, `jcode-app-core`, and `jcode-tui` now split the former root package into three stacked compilation units, and the root `jcode` package is down to the cli + binary layer. Sections below say which parts of the plan have landed and which are still open.
 
 It is intentionally aligned with:
 
@@ -62,38 +64,52 @@ That model should stay intact.
 
 ### Current code organization
 
-The current code organization is mixed:
+The former monolith is now split into three stacked layers, each its own rustc unit, chained by re-exports so that `crate::<module>` paths keep resolving:
 
-- **Root crate `jcode`** still contains most product logic.
-- **Workspace crates** already isolate several heavy or stable seams.
-- **Subdirectories under `src/`** increasingly reflect domain boundaries, especially for `agent`, `cli`, `server`, `tool`, and `tui`.
+- **`jcode-base`** (~113k lines): foundational layer — provider, auth, config, session, message, memory, telemetry and their supporting leaves.
+- **`jcode-app-core`** (~145k lines): server/tool/agent layer. Re-exports `jcode-base` via `pub use jcode_base::*`.
+- **`jcode-tui`** (~211k lines): presentation layer (`tui`, `video_export`). Re-exports `jcode-app-core`.
+- **Root package `jcode`** (~32k lines): cli + entrypoint only. Re-exports `jcode-tui`.
+
+So the module names this RFC discusses now live as follows:
+
+| Module | Current home |
+|---|---|
+| `server` | `crates/jcode-app-core/src/server.rs` + `server/` |
+| `agent`, `tool` | `crates/jcode-app-core/src/` |
+| `provider`, `session`, `auth` | `crates/jcode-base/src/` |
+| `protocol` | `jcode-protocol`, re-exported by `crates/jcode-base/src/protocol.rs` |
+| `id` | `jcode-core`, plus `crates/jcode-base/src/id.rs` |
+| `tui` | `crates/jcode-tui/src/tui/` |
+| `cli` | `src/cli/` (root package) |
 
 Current workspace members from `Cargo.toml` are grouped roughly as follows:
 
-- root package: `jcode`
+- root package: `jcode` (cli + binaries)
+- layered application crates: `jcode-base`, `jcode-app-core`, `jcode-tui`
 - foundation/runtime support: `jcode-agent-runtime`, `jcode-core`, `jcode-storage`, `jcode-terminal-launch`, `jcode-tool-core`
 - data-contract crates: `jcode-ambient-types`, `jcode-auth-types`, `jcode-background-types`, `jcode-batch-types`, `jcode-config-types`, `jcode-gateway-types`, `jcode-memory-types`, `jcode-message-types`, `jcode-selfdev-types`, `jcode-session-types`, `jcode-side-panel-types`, `jcode-task-types`, `jcode-tool-types`, `jcode-usage-types`
 - protocol and planning: `jcode-protocol`, `jcode-plan`
 - heavy or optional integrations: `jcode-embedding`, `jcode-pdf`, `jcode-notify-email`
 - auth and providers: `jcode-azure-auth`, `jcode-provider-core`, `jcode-provider-metadata`, `jcode-provider-openrouter`, `jcode-provider-gemini`
 - TUI extraction seams: `jcode-tui-core`, `jcode-tui-markdown`, `jcode-tui-mermaid`, `jcode-tui-render`, `jcode-tui-workspace`
-- product surfaces outside the main TUI binary: `jcode-desktop`
+- product surfaces outside the main TUI binary: `jcode-desktop2`
 
-### What the root crate still owns
+### What each layer owns
 
-The root crate still directly owns most of the following concerns:
+The concerns the root crate used to own are now distributed:
 
-- CLI parsing and dispatch
-- server orchestration and socket lifecycle
-- session state and persistence
-- agent turn execution and tool orchestration
-- provider implementation composition and runtime provider wiring; the shared `Provider` trait now lives in `jcode-provider-core`
-- protocol/message/config types
-- tool registry and many tool implementations
-- TUI application state and rendering
-- auth, memory, safety, ambient mode, and product glue
+- CLI parsing and dispatch — root package `jcode`
+- server orchestration and socket lifecycle — `jcode-app-core`
+- agent turn execution and tool orchestration — `jcode-app-core`
+- session state and persistence — `jcode-base`
+- provider implementation composition and runtime wiring — `jcode-base`; the shared `Provider` trait lives in `jcode-provider-core`
+- protocol/message/config types — `jcode-protocol` and the `*-types` contract crates, re-exported through `jcode-base`
+- tool registry and many tool implementations — `jcode-app-core`
+- TUI application state and rendering — `jcode-tui`
+- auth, memory, safety, ambient mode, and product glue — `jcode-base` and `jcode-app-core`
 
-This is why the root crate is still the primary compile and architecture hotspot.
+The remaining architecture hotspot is not the root package but the size of the `jcode-tui` and `jcode-app-core` layers.
 
 ### Existing extracted workspace seams
 
@@ -135,42 +151,48 @@ These splits already exist and should be treated as real architectural footholds
 | `jcode-tui-render` | reusable TUI layout/render helpers |
 | `jcode-tui-workspace` | workspace-map data/model/widget rendering |
 | `jcode-terminal-launch` | terminal process launch helpers |
-| `jcode-desktop` | desktop app surface and session/workspace rendering experiments |
+| `jcode-desktop2` | desktop app surface and session/workspace rendering experiments |
 
 These are already aligned with the compile-performance plan's strategy: isolate heavy dependencies and stable helper surfaces first.
 
 ### Current chokepoints
 
-The root crate still has several broad, high-fanout modules that make both maintenance and incremental compilation harder. Current sizes observed from the tree:
+The layer split removed the single-crate bottleneck, but several broad, high-fanout modules remain within their layers. Current sizes observed from the tree:
 
-- `src/server.rs`: ~1731 lines
-- `src/provider/mod.rs`: ~2283 lines
-- `src/session.rs`: ~2730 lines
-- `src/protocol.rs`: ~1198 lines
-- `src/main.rs`: ~55 lines
+- `crates/jcode-tui/src/tui/ui_messages.rs`: ~4437 lines
+- `crates/jcode-tui/src/tui/app/inline_interactive.rs`: ~4337 lines
+- `crates/jcode-tui/src/tui/app/input.rs`: ~4124 lines
+- `src/cli/commands.rs`: ~3584 lines
+- `crates/jcode-app-core/src/server/client_lifecycle.rs`: ~3307 lines
+- `crates/jcode-base/src/provider/mod.rs`: ~2941 lines
+- `crates/jcode-app-core/src/server.rs`: ~2503 lines
+- `crates/jcode-base/src/session.rs`: ~1674 lines
+- `src/main.rs`: ~236 lines
 
 This supports the current plan direction:
 
 - CLI decomposition is already mostly underway and should continue.
-- Server, provider, session, and TUI state boundaries remain the most important structural work.
+- The TUI layer is now the largest single unit, so its internal state/render boundaries are the most important structural work.
+- Provider and session boundaries remain the main work inside `jcode-base`.
 - The top-level binary entrypoint is already close to the desired thin composition shape.
 
 ### Current architecture in one picture
 
 ```mermaid
 flowchart TD
-  J[jcode root crate]
+  J[jcode root package] --> CLI[CLI and startup]
+  J --> T[jcode-tui]
+  T --> TUI[TUI app and rendering]
+  T --> AC[jcode-app-core]
+  AC --> Server[Server orchestration]
+  AC --> Agent[Agent turn loop and tools]
+  AC --> B[jcode-base]
+  B --> Session[Session and persistence]
+  B --> Provider[Provider runtime impls]
+  B --> Coreish[Protocol, message, config, ids]
+  B --> Product[Auth, memory, safety, ambient, notifications]
 
-  J --> CLI[CLI and startup]
-  J --> Server[Server orchestration]
-  J --> Session[Session and persistence]
-  J --> Agent[Agent turn loop and tools]
-  J --> Provider[Provider trait and runtime impls]
-  J --> TUI[TUI app and rendering]
-  J --> Coreish[Protocol, message, config, ids]
-  J --> Product[Auth, memory, safety, ambient, notifications]
-
-  J --> AR[jcode-agent-runtime]
+  B --> AR[jcode-agent-runtime]
   J --> Emb[jcode-embedding]
   J --> PDF[jcode-pdf]
   J --> Azure[jcode-azure-auth]
@@ -301,7 +323,7 @@ The optimal crate structure is not "one crate per folder". The target should opt
 2. **Dependency weight boundaries:** heavy dependencies should sit behind leaf crates or opt-in features.
 3. **Ownership boundaries:** each crate should have one reason to change and a small public API.
 
-The current root-crate size distribution makes the main opportunity clear: `src/tui`, `src/server`, `src/tool`, `src/provider`, `src/cli`, and `src/auth` dominate root-crate lines. Splitting only tiny helpers is useful as a safe staging tactic, but the long-term win is moving these high-churn domains behind stable lower-layer contracts.
+The current size distribution makes the main opportunity clear: `tui`, `server`, `tool`, `provider`, `cli`, and `auth` dominate the three application layers. Splitting only tiny helpers is useful as a safe staging tactic, but the long-term win is moving these high-churn domains behind stable lower-layer contracts.
 
 ### Desired final crate families
 
@@ -359,7 +381,7 @@ Target crates:
 
 - `jcode-cli`: parsing and command dispatch if CLI keeps growing.
 - `jcode-tui`: app state, reducers, key handling, command/input handling, UI orchestration.
-- `jcode-desktop`: already a separate surface.
+- `jcode-desktop2`: already a separate surface.
 - `jcode-selfdev`: self-dev build/reload/customization workflows if they remain a substantial product surface.
 
 Compile-time reason:
@@ -466,9 +488,9 @@ Avoid these tempting but harmful structures:
 
 Based on the current root size and existing footholds, the best next work is probably:
 
-1. **Provider contracts:** keep shrinking `src/provider/mod.rs` until a `jcode-provider` trait/runtime crate can depend only on `jcode-message-types`, `jcode-provider-core`, and small runtime primitives.
-2. **Server core:** extract protocol-independent pieces of `src/server/` such as client lifecycle state machines, swarm/background coordination DTOs, and reload/update policies behind server-local contracts.
-3. **TUI reducer/state core:** extract non-rendering app state transitions from `src/tui/app/*` before moving the whole TUI crate.
+1. **Provider contracts:** keep shrinking `crates/jcode-base/src/provider/mod.rs` until a `jcode-provider` trait/runtime crate can depend only on `jcode-message-types`, `jcode-provider-core`, and small runtime primitives.
+2. **Server core:** extract protocol-independent pieces of `crates/jcode-app-core/src/server/` such as client lifecycle state machines, swarm/background coordination DTOs, and reload/update policies behind server-local contracts.
+3. **TUI reducer/state core:** extract non-rendering app state transitions from `crates/jcode-tui/src/tui/app/`; the TUI is already its own crate, so this is now an internal boundary rather than an extraction.
 4. **Tool contracts and registry shape:** separate tool definitions, schemas, execution context, and registry metadata from individual tool implementations.
 5. **Session domain:** isolate session state transitions and persistence-facing operations from server/TUI/provider orchestration.
 6. **Auth facade:** keep provider-neutral auth data in `jcode-auth-types`, heavy SDKs in leaf crates, and move root auth orchestration only after provider contracts stabilize.
@@ -517,7 +539,7 @@ Should not contain:
 Notes:
 
 - This is the most important future extraction because it enables the rest.
-- `src/protocol.rs`, `src/id.rs`, and carefully selected parts of `config.rs` and `message.rs` are the likely first feeders.
+- Much of this has landed: `jcode-protocol` and the `*-types` contract crates now hold the protocol DTOs and IDs, and `jcode-core` holds the low-level utilities. What remains are the config and message primitives still resolved through `jcode-base`.
 
 ### `jcode-session`
 
@@ -539,7 +561,7 @@ Should not contain:
 
 Notes:
 
-- This crate is not explicitly named in the current compile-performance plan, but the current size and fanout of `src/session.rs` make session extraction a natural stabilizing move.
+- This crate is not explicitly named in the current compile-performance plan, but the size and fanout of `crates/jcode-base/src/session.rs` make session extraction a natural stabilizing move.
 - If introducing `jcode-session` feels too early, the same boundary should still be established internally first and extracted later.
 
 ### `jcode-provider`
@@ -606,8 +628,8 @@ Should not contain:
 
 Notes:
 
-- The current `src/server/` submodule tree is already the right shape for this extraction.
-- `src/server.rs` should continue shrinking into a facade/composition module.
+- The `crates/jcode-app-core/src/server/` submodule tree is already the right shape for this extraction.
+- `crates/jcode-app-core/src/server.rs` should continue shrinking into a facade/composition module.
 
 ### `jcode-tui`
 
@@ -743,15 +765,15 @@ This is the recommended direction from the current tree, not a one-shot move lis
 
 | Current area | Likely target |
 |---|---|
-| `src/id.rs`, protocol/message/config primitives | `jcode-core` |
-| `src/session.rs`, parts of `storage`, restart snapshot concerns | `jcode-session` |
+| ID and protocol/message/config primitives | `jcode-core`, `jcode-protocol`, `*-types` (largely landed) |
+| `session`, parts of `storage`, restart snapshot concerns | `jcode-session` |
 | `src/agent/*`, parts of `compaction`, tool orchestration seams | `jcode-agent` |
-| `src/server/` + shrinking `src/server.rs` facade | `jcode-server` |
-| `src/provider/mod.rs` trait/contracts plus provider composition seams | `jcode-provider` |
+| `server/` + shrinking `server.rs` facade | `jcode-server` |
+| `provider/mod.rs` trait/contracts plus provider composition seams | `jcode-provider` |
 | existing provider helper crates | remain leaf/provider support crates |
-| `src/tui/*` + `jcode-tui-workspace` | `jcode-tui` + leaf workspace widget crate |
-| `src/cli/*` | stay in root initially or become `jcode-cli` later if justified |
-| `src/tool/selfdev/*`, self-dev workflow/productization | `jcode-selfdev` |
+| `tui` + `jcode-tui-workspace` | `jcode-tui` (landed) + leaf workspace widget crate |
+| `src/cli/*` | stay in the root package initially or become `jcode-cli` later if justified |
+| `tool/selfdev/*`, self-dev workflow/productization | `jcode-selfdev` |
 
 ## Phased Migration Plan
 
@@ -776,7 +798,7 @@ Aligns with `REFACTORING.md` phases 2 through 6.
 Focus areas:
 
 - continue CLI decomposition until `main()` stays parse + runtime bootstrap only
-- continue shrinking `src/server.rs` into a thin facade over `src/server/*`
+- continue shrinking `crates/jcode-app-core/src/server.rs` into a thin facade over its `server/` submodules
 - unify agent turn-loop variants behind one engine
 - continue TUI state/reducer separation
 - continue provider state isolation and pure helper extraction
@@ -822,14 +844,13 @@ Exit criteria:
 
 - the root crate no longer defines the main provider, server, and agent contracts directly
 
-### Phase 4: Extract `jcode-tui`
+### Phase 4: Extract `jcode-tui` (landed)
 
-Focus:
+The `tui` and `video_export` modules now live in the `jcode-tui` crate, which re-exports `jcode-app-core`. What remains here is internal:
 
-- move client app/reducer/rendering code out of the root crate once protocol and runtime service boundaries are stable
+- separate non-rendering app state transitions from rendering inside `crates/jcode-tui/src/tui/app/`
 - keep server events and client view-state concerns separated by protocol types
-
-This phase should happen after enough shared contract extraction exists to avoid TUI depending back on root implementation details.
+- shrink the largest TUI modules so edits do not invalidate the whole presentation layer
 
 Exit criteria:
 

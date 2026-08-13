@@ -1,5 +1,5 @@
 {
-  "total": 34,
+  "total": 24,
   "files": {
     "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
       "src/usage.rs"
@@ -39,18 +39,6 @@
       "src/api/schema/integrations.rs",
       "src/detect/mod.rs",
       "src/terminal/state.rs"
-    ],
-    "docs/MODULAR_ARCHITECTURE_RFC.md": [
-      "src/auth",
-      "src/id.rs",
-      "src/protocol.rs",
-      "src/provider",
-      "src/provider/mod.rs",
-      "src/server",
-      "src/server.rs",
-      "src/session.rs",
-      "src/tool",
-      "src/tui"
     ],
     "docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md": [
       "crates/jcode-tui/src/tui/app/sponsor_disclosure.rs"
