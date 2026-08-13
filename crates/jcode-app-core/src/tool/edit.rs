@@ -162,6 +162,11 @@ impl Tool for EditTool {
             body.push_str(&block);
         }
 
+        if let Some(block) = lsp_feedback::comment_notice_after_write(&path).await {
+            body.push_str("\n\n");
+            body.push_str(&block);
+        }
+
         Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
     }
 }

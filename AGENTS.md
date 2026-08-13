@@ -75,3 +75,25 @@ Do not "fix" this with `cargo clean`. The mismatch is in which driver is on
 `scripts/check_guardrails.sh` checks this before it runs clippy and skips the
 lint with an explanation rather than printing the flood, so the usual way to
 meet this is a one-line gate failure rather than several hundred errors.
+
+## Comments
+
+Comments explain why, not what. Do not add a comment that restates the code
+next to it, and do not leave notes about a change ("changed from X to Y",
+"added retry here"): git history already records that, and the note goes stale
+on the next edit. Prefer clearer names and smaller functions over an
+explanation.
+
+Doc comments are exempt. `///`, `//!`, `/** */`, and Python docstrings document
+an interface rather than narrating an implementation, so they are always fine.
+
+Write the comment when the reason is not recoverable from the code: a
+non-obvious invariant, a workaround for an external bug, a performance or
+security constraint, or a subtle algorithm.
+
+The write, edit, multiedit, and apply_patch tools append a `<comments>` block
+listing the non-doc comments in a file they just touched. That report is
+advisory. It never blocks the call, and it covers the whole file, so it will
+include comments that were already there. Take the chance to delete the ones
+that do not earn their place. Set `[comment_check] enabled = false` in
+`~/.jcode/config.toml` to turn it off.

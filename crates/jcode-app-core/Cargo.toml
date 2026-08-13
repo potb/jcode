@@ -90,6 +90,7 @@ jcode-base = { path = "../jcode-base", default-features = false }
 jcode-command-risk = { path = "../jcode-command-risk" }
 jcode-core = { path = "../jcode-core" }
 jcode-fmt = { path = "../jcode-fmt" }
+jcode-comment-scan = { path = "../jcode-comment-scan" }
 jcode-lsp = { path = "../jcode-lsp" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-overnight-core = { path = "../jcode-overnight-core" }

@@ -28,6 +28,7 @@ members = [
     "crates/jcode-compaction-core",
     "crates/jcode-config-types",
     "crates/jcode-command-risk",
+    "crates/jcode-comment-scan",
     "crates/jcode-core",
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",

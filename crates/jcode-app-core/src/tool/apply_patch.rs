@@ -295,6 +295,10 @@ impl Tool for ApplyPatchTool {
                     Ok(None) => {}
                     Err(_) => break,
                 }
+                if let Some(block) = lsp_feedback::comment_notice_after_write(diag_path).await {
+                    body.push_str("\n\n");
+                    body.push_str(&block);
+                }
             }
 
             let output = ToolOutput::new(body);

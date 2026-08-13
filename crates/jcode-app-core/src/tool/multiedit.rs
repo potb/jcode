@@ -197,6 +197,11 @@ impl Tool for MultiEditTool {
             output.push_str(&block);
         }
 
+        if let Some(block) = lsp_feedback::comment_notice_after_write(&path).await {
+            output.push_str("\n\n");
+            output.push_str(&block);
+        }
+
         super::config_edit_notice::append_config_edit_notice(
             &mut output,
             &path,

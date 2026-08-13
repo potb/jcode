@@ -25,9 +25,13 @@ use anyhow::{Context, Result, anyhow};
 use lsp_types::Url;
 
 pub use config_compat::{LspConfig, LspServerConfig};
-pub use format::{format_all_severities, format_file_diagnostics, format_write_feedback};
+pub use format::{
+    display_path, format_all_severities, format_file_diagnostics, format_write_feedback,
+};
 
-use client::{COLD_CAP, LspClient, WARM_CAP, file_uri, fingerprint, read_text_for_lsp};
+pub use client::{language_id, read_text_for_lsp};
+
+use client::{COLD_CAP, LspClient, WARM_CAP, file_uri, fingerprint};
 use position::{from_lsp_position, to_lsp_position};
 
 /// Store the process-global `[lsp]` config. Call once at startup (and again

@@ -43,3 +43,25 @@ pub(crate) async fn diagnostics_after_write(path: &Path) -> Option<String> {
     }
     jcode_lsp::diagnostics_block(path).await
 }
+
+/// Advisory comment report for a file that was just written. Returns the
+/// formatted `<comments>` block, or `None` when the check is disabled, the
+/// language is unsupported, the file is unreadable, or it has no reportable
+/// comments. Doc comments never count.
+pub(crate) async fn comment_notice_after_write(path: &Path) -> Option<String> {
+    jcode_comment_scan::configure(crate::config::config().comment_check.clone());
+    if !jcode_comment_scan::is_enabled() {
+        return None;
+    }
+    let language = jcode_lsp::language_id(path);
+    if !jcode_comment_scan::supports_language(language) {
+        return None;
+    }
+    let content = jcode_lsp::read_text_for_lsp(path).await?;
+    let spans = jcode_comment_scan::scan(&content, language);
+    let display = match std::env::current_dir() {
+        Ok(root) => jcode_lsp::display_path(path, &root),
+        Err(_) => path.display().to_string(),
+    };
+    jcode_comment_scan::comments_block(&display, &spans)
+}

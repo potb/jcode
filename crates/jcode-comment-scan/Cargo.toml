@@ -1,0 +1,13 @@
+[package]
+name = "jcode-comment-scan"
+version = "0.1.0"
+edition = "2024"
+description = "Advisory comment scanner for jcode: flags non-doc comments on agent writes/edits"
+publish = false
+
+[lib]
+name = "jcode_comment_scan"
+path = "src/lib.rs"
+
+[dependencies]
+jcode-config-types = { path = "../jcode-config-types" }

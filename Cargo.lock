@@ -3465,6 +3465,7 @@ dependencies = [
  "jcode-build-meta",
  "jcode-build-support",
  "jcode-command-risk",
+ "jcode-comment-scan",
  "jcode-core",
  "jcode-fmt",
  "jcode-import-core",
@@ -3637,6 +3638,13 @@ name = "jcode-command-risk"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+]
+
+[[package]]
+name = "jcode-comment-scan"
+version = "0.1.0"
+dependencies = [
+ "jcode-config-types",
 ]
 
 [[package]]

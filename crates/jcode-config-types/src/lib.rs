@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+mod comment_check;
 mod cron_config;
-pub use cron_config::CronJobConfig;
 mod display;
-pub use display::DisplayConfig;
+pub use {comment_check::CommentCheckConfig, cron_config::CronJobConfig, display::DisplayConfig};
 pub mod keybindings;
 mod serde_lenient;
 pub use keybindings::{
