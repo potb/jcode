@@ -31,7 +31,7 @@ pub(crate) struct CommentSpan {
 }
 
 /// Comment syntax family for a language id from `jcode_lsp::language_id`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Syntax {
     /// `//` and `/* */`, plus `///` and `//!` doc comments.
     CStyle,
@@ -48,6 +48,46 @@ fn syntax_for(language_id: &str) -> Syntax {
         "python" | "yaml" => Syntax::Hash,
         _ => Syntax::None,
     }
+}
+
+/// Comment syntax for a path the LSP catalog does not name.
+///
+/// `jcode_lsp::language_id` exists to pick a language server, so it only maps
+/// extensions a server is configured for and calls everything else
+/// `plaintext`. Comment syntax is a much weaker property than a language
+/// server, so the files it drops (shell, Ruby, Java, TOML, ...) are scannable
+/// even though nothing will ever run a server on them.
+///
+/// Only families whose line comments this lexer already handles correctly are
+/// listed. CSS is deliberately absent: it has `/* */` but no `//`, so
+/// [`scan_c_style`] would misread a protocol-relative URL as a comment.
+fn syntax_for_extension(ext: &str) -> Syntax {
+    match ext {
+        "java" | "kt" | "kts" | "swift" | "scala" | "dart" | "zig" | "cs" | "php" | "proto"
+        | "sol" | "hcl" | "tf" | "groovy" | "gradle" => Syntax::CStyle,
+        "sh" | "bash" | "zsh" | "fish" | "rb" | "toml" | "nix" | "pl" | "pm" | "r" | "jl"
+        | "ex" | "exs" | "tcl" | "awk" | "dockerfile" | "mk" | "makefile" | "cmake" | "ps1"
+        | "gitignore" | "dockerignore" | "env" | "ini" | "cfg" | "conf" | "properties" => {
+            Syntax::Hash
+        }
+        _ => Syntax::None,
+    }
+}
+
+/// Comment syntax for a file, preferring the LSP catalog and falling back to
+/// the extension (or the bare file name, for `Dockerfile`-style files).
+fn syntax_for_path(path: &Path) -> Syntax {
+    let syntax = syntax_for(jcode_lsp::language_id(path));
+    if syntax != Syntax::None {
+        return syntax;
+    }
+    let key = path
+        .extension()
+        .or_else(|| path.file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim_start_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    syntax_for_extension(&key)
 }
 
 /// Lint directives and BDD step words, exempt regardless of language. A
@@ -115,8 +155,17 @@ fn is_memo(body: &str) -> bool {
 }
 
 /// Scan `content` and return the non-doc, non-exempt comments in it.
-pub(crate) fn scan(content: &str, language_id: &str) -> Vec<CommentSpan> {
-    let syntax = syntax_for(language_id);
+///
+/// Production callers reach the scanner through [`comment_notice`], which
+/// resolves the syntax from the path so it can fall back past the LSP
+/// catalog; this by-language-id entry point remains for the syntax tests.
+#[cfg(test)]
+fn scan(content: &str, language_id: &str) -> Vec<CommentSpan> {
+    scan_with(content, syntax_for(language_id))
+}
+
+/// Scan `content` using an already-resolved comment syntax.
+fn scan_with(content: &str, syntax: Syntax) -> Vec<CommentSpan> {
     if syntax == Syntax::None || content.len() > MAX_SCAN_BYTES {
         return Vec::new();
     }
@@ -290,7 +339,7 @@ fn hash_comment_start(line: &str) -> Option<usize> {
 /// Advisory notice for a file that was just written, or `None` when the file
 /// has nothing reportable. Mirrors `jcode-lsp`'s `<diagnostics>` block shape.
 pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> Option<String> {
-    let spans = scan(content, jcode_lsp::language_id(path));
+    let spans = scan_with(content, syntax_for_path(path));
     if spans.is_empty() {
         return None;
     }
@@ -403,5 +452,42 @@ mod tests {
     #[test]
     fn clean_file_yields_no_notice() {
         assert!(comment_notice("a.rs", "let x = 1;\n", Path::new("a.rs")).is_none());
+    }
+
+    #[test]
+    fn shell_scripts_are_scanned_though_the_lsp_catalog_calls_them_plaintext() {
+        assert_eq!(jcode_lsp::language_id(Path::new("a.sh")), "plaintext");
+        let notice = comment_notice(
+            "a.sh",
+            "#!/bin/sh\n# set the flag\nx=1\n",
+            Path::new("a.sh"),
+        )
+        .expect("shell comment reported");
+        assert!(notice.contains("set the flag"));
+    }
+
+    #[test]
+    fn extension_fallback_covers_both_syntax_families() {
+        assert_eq!(syntax_for_path(Path::new("A.java")), Syntax::CStyle);
+        assert_eq!(syntax_for_path(Path::new("a.rb")), Syntax::Hash);
+        assert_eq!(syntax_for_path(Path::new("Cargo.toml")), Syntax::Hash);
+        assert_eq!(syntax_for_path(Path::new("a.png")), Syntax::None);
+    }
+
+    #[test]
+    fn extensionless_files_fall_back_to_the_file_name() {
+        assert_eq!(syntax_for_path(Path::new("Dockerfile")), Syntax::Hash);
+        assert_eq!(syntax_for_path(Path::new("dir/.gitignore")), Syntax::Hash);
+    }
+
+    #[test]
+    fn the_lsp_catalog_still_wins_over_the_extension_table() {
+        assert_eq!(syntax_for_path(Path::new("a.py")), Syntax::Hash);
+        assert_eq!(syntax_for_path(Path::new("a.rs")), Syntax::CStyle);
+    }
+
+    #[test]
+    fn css_stays_unscanned_so_protocol_relative_urls_are_not_comments() {
+        assert_eq!(syntax_for_path(Path::new("a.css")), Syntax::None);
     }
 }
