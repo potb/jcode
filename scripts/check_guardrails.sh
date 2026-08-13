@@ -69,13 +69,48 @@ run_gate "cargo fmt --all --check" cargo fmt --all --check
 
 echo ""
 echo "=== Quality Guardrails ==="
+# Before clippy: `clippy-driver` refuses to read crate metadata that a different
+# rustc wrote, so a driver from a different toolchain than the one that built
+# `target/` reports ~1961 errors like "found crate `std` compiled by an
+# incompatible version of rustc" -- none of them real, and they look enough like
+# a broken tree to get written off as one.
+#
+# The cause is PATH, not stale artifacts: the `selfdev` shell deliberately omits
+# `developerTools`, which is where the flake puts nightly clippy, so
+# `clippy-driver` falls through to the system binary while cargo and everything
+# under `target/` come from the flake's nightly. Reaching for `cargo clean`
+# costs a full rebuild and changes nothing. `nix develop .#full` carries the
+# matching `clippy-preview`.
+#
+# clippy is versioned 0.1.<rustc-minor>, so comparing minors catches the
+# mismatch in milliseconds instead of a wasted clippy run plus a misdiagnosis.
+check_clippy_driver_matches_rustc() {
+    local clippy_minor rustc_minor
+    clippy_minor=$(cargo clippy --version 2>/dev/null | grep -oE '0\.1\.[0-9]+' | head -1)
+    rustc_minor=$(cargo --version 2>/dev/null | grep -oE '1\.[0-9]+\.[0-9]+' | head -1)
+    # Unparseable versions are not a mismatch; let clippy itself be the judge.
+    [[ -z $clippy_minor || -z $rustc_minor ]] && return 0
+    clippy_minor=${clippy_minor#0.1.}
+    rustc_minor=$(printf '%s' "$rustc_minor" | cut -d. -f2)
+    [[ $clippy_minor == "$rustc_minor" ]] && return 0
+    printf 'clippy 0.1.%s does not match rustc 1.%s.\n' "$clippy_minor" "$rustc_minor"
+    printf 'clippy-driver on PATH: %s\n' "$(command -v clippy-driver || echo '<none>')"
+    printf 'Run inside "nix develop .#full", which carries the matching clippy.\n'
+    printf 'Do NOT run "cargo clean": the mismatch is in PATH, not target/.\n'
+    return 1
+}
+
 if $SKIP_SLOW; then
     echo "⏭  cargo check / clippy / machete (--skip-slow)"
 else
     run_gate "cargo check --all-targets --all-features" \
         cargo check --all-targets --all-features -j "$JOBS"
-    run_gate "cargo clippy -- -D warnings" \
-        cargo clippy --all-targets --all-features -j "$JOBS" -- -D warnings
+    if run_gate "clippy driver matches rustc" check_clippy_driver_matches_rustc; then
+        run_gate "cargo clippy -- -D warnings" \
+            cargo clippy --all-targets --all-features -j "$JOBS" -- -D warnings
+    else
+        echo "⏭  cargo clippy (driver mismatch would report only false errors)"
+    fi
 fi
 
 # Only the Windows CI jobs pass --locked, so a stale lockfile otherwise passes
