@@ -29,6 +29,25 @@ The renderer now has an `mmdr-size-api` path guarded by the `mmdr-size-api` feat
 
 This reduces bugs from aspect-ratio retargeting, blurry upscaling, placeholder height mismatch, and pane resize oscillation.
 
+### Fitting rule: width drives, height does not
+
+`calculate_render_size` returns a roughly 4:3 request box (`height = width *
+0.75`). The size-API render path used to fit the measured natural canvas into
+that box with `min(target_w / natural_w, target_h / natural_h)`. That `min` is
+right for diagrams *wider* than the box, where it avoids letterboxing, and
+wrong for diagrams *taller* than it: the height term wins and the rendered
+width collapses to roughly a quarter of the pane width that was available, at
+every pane width (potb/jcode#150). The panel then upscales the small PNG to
+compensate, which is blurry and, past the Kitty fast-path zoom gate, re-encoded
+and re-transmitted on every redraw.
+
+The request box is a *hint*, so `fit_natural_to_target_width` scales by the
+width term alone and lets the natural aspect ratio decide height. Wide diagrams
+are unaffected: for them the width term was already the smaller of the two, so
+the scale is identical. Vertical overflow is acceptable because the diagram
+surfaces scroll vertically; the real limit is memory, and a pixel-area budget
+(`RENDER_AREA_BUDGET_PX`, the area of the largest box ever requested) caps it.
+
 ## Target design
 
 Use an explicit, staged pipeline with pure data between stages:
