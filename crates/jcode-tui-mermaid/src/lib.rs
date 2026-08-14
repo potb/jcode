@@ -267,6 +267,8 @@ pub use widget_render::{render_image_widget, render_image_widget_fit, render_ima
 use cache_render::LAYOUT_CACHE_MAX;
 #[cfg(test)]
 use cache_render::calculate_render_size;
+#[cfg(test)]
+use cache_render::estimate_diagram_size;
 use cache_render::{
     CachedDiagram, MermaidCache, RENDER_CACHE_MAX, RENDER_WIDTH_BUCKET_CELLS,
     bump_deferred_render_epoch, clear_layout_cache, get_cached_diagram,
