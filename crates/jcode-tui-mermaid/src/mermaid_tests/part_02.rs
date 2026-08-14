@@ -886,6 +886,18 @@ fn estimate_does_not_treat_prose_actor_words_as_lifelines() {
 }
 
 #[test]
+fn estimate_counts_actor_declarations_like_participants() {
+    let actors = "sequenceDiagram\nactor A\nactor B\nactor C\nA->>B: one\nB-->>C: two\n";
+    let (nodes, edges) = super::estimate_diagram_size(actors);
+    assert_eq!(nodes, 3, "`actor` declares a lifeline just as `participant` does");
+    assert_eq!(edges, 2);
+
+    let mixed = "sequenceDiagram\nparticipant A\nactor B\nA->>B: one\n";
+    let (mixed_nodes, _) = super::estimate_diagram_size(mixed);
+    assert_eq!(mixed_nodes, 2, "the two keywords are counted together");
+}
+
+#[test]
 fn sequence_diagram_estimate_now_requests_more_than_the_minimum_render_width() {
     let sequence = "sequenceDiagram\n\
         participant A\n\
