@@ -359,25 +359,14 @@ fn render_svg_for_png(
     layout_config: &LayoutConfig,
     output_dimensions: Option<(f32, f32)>,
 ) -> (String, MeasuredSvgDimensions) {
-    // Measure the natural (content-hugging) canvas first, then fit it into the
-    // requested target box while preserving aspect ratio. Forcing the raw
-    // target dimensions letterboxes wide diagrams inside the ~4:3 request box:
-    // the PNG (and therefore the transcript placeholder) reserves huge
-    // transparent bands above/below the ink. This mirrors the legacy
-    // `retarget_svg_for_png` fit semantics.
     let natural = mmdr_measure_svg_dimensions(layout, layout_config, None);
-    let fitted = output_dimensions.map(|(target_width, target_height)| {
-        let target_width = target_width.max(1.0);
-        let target_height = target_height.max(1.0);
-        let natural_width = natural.width.max(1.0);
-        let natural_height = natural.height.max(1.0);
-        let scale = (target_width / natural_width)
-            .min(target_height / natural_height)
-            .max(0.0001);
-        (
-            (natural_width * scale).max(1.0),
-            (natural_height * scale).max(1.0),
-        )
+    let fitted = output_dimensions.map(|(target_width, _target_height)| {
+        let (width, height) = svg::fit_natural_to_target_width(
+            natural.width as f64,
+            natural.height as f64,
+            target_width as f64,
+        );
+        (width as f32, height as f32)
     });
     let dimensions = mmdr_measure_svg_dimensions(layout, layout_config, fitted);
     let svg = mmdr_render_svg_with_dimensions(layout, theme, layout_config, fitted);

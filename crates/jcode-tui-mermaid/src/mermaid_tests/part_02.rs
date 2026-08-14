@@ -923,3 +923,40 @@ fn sequence_diagram_estimate_now_requests_more_than_the_minimum_render_width() {
     let (wide, _) = super::calculate_render_size(nodes, edges, Some(80));
     assert!(wide > narrow, "expected a wider render target: {narrow} -> {wide}");
 }
+
+#[test]
+fn tall_diagram_uses_the_full_target_width() {
+    // A 4-rank `flowchart TD` is far taller than the ~4:3 request box.
+    let (width, height) = super::svg::fit_natural_to_target_width(300.0, 900.0, 600.0);
+    assert_eq!(width.round(), 600.0, "expected the full target width");
+    assert_eq!(height.round(), 1800.0, "height must follow the natural aspect");
+
+    // Positive control: the old min() fit is what produced the collapse, so
+    // show the number this test would have reported before the change.
+    let old_scale = (600.0f64 / 300.0).min(450.0 / 900.0);
+    assert_eq!((300.0 * old_scale).round(), 150.0);
+}
+
+#[test]
+fn wide_diagram_fit_is_unchanged() {
+    // Wider than the box: the width term was already the smaller one, so the
+    // result must match the previous min() fit exactly.
+    let (width, height) = super::svg::fit_natural_to_target_width(1600.0, 400.0, 800.0);
+    let old_scale = (800.0f64 / 1600.0).min(600.0 / 400.0);
+    assert_eq!(width, 1600.0 * old_scale);
+    assert_eq!(height, 400.0 * old_scale);
+}
+
+#[test]
+fn extreme_aspect_render_is_capped_by_the_area_budget() {
+    // 1:100 at full target width would rasterize ~2400x240000 px.
+    let (width, height) = super::svg::fit_natural_to_target_width(100.0, 10_000.0, 2400.0);
+    let area = width * height;
+    let budget = 2400.0 * 1800.0;
+    assert!(area <= budget * 1.001, "area {area} exceeds budget {budget}");
+    assert!(width < 2400.0, "the cap must bite here: width {width}");
+    // Positive control: without a cap the same inputs give this much area.
+    assert!(2400.0 * 240_000.0 > budget);
+    // Aspect ratio is still preserved after capping.
+    assert!((height / width - 100.0).abs() < 0.01, "aspect drifted: {width}x{height}");
+}

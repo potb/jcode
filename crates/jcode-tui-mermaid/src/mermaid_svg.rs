@@ -46,6 +46,35 @@ pub(super) fn estimate_diagram_size(content: &str) -> (usize, usize) {
     (nodes.max(2), edges.max(1))
 }
 
+/// Largest raster a single diagram may occupy, in pixels: the area of the
+/// biggest box the sizing code ever requested.
+const RENDER_AREA_BUDGET_PX: f64 = DEFAULT_RENDER_WIDTH as f64 * DEFAULT_RENDER_HEIGHT as f64;
+
+/// Scale a natural canvas to `target_width`, preserving aspect ratio, capped
+/// by [`RENDER_AREA_BUDGET_PX`]. See `docs/MERMAID_RENDERING_REDESIGN.md`.
+pub(super) fn fit_natural_to_target_width(
+    natural_width: f64,
+    natural_height: f64,
+    target_width: f64,
+) -> (f64, f64) {
+    let natural_width = natural_width.max(1.0);
+    let natural_height = natural_height.max(1.0);
+    let target_width = target_width.max(1.0);
+
+    let mut scale = (target_width / natural_width).max(0.0001);
+
+    let area = (natural_width * scale) * (natural_height * scale);
+    if area > RENDER_AREA_BUDGET_PX {
+        scale *= (RENDER_AREA_BUDGET_PX / area).sqrt();
+    }
+    let scale = scale.max(0.0001);
+
+    (
+        (natural_width * scale).max(1.0),
+        (natural_height * scale).max(1.0),
+    )
+}
+
 /// Calculate optimal PNG dimensions based on terminal and diagram complexity
 pub(super) fn calculate_render_size(
     node_count: usize,
