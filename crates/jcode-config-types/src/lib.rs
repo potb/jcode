@@ -1799,6 +1799,10 @@ pub struct AmbientConfig {
     ///
     /// Scheduled items that come due while closed are not dropped; they run
     /// when the next window opens.
+    ///
+    /// When this list is empty the runner falls back to the union of the
+    /// configured projects' own `active_windows`; only an empty list with no
+    /// project windows anywhere leaves ambient unrestricted.
     pub active_windows: Vec<String>,
 
     /// Temporarily ignore `active_windows` without deleting the schedule.
