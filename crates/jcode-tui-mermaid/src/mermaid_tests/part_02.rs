@@ -843,3 +843,71 @@ fn aspect_profile_cache_entry_is_visible_to_profile_agnostic_probes() {
     super::cache_render::evict_render_cache_for_test(HASH);
     assert!(!super::inline_image_is_materialized(HASH));
 }
+
+#[test]
+fn estimate_counts_sequence_diagram_messages_and_participants() {
+    let sequence = "sequenceDiagram\n\
+        participant A as Alice\n\
+        participant B as Bob\n\
+        participant C\n\
+        A->>B: hello\n\
+        B-->>A: hi back\n\
+        B->>C: forward\n\
+        Note over A,B: a note\n";
+
+    let (nodes, edges) = super::estimate_diagram_size(sequence);
+    assert_eq!(nodes, 3, "three participants should be counted as nodes");
+    assert_eq!(edges, 3, "->> and -->> messages should be counted as edges");
+}
+
+#[test]
+fn estimate_still_counts_flowchart_shapes_and_links() {
+    let flowchart = "flowchart TD\n\
+        A[Start] --> B{Choice}\n\
+        B -.-> C(End)\n";
+
+    let (nodes, edges) = super::estimate_diagram_size(flowchart);
+    assert_eq!(nodes, 2);
+    assert_eq!(edges, 2);
+}
+
+#[test]
+fn estimate_does_not_treat_prose_actor_words_as_lifelines() {
+    let bare = "sequenceDiagram\nparticipant\nA->>B: participant of the day\n";
+    let (nodes, _) = super::estimate_diagram_size(bare);
+    assert_eq!(nodes, 2, "falls back to the minimum, not a phantom lifeline");
+
+    let named = "sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nA->>B: participant of the day\n";
+    let (named_nodes, _) = super::estimate_diagram_size(named);
+    assert_eq!(
+        named_nodes, 3,
+        "positive control: naming the lifelines must produce lifeline nodes"
+    );
+}
+
+#[test]
+fn sequence_diagram_estimate_now_requests_more_than_the_minimum_render_width() {
+    let sequence = "sequenceDiagram\n\
+        participant A\n\
+        participant B\n\
+        participant C\n\
+        participant D\n\
+        participant E\n\
+        A->>B: one\n\
+        B->>C: two\n\
+        C->>D: three\n\
+        D->>E: four\n\
+        E-->>A: five\n\
+        A->>C: six\n";
+
+    let (nodes, edges) = super::estimate_diagram_size(sequence);
+    // Positive control: the old rules (brackets + flowchart arrows only) scored
+    // this diagram at the 0..=5 complexity bucket; it must now land higher.
+    assert!(
+        nodes + edges > 5,
+        "complexity was {nodes}+{edges}, still in the smallest bucket"
+    );
+    let (narrow, _) = super::calculate_render_size(4, 1, Some(80));
+    let (wide, _) = super::calculate_render_size(nodes, edges, Some(80));
+    assert!(wide > narrow, "expected a wider render target: {narrow} -> {wide}");
+}

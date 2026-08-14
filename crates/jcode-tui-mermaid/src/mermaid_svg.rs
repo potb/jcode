@@ -7,6 +7,19 @@ use super::{RenderConfig, SVG_FONT_DB, Theme};
 #[cfg(feature = "renderer")]
 use std::path::Path;
 
+/// Flowchart-style link tokens plus the sequence-diagram message arrows
+/// (`->>`, `-->>`), which the estimate used to ignore entirely.
+const EDGE_TOKENS: [&str; 7] = ["-->>", "->>", "-->", "-.->", "==>", "---", "-.-"];
+
+/// Sequence diagrams declare their lifelines with keywords rather than with
+/// bracket pairs, so they need their own node rule.
+fn declares_lifeline(trimmed: &str) -> bool {
+    let rest = trimmed
+        .strip_prefix("participant ")
+        .or_else(|| trimmed.strip_prefix("actor "));
+    rest.is_some_and(|rest| !rest.trim().is_empty())
+}
+
 /// Count nodes and edges in mermaid content (rough estimate)
 pub(super) fn estimate_diagram_size(content: &str) -> (usize, usize) {
     let mut nodes = 0;
@@ -17,15 +30,12 @@ pub(super) fn estimate_diagram_size(content: &str) -> (usize, usize) {
         if trimmed.is_empty() || trimmed.starts_with("%%") {
             continue;
         }
-        if trimmed.contains("-->")
-            || trimmed.contains("-.->")
-            || trimmed.contains("==>")
-            || trimmed.contains("---")
-            || trimmed.contains("-.-")
-        {
+        if EDGE_TOKENS.iter().any(|token| trimmed.contains(token)) {
             edges += 1;
         }
-        if (trimmed.contains('[') && trimmed.contains(']'))
+        if declares_lifeline(trimmed) {
+            nodes += 1;
+        } else if (trimmed.contains('[') && trimmed.contains(']'))
             || (trimmed.contains('{') && trimmed.contains('}'))
             || (trimmed.contains('(') && trimmed.contains(')'))
         {
