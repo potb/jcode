@@ -403,6 +403,16 @@ impl AuthStatus {
         status
     }
 
+    /// Returns true if any OpenAI-compatible profile (Cerebras, Groq, ...) has
+    /// credentials, mirroring the `OpenAiCompatible` arm of
+    /// [`Self::state_for_provider`].
+    pub fn has_any_openai_compatible_available() -> bool {
+        crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .any(crate::provider_catalog::openai_compatible_profile_is_configured)
+    }
+
     /// Returns true if at least one provider has usable credentials.
     pub fn has_any_available(&self) -> bool {
         self.anthropic.state == AuthState::Available
@@ -416,6 +426,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || Self::has_any_openai_compatible_available()
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
