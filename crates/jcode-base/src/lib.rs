@@ -93,6 +93,7 @@ pub mod telemetry {
 pub mod terminal_launch;
 pub mod todo;
 pub mod todo_gates;
+pub mod todo_maintenance;
 pub mod transport;
 pub mod usage;
 pub mod util;

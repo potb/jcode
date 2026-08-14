@@ -36,6 +36,12 @@ pub async fn run() -> Result<()> {
         .name("jcode-session-bak-prune".to_string())
         .spawn(crate::session::prune_old_session_backups)
         .ok();
+    // Same treatment for the todo store: every session that plans leaves up to
+    // five files behind and nothing ever collected them.
+    std::thread::Builder::new()
+        .name("jcode-todo-prune".to_string())
+        .spawn(crate::todo_maintenance::prune_old_todo_artifacts)
+        .ok();
     logging::info("jcode starting");
 
     // Wire config-reload reactions without making config depend on auth/bus:
