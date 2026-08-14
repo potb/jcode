@@ -99,7 +99,14 @@ fn configured_windows() -> Vec<schedule_window::ScheduleWindow> {
     if ambient.ignore_active_windows {
         return Vec::new();
     }
-    let specs = ambient.active_windows.clone();
+    // Fall back to the projects' own schedules when no global window is set.
+    // Config is per project, so `[[ambient.projects]] active_windows` is the
+    // normal place to declare hours; reading only the global list turned that
+    // into "always open" and let cycles start at any hour.
+    let mut specs = ambient.active_windows.clone();
+    if specs.is_empty() {
+        specs = super::prompt::project_window_specs();
+    }
     let (windows, bad) = schedule_window::parse_windows(&specs);
     if !bad.is_empty() {
         logging::warn(&format!(

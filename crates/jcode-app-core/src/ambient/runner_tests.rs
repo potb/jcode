@@ -1444,3 +1444,113 @@ fn ambient_without_overrides_keeps_the_inherited_model_and_effort() {
     assert_eq!(applied.model(), "session-model");
     assert_eq!(applied.reasoning_effort(), None);
 }
+
+/// The runner's window gate must honour schedules declared ONLY under
+/// `[[ambient.projects]]`.
+///
+/// Regression test for the real incident behind #124: with quiet hours set per
+/// project and none globally, `configured_windows()` read the empty global list
+/// as "always open" and a full cycle ran at 00:42 local, outside every window
+/// the user had configured. The per-project windows gated nothing but the
+/// prompt text.
+#[test]
+fn project_windows_gate_the_cycle_when_no_global_window_is_set() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    // Two one-minute windows on opposite sides of the clock: whenever "now"
+    // is, the schedule is closed, so this cannot pass by being lucky.
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n[[ambient.projects]]\npath = \"/tmp/a\"\n\
+         active_windows = [\"daily 00:00-00:01\"]\n\n[[ambient.projects]]\n\
+         path = \"/tmp/b\"\nactive_windows = [\"daily 12:00-12:01\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    assert_eq!(
+        super::configured_windows().len(),
+        2,
+        "project windows must be enforced when no global window is configured"
+    );
+    assert!(
+        !super::current_window_state().is_open(),
+        "a cycle must not start while every configured project window is closed"
+    );
+    assert!(
+        !super::may_start_cycle(true, super::current_window_state().is_open(), true),
+        "the gate the loop calls must refuse the cycle outright"
+    );
+}
+
+/// The per-project fallback is a fallback, not an override: an explicit global
+/// schedule stays authoritative, so existing configs keep their exact meaning.
+#[test]
+fn global_windows_still_win_over_project_windows() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nactive_windows = [\"daily 00:00-00:01\"]\n\n\
+         [[ambient.projects]]\npath = \"/tmp/a\"\n\
+         active_windows = [\"daily 09:00-10:00\", \"daily 11:00-12:00\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    assert_eq!(
+        super::configured_windows().len(),
+        1,
+        "the global schedule must not be merged with or replaced by project windows"
+    );
+}
+
+/// `ignore_active_windows` is the one override that means "run anywhere,
+/// anytime"; it must cover the project-declared schedules too.
+#[test]
+fn ignore_active_windows_also_suspends_project_windows() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nignore_active_windows = true\n\n\
+         [[ambient.projects]]\npath = \"/tmp/a\"\n\
+         active_windows = [\"daily 00:00-00:01\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    assert!(
+        super::configured_windows().is_empty(),
+        "the override must suspend project windows as well as global ones"
+    );
+    assert!(super::current_window_state().is_open());
+}
+
+/// A config with no schedule anywhere must keep running around the clock: a
+/// time constraint the user never expressed must not be invented.
+#[test]
+fn projects_without_windows_leave_ambient_always_open() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n[[ambient.projects]]\npath = \"/tmp/a\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    assert!(
+        super::configured_windows().is_empty(),
+        "no schedule anywhere means no window constraint"
+    );
+    assert!(super::current_window_state().is_open());
+}

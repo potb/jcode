@@ -642,6 +642,28 @@ fn workable_projects() -> Vec<ResolvedProject> {
         .collect()
 }
 
+/// Every window spec declared by a configured project, deduplicated.
+///
+/// The runner needs this because its own gate reads the GLOBAL
+/// `[ambient] active_windows` only. With schedules declared solely under
+/// `[[ambient.projects]]` that global list is empty, which the runner reads as
+/// "always open", so a cycle could start at any hour and then find no workable
+/// project and improvise work outside the hours the user actually configured.
+///
+/// Returning the specs (not parsed windows) keeps the parse, the
+/// unparseable-entry warning and the fail-open rule in one place in the runner.
+pub(crate) fn project_window_specs() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for project in configured_projects() {
+        for spec in project.active_windows {
+            if !out.iter().any(|existing| existing == &spec) {
+                out.push(spec);
+            }
+        }
+    }
+    out
+}
+
 /// Expand a configured project path: `~/` against `HOME`, trailing slash off.
 fn expand_project_path(path: &str) -> String {
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
