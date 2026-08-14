@@ -106,18 +106,34 @@ pub fn spawn_server_usage_poller() -> bool {
     }
 
     tokio::spawn(async {
-        let mut ticker = tokio::time::interval(SERVER_POLL_INTERVAL);
-        // Missed ticks must not be replayed back-to-back: if the machine
-        // suspends, a burst of catch-up ticks is precisely the storm this
-        // is meant to avoid.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            poll_once().await;
-        }
+        run_poll_loop(SERVER_POLL_INTERVAL, poll_once).await;
     });
 
     true
+}
+
+/// The loop shape, with the interval and the per-tick work as parameters.
+///
+/// Split out of [`spawn_server_usage_poller`] so the cadence can be asserted
+/// against a paused clock. Inside the spawned task it was unobservable: the
+/// only ways to check it were to sleep for real minutes or to suspend the
+/// machine, so the two properties that make this loop safe — an immediate
+/// first tick, and missed ticks collapsing instead of bursting — were carried
+/// by a comment rather than by a test.
+pub(super) async fn run_poll_loop<T, Fut>(interval: Duration, mut tick: T)
+where
+    T: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut ticker = tokio::time::interval(interval);
+    // Missed ticks must not be replayed back-to-back: if the machine
+    // suspends, a burst of catch-up ticks is precisely the storm this
+    // is meant to avoid.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        tick().await;
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +166,63 @@ mod tests {
         assert!(
             !spawn_server_usage_poller(),
             "a second call must not spawn a second loop competing for the lease"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_ticks_immediately_and_then_once_per_interval() {
+        // The first tick matters on its own: a server that waited out a full
+        // interval before its first refresh would leave the client it just
+        // accepted to fetch for itself, which is the case this loop exists to
+        // prevent.
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = ticks.clone();
+        let interval = Duration::from_secs(60);
+
+        let loop_task = run_poll_loop(interval, move || {
+            let counter = counter.clone();
+            async move { counter.set(counter.get() + 1) }
+        });
+        tokio::pin!(loop_task);
+
+        // Poll once with no time elapsed: the immediate first tick must land.
+        let _ = futures::poll!(&mut loop_task);
+        assert_eq!(
+            ticks.get(),
+            1,
+            "the first tick must not wait out an interval"
+        );
+
+        tokio::time::advance(interval).await;
+        let _ = futures::poll!(&mut loop_task);
+        assert_eq!(ticks.get(), 2, "one tick per interval afterwards");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missed_ticks_collapse_instead_of_bursting() {
+        // Three intervals pass while nothing polls the loop — a descheduled
+        // task, or a machine that suspended. `MissedTickBehavior::Delay` must
+        // turn that into a single catch-up tick: replaying them back-to-back
+        // would aim a burst at the very rate limiter this loop protects.
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = ticks.clone();
+        let interval = Duration::from_secs(60);
+
+        let loop_task = run_poll_loop(interval, move || {
+            let counter = counter.clone();
+            async move { counter.set(counter.get() + 1) }
+        });
+        tokio::pin!(loop_task);
+
+        let _ = futures::poll!(&mut loop_task);
+        assert_eq!(ticks.get(), 1);
+
+        tokio::time::advance(interval * 3).await;
+        let _ = futures::poll!(&mut loop_task);
+        assert_eq!(
+            ticks.get(),
+            2,
+            "three missed intervals must produce one catch-up tick, not three"
         );
     }
 }
