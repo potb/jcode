@@ -195,9 +195,35 @@ The agent should use a todos tool to plan its cycle. This provides:
 - If the cycle is interrupted, we know what's left
 - Structure for the agent's reasoning
 
+The plan is not advisory. A headless cycle is held to the same todo quality
+gates as an interactive session, because an unattended cycle is exactly where a
+silently-abandoned plan would go unnoticed:
+
+- The decision itself lives once in `jcode_base::todo_gates`, shared by the
+  TUI, `jcode run`, and the ambient runner, so the three surfaces cannot drift
+  apart again.
+- `runner.rs::enforce_todo_gates` runs before `end_ambient_cycle` is accepted:
+  gate digest, then the ownership gate, then the completion-confidence and
+  confidence-spike challenges.
+- The loop is bounded by `AMBIENT_GATE_MAX_ATTEMPTS` (5). Exhausting the budget
+  forces the cycle to end as `CycleStatus::Incomplete` rather than looping
+  forever or reporting a silent success.
+- Gate observations are cleared at cycle end, and todo artifacts of long-dead
+  sessions are collected by `jcode_base::todo_maintenance`.
+
+Behaviour is the same for `ambient.visible = true`, which runs a real TUI.
+
 ### `request_permission`
 
 From the [Safety System](./SAFETY_SYSTEM.md). Used for any Tier 2 action.
+
+Ship-shaped requests are gated on the ownership decision at the moment they are
+made. A cycle can open a PR at any point in its turn, but the gates only run
+when the cycle ends, so without this the assessment that would have challenged
+the work happens *after* it has already shipped. `todo_gates::is_ship_action`
+matches actions naming a push, PR, merge, publish, release, or deploy, and
+`ship_block_reason` blocks them while the ownership gate reports insufficient
+delivery. Non-shipping permission requests are unaffected.
 
 ---
 
@@ -623,6 +649,22 @@ to write is the machine waking you at 3am.
 as before, so existing configs are unaffected. Empty could not mean "never run"
 without silently disabling ambient for everyone who never asked for a
 constraint.
+
+**Per-project windows are the fallback.** Hours are usually declared per
+project, under `[[ambient.projects]] active_windows`, because that is where the
+rest of a project's ambient config lives. When the global `active_windows` is
+empty, the runner unions every configured project's windows and gates the cycle
+on that instead of treating an empty global list as "always open":
+
+```toml
+[[ambient.projects]]
+path = "~/work/api"
+active_windows = ["weekdays 09:00-19:00"]
+```
+
+A global `active_windows` still wins outright when set, and `active_windows =
+[]` with no project windows anywhere remains unrestricted. Before this fallback
+existed, project-only hours gated nothing and cycles started at any hour.
 
 Day specs: `mon`, `mon-fri`, `mon,wed,fri`, `weekdays`, `weekends`, `daily`.
 Day ranges may wrap the week (`fri-mon`). Times are `HH:MM-HH:MM`, start
