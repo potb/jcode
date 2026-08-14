@@ -1015,7 +1015,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         options,
         load_pi_external_session,
     );
-    collect_opencode_external_sessions(&mut records, &mut report, options);
+    collect_opencode_external_sessions(&mut records, &mut report, query, options);
     collect_external_jsonl_source(
         &mut records,
         &mut report,
@@ -1335,6 +1335,7 @@ fn external_text_matches_query(text: &str, query: &QueryProfile) -> bool {
 fn collect_opencode_external_sessions(
     records: &mut Vec<ExternalSessionRecord>,
     report: &mut SearchReport,
+    query: &QueryProfile,
     options: &SearchOptions,
 ) {
     if !source_matches_filter("opencode", options) {
@@ -1356,10 +1357,125 @@ fn collect_opencode_external_sessions(
         return;
     };
     let paths = collect_recent_files_recursive(&root, "json", options.max_scan_sessions);
-    let outcomes = load_opencode_candidates_parallel(&paths, &messages_base, &parts_base, options);
+    let groups = opencode_session_groups(&paths, &messages_base, &parts_base);
+    let mut candidates = opencode_index_candidates(&groups, query);
+    if !options.exhaustive {
+        let budget = indexed_candidate_budget(options);
+        if candidates.len() > budget {
+            candidates.truncate(budget);
+            report.truncated = true;
+        }
+    }
+    let outcomes =
+        load_opencode_candidates_parallel(&candidates, &messages_base, &parts_base, options);
     for outcome in outcomes {
         report.parse_errors += outcome.parse_errors;
         records.extend(outcome.records);
+    }
+}
+
+/// Every file making up one OpenCode session, with its aggregate identity.
+struct OpenCodeSessionGroup {
+    session_path: PathBuf,
+    files: Vec<PathBuf>,
+    mtime_ms: u64,
+    size: u64,
+}
+
+/// Enumerate each session's files across the session, message and part trees,
+/// which are reachable by path alone: a session id names its message
+/// directory, and a message file is named for its part directory.
+fn opencode_session_groups(
+    session_paths: &[PathBuf],
+    messages_base: &Path,
+    parts_base: &Path,
+) -> Vec<OpenCodeSessionGroup> {
+    session_paths
+        .iter()
+        .map(|session_path| {
+            let mut files = vec![session_path.clone()];
+            if let Some(session_id) = session_path.file_stem().and_then(|stem| stem.to_str()) {
+                let messages_root = messages_base.join(session_id);
+                for message_path in read_dir_files(&messages_root) {
+                    if let Some(message_id) = message_path.file_stem().and_then(|s| s.to_str()) {
+                        files.extend(read_dir_files(&parts_base.join(message_id)));
+                    }
+                    files.push(message_path);
+                }
+            }
+            let (mtime_ms, size) = aggregate_stat(&files);
+            OpenCodeSessionGroup {
+                session_path: session_path.clone(),
+                files,
+                mtime_ms,
+                size,
+            }
+        })
+        .collect()
+}
+
+fn read_dir_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Identity of a file group: newest mtime and summed size. A directory mtime
+/// cannot stand in, since it ignores the in-place rewrites OpenCode makes as a
+/// reply streams (#142: 2939 of 2961 message directories hold a newer file).
+fn aggregate_stat(files: &[PathBuf]) -> (u64, u64) {
+    files.iter().fold((0, 0), |(mtime_ms, size), path| {
+        let (file_mtime, file_size) = session_search_index::stat_ms_size(path);
+        (mtime_ms.max(file_mtime), size.saturating_add(file_size))
+    })
+}
+
+/// Narrow OpenCode sessions to plausible matches with the incremental index,
+/// keyed by session id over the concatenated text of the whole group.
+fn opencode_index_candidates(
+    groups: &[OpenCodeSessionGroup],
+    query: &QueryProfile,
+) -> Vec<PathBuf> {
+    let index = index_dir()
+        .map(|dir| dir.join("session_search_opencode_index_v2.bin"))
+        .and_then(|index_path| {
+            let specs: Vec<IndexFileSpec> = groups
+                .iter()
+                .map(|group| IndexFileSpec {
+                    key: group.session_path.to_string_lossy().into_owned(),
+                    mtime_ms: group.mtime_ms,
+                    size: group.size,
+                })
+                .collect();
+            session_search_index::build_or_update(&index_path, &specs, &|slot| {
+                groups.get(slot).map(|group| {
+                    let mut text = group.session_path.to_string_lossy().into_owned();
+                    for path in &group.files {
+                        if let Ok(raw) = std::fs::read(path) {
+                            text.push(' ');
+                            text.push_str(&String::from_utf8_lossy(&raw));
+                        }
+                    }
+                    text
+                })
+            })
+        });
+
+    match index {
+        Ok(index) => index
+            .candidate_slots(&query.terms, query.min_term_matches)
+            .into_iter()
+            .filter_map(|slot| groups.get(slot).map(|group| group.session_path.clone()))
+            .collect(),
+        Err(_) => groups
+            .iter()
+            .map(|group| group.session_path.clone())
+            .collect(),
     }
 }
 

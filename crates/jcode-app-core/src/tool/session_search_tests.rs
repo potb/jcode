@@ -668,3 +668,129 @@ fn limit_validation_reports_friendly_errors() {
         .expect_err("negative limit should be rejected");
     assert!(err.contains("received -1"));
 }
+
+fn write_opencode_session(home: &Path, session_id: &str, message_id: &str, body: &str) {
+    let external = home.join("external/.local/share/opencode/storage");
+    let session_dir = external.join("session");
+    let message_dir = external.join("message").join(session_id);
+    let part_dir = external.join("part").join(message_id);
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    std::fs::create_dir_all(&message_dir).expect("create message dir");
+    std::fs::create_dir_all(&part_dir).expect("create part dir");
+
+    std::fs::write(
+        session_dir.join(format!("{session_id}.json")),
+        json!({
+            "id": session_id,
+            "title": "OpenCode fixture",
+            "directory": "/tmp/project",
+            "time": { "created": 1_700_000_000_000i64, "updated": 1_700_000_000_000i64 },
+        })
+        .to_string(),
+    )
+    .expect("write session json");
+    std::fs::write(
+        message_dir.join(format!("{message_id}.json")),
+        json!({ "id": message_id, "role": "user", "providerID": "opencode" }).to_string(),
+    )
+    .expect("write message json");
+    std::fs::write(
+        part_dir.join("prt_1.json"),
+        json!({ "type": "text", "text": body }).to_string(),
+    )
+    .expect("write part json");
+}
+
+fn opencode_options() -> SearchOptions {
+    let mut options = SearchOptions::for_test("current-session");
+    options.source_filter = Some("opencode".to_string());
+    options
+}
+
+#[test]
+fn opencode_index_prefilter_finds_text_stored_in_part_files() {
+    with_temp_home(|home| {
+        write_opencode_session(home, "ses_indexed", "msg_indexed", "opencodeneedle alpha");
+        std::fs::remove_dir_all(home.join("sessions")).expect("remove jcode sessions dir");
+
+        let report = run_report(home, "opencodeneedle", &opencode_options());
+
+        assert_eq!(report.external_sources, vec!["opencode"]);
+        assert_eq!(report.results.len(), 1, "indexed part text should match");
+        assert_eq!(report.results[0].session_id, "opencode:ses_indexed");
+    });
+}
+
+#[test]
+fn opencode_index_prefilter_excludes_non_matching_sessions() {
+    with_temp_home(|home| {
+        write_opencode_session(home, "ses_other", "msg_other", "entirely unrelated content");
+        std::fs::remove_dir_all(home.join("sessions")).expect("remove jcode sessions dir");
+
+        let report = run_report(home, "opencodeneedle", &opencode_options());
+
+        assert!(
+            report.results.is_empty(),
+            "a session without the term must not be returned"
+        );
+    });
+}
+
+/// The whole risk of a group identity is a stale index silently hiding new
+/// content, so pin the in-place rewrite that a directory mtime would miss.
+#[test]
+fn opencode_index_sees_text_appended_by_an_in_place_rewrite() {
+    with_temp_home(|home| {
+        write_opencode_session(
+            home,
+            "ses_rewrite",
+            "msg_rewrite",
+            "original body text that is long",
+        );
+        std::fs::remove_dir_all(home.join("sessions")).expect("remove jcode sessions dir");
+
+        let before = run_report(home, "opencodeneedle", &opencode_options());
+        assert!(before.results.is_empty(), "term absent before the rewrite");
+
+        // Overwrite the part file in place, leaving every directory untouched.
+        // The identity is millisecond-granular, as it is for every other
+        // source, so cross that boundary before rewriting.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let part = home.join("external/.local/share/opencode/storage/part/msg_rewrite/prt_1.json");
+        let dir_mtime_before = part
+            .parent()
+            .expect("part dir")
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .expect("part dir mtime");
+        // Same byte length as the original, so the summed size cannot be what
+        // invalidates the entry: only the file mtime can.
+        let original_len = std::fs::metadata(&part).expect("part metadata").len();
+        let replacement = json!({ "type": "text", "text": "opencodeneedle" }).to_string();
+        let padding = " ".repeat(original_len as usize - replacement.len());
+        std::fs::write(&part, format!("{replacement}{padding}")).expect("rewrite part json");
+        assert_eq!(
+            std::fs::metadata(&part).expect("part metadata").len(),
+            original_len,
+            "the rewrite must preserve size, or size alone would invalidate the entry"
+        );
+        let dir_mtime_after = part
+            .parent()
+            .expect("part dir")
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .expect("part dir mtime");
+        assert_eq!(
+            dir_mtime_before, dir_mtime_after,
+            "the rewrite must not change the directory mtime, or this test proves nothing"
+        );
+
+        let after = run_report(home, "opencodeneedle", &opencode_options());
+        assert_eq!(
+            after.results.len(),
+            1,
+            "an in-place rewrite must invalidate the index entry"
+        );
+        assert_eq!(after.results[0].session_id, "opencode:ses_rewrite");
+    });
+}
