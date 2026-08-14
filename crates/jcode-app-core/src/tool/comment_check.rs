@@ -1,16 +1,22 @@
-//! Lexical comment scanner behind the write/edit comment notice.
+//! Lexical comment scanner behind the write/edit comment directive.
 //!
 //! Decisions and their evidence live in potb/jcode#49. The three that shape
 //! this module: doc comments are never reported, the scan covers the whole
-//! file rather than the diff, and the result is advisory text appended after
-//! the write has already landed.
+//! file rather than the diff, and the result is appended after the write has
+//! already landed. The text is a directive rather than advice: a comment in
+//! code is a defect report about the code or about where its documentation
+//! lives, and the agent is expected to resolve it in the same session.
 //!
 //! The scanner is a hand-written lexer rather than a parser. It tracks string
 //! and char literals only as far as needed to avoid reporting a `//` that
 //! lives inside one, which is the only false positive that matters at this
 //! resolution.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 /// Longest file the scanner will look at. Above this the notice is skipped;
 /// the cost is a silent miss on generated files, which is the right trade.
@@ -513,13 +519,30 @@ fn hash_comment_start(line: &str, require_word_start: bool) -> Option<usize> {
     None
 }
 
-/// Advisory notice for a file that was just written, or `None` when the file
-/// has nothing reportable. Mirrors `jcode-lsp`'s `<diagnostics>` block shape.
-pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> Option<String> {
-    let spans = scan_with(content, syntax_for_path(path));
-    if spans.is_empty() {
-        return None;
-    }
+/// How many times a directive has already been issued for a given file in this
+/// process. A second report on the same file means the first one was read and
+/// not acted on, which is the case worth escalating.
+fn repeat_counts() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn bump_repeat(path: &Path) -> usize {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut counts = repeat_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let seen = counts.entry(key).or_insert(0);
+    *seen += 1;
+    *seen
+}
+
+/// Directive for a file that was just written, or `None` when the file has
+/// nothing reportable. Mirrors `jcode-lsp`'s `<diagnostics>` block shape.
+///
+/// `repeat` is 1 on the first report for a file and grows on every later one,
+/// which is what selects the escalated wording.
+fn directive_text(display_path: &str, spans: &[CommentSpan], repeat: usize) -> String {
     let mut lines: Vec<String> = spans
         .iter()
         .take(MAX_COMMENTS_PER_FILE)
@@ -531,10 +554,37 @@ pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> 
     if spans.len() > MAX_COMMENTS_PER_FILE {
         lines.push(format!("... {} more", spans.len() - MAX_COMMENTS_PER_FILE));
     }
-    Some(format!(
-        "<comments file=\"{display_path}\">\n{}\n</comments>\nThis file has comments. Remove ones that restate the code. Keep them only where they explain why.",
+
+    let escalation = if repeat > 1 {
+        format!(
+            "\nThis is report {repeat} for this file: the earlier one was not acted on. Resolve these now, or state in your reply which comment you kept and the reason it cannot be code or docs."
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "<comments file=\"{display_path}\">\n{}\n</comments>\n{DIRECTIVE}{escalation}",
         lines.join("\n")
-    ))
+    )
+}
+
+/// The standing rule the report carries. A comment in code is a defect signal,
+/// so each one gets resolved rather than weighed: the code becomes clear
+/// enough not to need it, the explanation moves to documentation, or the
+/// comment goes away because it restated the code.
+const DIRECTIVE: &str = "This file has comments. A comment in code is a signal that something is wrong: either the code is unclear, or documentation is in the wrong place. Resolve every comment listed above, in this order:\n\
+1. Fix the code so the comment is unnecessary (name, split, or restructure until it reads as the comment did).\n\
+2. Move the explanation where documentation belongs: a doc comment on the public item, or a markdown document such as a README, an architecture note, or an ADR. Doc comments are never reported here.\n\
+3. Delete it when it restates the code, records what you changed, or is otherwise dead weight.\n\
+Do this in the same session, and clean up pre-existing comments in the file, not only ones you added. Keep a comment only when none of the three applies, and say which one and why.";
+
+pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> Option<String> {
+    let spans = scan_with(content, syntax_for_path(path));
+    if spans.is_empty() {
+        return None;
+    }
+    Some(directive_text(display_path, &spans, bump_repeat(path)))
 }
 
 #[cfg(test)]
@@ -629,7 +679,50 @@ mod tests {
         let notice = comment_notice("a.rs", &src, Path::new("a.rs")).unwrap();
         assert!(notice.contains("... 5 more"));
         assert_eq!(notice.matches("note ").count(), MAX_COMMENTS_PER_FILE);
-        assert!(notice.contains("explain why"));
+        assert!(notice.contains("Resolve every comment listed above"));
+    }
+
+    #[test]
+    fn the_directive_names_all_three_resolutions() {
+        let spans = scan("// set the flag\n", "rust");
+        let text = directive_text("a.rs", &spans, 1);
+        assert!(text.contains("Fix the code"));
+        assert!(text.contains("markdown document"));
+        assert!(text.contains("Delete it"));
+        assert!(
+            text.contains("pre-existing comments"),
+            "the directive covers cleanup of the whole file: {text}"
+        );
+    }
+
+    #[test]
+    fn a_first_report_carries_no_escalation() {
+        let spans = scan("// set the flag\n", "rust");
+        assert!(!directive_text("a.rs", &spans, 1).contains("not acted on"));
+    }
+
+    #[test]
+    fn a_repeat_report_escalates() {
+        let spans = scan("// set the flag\n", "rust");
+        let text = directive_text("a.rs", &spans, 2);
+        assert!(text.contains("report 2 for this file"));
+        assert!(text.contains("not acted on"));
+    }
+
+    #[test]
+    fn writing_the_same_file_again_escalates() {
+        let dir = std::env::temp_dir().join(format!("jcode-cc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("repeat.rs");
+        std::fs::write(&path, "// set the flag\n").expect("write");
+
+        let first = comment_notice("repeat.rs", "// set the flag\n", &path).expect("a directive");
+        let second = comment_notice("repeat.rs", "// set the flag\n", &path).expect("a directive");
+
+        assert!(!first.contains("not acted on"));
+        assert!(second.contains("report 2 for this file"));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
