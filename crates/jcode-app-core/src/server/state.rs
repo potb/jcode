@@ -386,11 +386,35 @@ pub(super) async fn unregister_session_event_sender(
 ) {
     let mut members = swarm_members.write().await;
     if let Some(member) = members.get_mut(session_id) {
-        member.event_txs.remove(connection_id);
+        let removed = member.event_txs.remove(connection_id);
         if let Some((_, tx)) = member.event_txs.iter().next() {
             member.event_tx = tx.clone();
+        } else if removed
+            .as_ref()
+            .is_some_and(|tx| tx.same_channel(&member.event_tx))
+        {
+            // The connection we just dropped owned the primary channel and no
+            // other attachment is left. Leaving `event_tx` pointing at it makes
+            // `fanout_session_event` take its "no attachments" branch and send
+            // into a channel nobody drains: the send succeeds while the receiver
+            // still exists, so fanout reports a delivery that no client will
+            // ever see, and callers that gate a notification on the delivered
+            // count (background task completion, reload signalling) silently
+            // decide the user was reached. Swap in an already-closed sentinel so
+            // the "nobody is attached" state is observable immediately instead
+            // of only once the departed connection's receiver happens to drop.
+            member.event_tx = closed_event_sender();
         }
     }
+}
+
+/// Build an `UnboundedSender` whose receiver is dropped, so `is_closed()` is
+/// true and every `send` fails. Used as an explicit "no live attachment"
+/// placeholder for `SwarmMember::event_tx`.
+fn closed_event_sender() -> mpsc::UnboundedSender<ServerEvent> {
+    let (tx, rx) = mpsc::unbounded_channel::<ServerEvent>();
+    drop(rx);
+    tx
 }
 
 pub(super) async fn fanout_session_event(
@@ -760,3 +784,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
         })
     }
 }
+
+#[cfg(test)]
+#[path = "state_event_sender_tests.rs"]
+mod state_event_sender_tests;
