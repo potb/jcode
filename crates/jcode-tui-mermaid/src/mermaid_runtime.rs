@@ -146,7 +146,11 @@ pub(super) fn infer_protocol_from_env(
         return Some(ProtocolType::Kitty);
     }
 
+    // Match on TERM as well as TERM_PROGRAM: ghostty sets `TERM=xterm-ghostty`
+    // and TERM_PROGRAM is frequently absent (sudo, ssh, restrictive shells),
+    // which used to leave ghostty with no image protocol at all.
     if term.contains("kitty")
+        || term.contains("ghostty")
         || term_program.contains("kitty")
         || term_program.contains("ghostty")
         || term_program.contains("handterm")
@@ -696,6 +700,13 @@ mod tests {
         );
         assert_eq!(
             infer_protocol_from_env(None, Some("HandTerm"), None, None),
+            Some(ProtocolType::Kitty)
+        );
+        // Ghostty sets TERM=xterm-ghostty; TERM_PROGRAM is often absent or
+        // stripped (sudo, ssh, some login shells), so TERM alone must be
+        // enough, exactly as it is for kitty's own `xterm-kitty`.
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-ghostty"), None, None, None),
             Some(ProtocolType::Kitty)
         );
         // KITTY_WINDOW_ID present is sufficient.
