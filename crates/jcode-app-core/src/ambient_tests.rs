@@ -974,8 +974,9 @@ fn ambient_prompt_ranks_configured_priority_projects_above_busier_ones() {
         )
     };
 
-    let prioritized =
-        render("project_priority = [\"/home/potb/projects/workspace/private_project\", \"/home/potb/jcode\"]\n");
+    let prioritized = render(
+        "project_priority = [\"/home/potb/projects/workspace/private_project\", \"/home/potb/jcode\"]\n",
+    );
     let section = prioritized
         .split("## Projects Active Recently")
         .nth(1)
