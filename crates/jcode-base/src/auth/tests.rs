@@ -1068,3 +1068,42 @@ fn missing_refreshable_credentials_are_not_configured() {
         AuthState::NotConfigured
     );
 }
+
+#[test]
+fn openai_compatible_credentials_make_any_provider_available() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_cerebras = std::env::var_os("CEREBRAS_API_KEY");
+
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("CEREBRAS_API_KEY");
+    AuthStatus::invalidate_cache();
+
+    let empty = AuthStatus::check_fast();
+    assert!(
+        !empty.has_any_available(),
+        "a sandbox with no credentials should report nothing available"
+    );
+
+    crate::env::set_var("CEREBRAS_API_KEY", "test-cerebras-key");
+    AuthStatus::invalidate_cache();
+
+    let provider = crate::provider_catalog::resolve_login_provider("cerebras")
+        .expect("cerebras is a login provider");
+    let configured = AuthStatus::check_fast();
+
+    assert_eq!(
+        configured.state_for_provider(provider),
+        AuthState::Available,
+        "per-provider status should see the configured key"
+    );
+    assert!(
+        configured.has_any_available(),
+        "the aggregate must agree with the per-provider status (#155)"
+    );
+
+    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("CEREBRAS_API_KEY", prev_cerebras);
+    AuthStatus::invalidate_cache();
+}
