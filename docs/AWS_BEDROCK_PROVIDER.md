@@ -153,7 +153,7 @@ The live test is ignored by default. Run it only with valid AWS credentials and 
 JCODE_BEDROCK_LIVE_TEST=1 \
 AWS_PROFILE=my-profile \
 AWS_REGION=us-east-1 \
-cargo test -p jcode --lib provider::bedrock::tests::bedrock_live_smoke_test -- --ignored
+cargo test -p jcode-provider-bedrock --lib bedrock_live_smoke_test -- --ignored
 ```
 
 ## Troubleshooting
