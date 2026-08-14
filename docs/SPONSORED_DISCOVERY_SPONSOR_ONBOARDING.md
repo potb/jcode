@@ -26,9 +26,12 @@ Coordinate that change with the service owner. The client-side contract is in:
 
 - `crates/jcode-app-core/src/tool/discover.rs`;
 - `crates/jcode-base/src/sponsors.rs`;
-- `crates/jcode-base/src/sponsors/provenance.rs`;
-- `crates/jcode-tui/src/tui/app/sponsor_disclosure.rs`; and
+- `crates/jcode-base/src/sponsors/provenance.rs`; and
 - `TELEMETRY.md`.
+
+Sponsored results are disclosed in the `discover_tools` result payload itself
+(`sponsored_discovery` plus `disclosure_url`), not by a separate TUI notice: the
+first-use inline disclosure widget and its plumbing were removed.
 
 ## 1. Intake and approval
 
@@ -323,7 +326,6 @@ For client-side changes, run at minimum:
 cargo test -p jcode-app-core tool::discover
 cargo test -p jcode-base sponsors
 cargo test -p jcode-base discovery_provenance
-cargo test -p jcode-tui sponsor_disclosure
 cargo check -p jcode
 ```
 
