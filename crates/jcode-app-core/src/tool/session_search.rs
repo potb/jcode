@@ -1355,19 +1355,61 @@ fn collect_opencode_external_sessions(
     else {
         return;
     };
-    for path in collect_recent_files_recursive(&root, "json", options.max_scan_sessions) {
-        match load_opencode_external_session(
-            &path,
-            &messages_base,
-            &parts_base,
-            options.include_tools,
-            options.max_scan_sessions,
-        ) {
-            Ok(Some(record)) => records.push(record),
-            Ok(None) => {}
-            Err(_) => report.parse_errors += 1,
-        }
+    let paths = collect_recent_files_recursive(&root, "json", options.max_scan_sessions);
+    let outcomes = load_opencode_candidates_parallel(&paths, &messages_base, &parts_base, options);
+    for outcome in outcomes {
+        report.parse_errors += outcome.parse_errors;
+        records.extend(outcome.records);
     }
+}
+
+/// Hydrate OpenCode sessions across [`SCAN_THREADS`] workers, preserving order.
+fn load_opencode_candidates_parallel(
+    paths: &[PathBuf],
+    messages_base: &Path,
+    parts_base: &Path,
+    options: &SearchOptions,
+) -> Vec<ExternalLoadOutcome> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let thread_count = SCAN_THREADS.min(paths.len());
+    let chunk_size = paths.len().div_ceil(thread_count);
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in paths.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut outcome = ExternalLoadOutcome::default();
+                for path in chunk {
+                    match load_opencode_external_session(
+                        path,
+                        messages_base,
+                        parts_base,
+                        options.include_tools,
+                        options.max_scan_sessions,
+                    ) {
+                        Ok(Some(record)) => outcome.records.push(record),
+                        Ok(None) => {}
+                        Err(_) => outcome.parse_errors += 1,
+                    }
+                }
+                outcome
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    crate::logging::warn(
+                        "session_search opencode scan worker panicked; skipping that worker's sessions",
+                    );
+                    ExternalLoadOutcome::default()
+                }
+            })
+            .collect()
+    })
 }
 
 fn append_external_session_results(
