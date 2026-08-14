@@ -1107,3 +1107,34 @@ fn openai_compatible_credentials_make_any_provider_available() {
     restore_env_var("CEREBRAS_API_KEY", prev_cerebras);
     AuthStatus::invalidate_cache();
 }
+
+
+#[test]
+fn has_any_available_reads_the_snapshot_without_touching_disk() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    AuthStatus::invalidate_cache();
+
+    let status = AuthStatus::check_fast();
+
+    // The snapshot is already built, so answering from it must be pure field
+    // reads. Resolving openai-compatible profiles on demand instead costs a
+    // config-file read per profile (~180us/call measured), which is charged to
+    // every frame that renders the header.
+    let start = std::time::Instant::now();
+    for _ in 0..200 {
+        std::hint::black_box(status.has_any_available());
+    }
+    let per_call = start.elapsed() / 200;
+
+    assert!(
+        per_call < std::time::Duration::from_micros(10),
+        "has_any_available must answer from the snapshot, not the filesystem; \
+         measured {per_call:?} per call"
+    );
+
+    restore_env_var("JCODE_HOME", prev_home);
+    AuthStatus::invalidate_cache();
+}
