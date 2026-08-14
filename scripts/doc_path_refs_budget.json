@@ -1,5 +1,5 @@
 {
-  "total": 20,
+  "total": 19,
   "files": {
     "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
       "src/usage.rs"
@@ -33,9 +33,6 @@
     ],
     "docs/HARNESS_API_AND_DESKTOP_REWRITE.md": [
       "crates/jcode-desktop"
-    ],
-    "docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md": [
-      "crates/jcode-tui/src/tui/app/sponsor_disclosure.rs"
     ],
     "docs/dev/crate-splitting-plan.md": [
       "src/provider/anthropic.rs",
