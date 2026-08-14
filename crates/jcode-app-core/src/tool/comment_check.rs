@@ -26,6 +26,29 @@ const MAX_SCAN_BYTES: usize = 1024 * 1024;
 /// `jcode-lsp`'s diagnostics formatter.
 const MAX_COMMENTS_PER_FILE: usize = 10;
 
+/// Reported doc blocks per file. Its own budget, so a file full of doc blocks
+/// cannot crowd the plain-comment list out of the report.
+const MAX_DOCS_PER_FILE: usize = 10;
+
+/// Lines a doc block may occupy before it counts as prose rather than a
+/// summary of an interface. Three lines hold a summary; a page of design
+/// rationale is a document that lost its way into a header, which is the case
+/// the report exists to catch.
+const MAX_DOC_LINES: usize = 3;
+
+/// A reportable doc block: where it starts, its first line as a preview, how
+/// many lines it spans, and whether the item under it is reachable from
+/// outside the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocSpan {
+    pub line: usize,
+    pub text: String,
+    pub lines: usize,
+    /// Documents an item nothing outside the file can call, so the prose is
+    /// about the implementation and has no reader who cannot read the code.
+    pub private: bool,
+}
+
 /// A reportable comment: 1-based line number and the trimmed source line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommentSpan {
@@ -107,6 +130,105 @@ fn syntax_for_path(path: &Path) -> Syntax {
     syntax_for_extension(&key)
 }
 
+/// Scan the doc blocks in a C-style file and keep the ones worth reporting.
+///
+/// A doc block earns a report when it runs past [`MAX_DOC_LINES`], or when the
+/// item under it is private. Both are the same failure the plain-comment
+/// report exists for, wearing a delimiter that used to make it invisible: a
+/// private header explains an implementation to a reader who is already
+/// reading it, and a long one is a design note that belongs in a markdown
+/// document.
+///
+/// A one-line summary on an exported item is never reported. That is what a
+/// doc comment is for, and reporting it would make the check unusable in any
+/// codebase with a documentation standard.
+fn scan_docs(content: &str, syntax: Syntax) -> Vec<DocSpan> {
+    if syntax != Syntax::CStyle || content.len() > MAX_SCAN_BYTES {
+        return Vec::new();
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let Some(len) = doc_block_len(&lines, i) else {
+            i += 1;
+            continue;
+        };
+        let item = lines[i + len..].iter().find(|l| !l.trim().is_empty());
+        let private = item.is_some_and(|l| !is_exported_item(l));
+        // A one-line summary is a naming aid wherever it sits, so only a
+        // private block that has grown past that is prose about an
+        // implementation.
+        if len > MAX_DOC_LINES || (private && len > 1) {
+            out.push(DocSpan {
+                line: i + 1,
+                text: lines[i].trim().to_string(),
+                lines: len,
+                private,
+            });
+        }
+        i += len;
+    }
+
+    out
+}
+
+/// Length in lines of the doc block starting at `start`, or `None` when no
+/// block starts there. Consecutive `///` and `//!` lines form one block, and a
+/// `/** */` block runs to its terminator.
+fn doc_block_len(lines: &[&str], start: usize) -> Option<usize> {
+    let first = lines[start].trim_start();
+
+    if first.starts_with("///") || first.starts_with("//!") {
+        let len = lines[start..]
+            .iter()
+            .take_while(|l| {
+                let t = l.trim_start();
+                t.starts_with("///") || t.starts_with("//!")
+            })
+            .count();
+        return Some(len);
+    }
+
+    if first.starts_with("/**") || first.starts_with("/*!") {
+        // A `/**/` empty block is not a doc block, and a single-line
+        // `/** x */` closes on its own line.
+        if first.len() > 3 && first[2..].contains("*/") {
+            return Some(1);
+        }
+        let len = lines[start..]
+            .iter()
+            .position(|l| l.contains("*/"))
+            .map(|end| end + 1)
+            .unwrap_or(lines.len() - start);
+        return Some(len);
+    }
+
+    None
+}
+
+/// Whether the item a doc block sits on is reachable from outside its file.
+///
+/// Lexical and deliberately permissive: an item this misses is one report the
+/// agent does not get, while a false positive would nag about a genuine public
+/// interface. Rust `pub`, and the `export`/`declare` keywords that make a
+/// TypeScript or JavaScript binding importable, all count as exported. Every
+/// attribute, decorator, and modifier line is skipped first.
+fn is_exported_item(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.starts_with('#') || t.starts_with('@') {
+        return true;
+    }
+    t.starts_with("pub ")
+        || t.starts_with("pub(")
+        || t.starts_with("export ")
+        || t.starts_with("export{")
+        || t.starts_with("export default")
+        || t.starts_with("declare ")
+        || t.starts_with("module.exports")
+}
 /// Lint directives and BDD step words, exempt regardless of language. A
 /// directive is machine-readable configuration that happens to live in a
 /// comment, and a `given`/`when`/`then` line is test structure.
@@ -537,36 +659,70 @@ fn bump_repeat(path: &Path) -> usize {
     *seen
 }
 
-/// Directive for a file that was just written, or `None` when the file has
-/// nothing reportable. Mirrors `jcode-lsp`'s `<diagnostics>` block shape.
+/// Directive for a file that was just written. Mirrors `jcode-lsp`'s
+/// `<diagnostics>` block shape, with one section per kind of finding.
 ///
 /// `repeat` is 1 on the first report for a file and grows on every later one,
 /// which is what selects the escalated wording.
-fn directive_text(display_path: &str, spans: &[CommentSpan], repeat: usize) -> String {
-    let mut lines: Vec<String> = spans
-        .iter()
-        .take(MAX_COMMENTS_PER_FILE)
-        .map(|s| {
-            let mark = if s.memo { " (memo)" } else { "" };
-            format!("{} {}{mark}", s.line, s.text)
-        })
-        .collect();
-    if spans.len() > MAX_COMMENTS_PER_FILE {
-        lines.push(format!("... {} more", spans.len() - MAX_COMMENTS_PER_FILE));
+fn directive_text(
+    display_path: &str,
+    spans: &[CommentSpan],
+    docs: &[DocSpan],
+    repeat: usize,
+) -> String {
+    let mut out = String::new();
+
+    if !spans.is_empty() {
+        let lines = capped(
+            spans.iter().map(|s| {
+                let mark = if s.memo { " (memo)" } else { "" };
+                format!("{} {}{mark}", s.line, s.text)
+            }),
+            spans.len(),
+            MAX_COMMENTS_PER_FILE,
+        );
+        out.push_str(&format!(
+            "<comments file=\"{display_path}\">\n{lines}\n</comments>\n{DIRECTIVE}"
+        ));
     }
 
-    let escalation = if repeat > 1 {
-        format!(
-            "\nThis is report {repeat} for this file: the earlier one was not acted on. Resolve these now, or state in your reply which comment you kept and the reason it cannot be code or docs."
-        )
-    } else {
-        String::new()
-    };
+    if !docs.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let lines = capped(
+            docs.iter().map(|d| {
+                let why = if d.private {
+                    "private item"
+                } else {
+                    "over 3 lines"
+                };
+                format!("{} {} ({} lines, {why})", d.line, d.text, d.lines)
+            }),
+            docs.len(),
+            MAX_DOCS_PER_FILE,
+        );
+        out.push_str(&format!(
+            "<docs file=\"{display_path}\">\n{lines}\n</docs>\n{DOC_DIRECTIVE}"
+        ));
+    }
 
-    format!(
-        "<comments file=\"{display_path}\">\n{}\n</comments>\n{DIRECTIVE}{escalation}",
-        lines.join("\n")
-    )
+    if repeat > 1 {
+        out.push_str(&format!(
+            "\nThis is report {repeat} for this file: the earlier one was not acted on. Resolve these now, or state in your reply what you kept and the reason it cannot be code or a document."
+        ));
+    }
+
+    out
+}
+
+/// Render up to `max` entries, with a trailing count when `total` exceeds it.
+fn capped(entries: impl Iterator<Item = String>, total: usize, max: usize) -> String {
+    let mut lines: Vec<String> = entries.take(max).collect();
+    if total > max {
+        lines.push(format!("... {} more", total - max));
+    }
+    lines.join("\n")
 }
 
 /// The standing rule the report carries. A comment in code is a defect signal,
@@ -579,12 +735,29 @@ const DIRECTIVE: &str = "This file has comments. A comment in code is a signal t
 3. Delete it when it restates the code, records what you changed, or is otherwise dead weight.\n\
 Do this in the same session, and clean up pre-existing comments in the file, not only ones you added. Keep a comment only when none of the three applies, and say which one and why.";
 
+/// The rule for doc blocks. A doc comment is the right home for an interface
+/// summary and the wrong home for everything else, so the ones reported here
+/// are the two shapes that are not a summary: prose long enough to be a
+/// document, and documentation of an item no caller outside the file can see.
+const DOC_DIRECTIVE: &str = "These doc comments are not interface summaries. A doc comment holds a short summary of something a caller cannot see; anything longer is a document, and one on a private item explains an implementation to a reader who is already reading it. Resolve each one:\n\
+1. Move the prose to a markdown document (a README, an architecture note, or an ADR) and leave a one-line summary with a pointer to it.\n\
+2. Fix the code so the explanation is unnecessary, especially on private items where the name and the shape can carry it.\n\
+3. Delete it when it restates the signature.\n\
+A short summary on an exported item is correct and is never reported.";
+
 pub(crate) fn comment_notice(display_path: &str, content: &str, path: &Path) -> Option<String> {
-    let spans = scan_with(content, syntax_for_path(path));
-    if spans.is_empty() {
+    let syntax = syntax_for_path(path);
+    let spans = scan_with(content, syntax);
+    let docs = scan_docs(content, syntax);
+    if spans.is_empty() && docs.is_empty() {
         return None;
     }
-    Some(directive_text(display_path, &spans, bump_repeat(path)))
+    Some(directive_text(
+        display_path,
+        &spans,
+        &docs,
+        bump_repeat(path),
+    ))
 }
 
 #[cfg(test)]
@@ -685,7 +858,7 @@ mod tests {
     #[test]
     fn the_directive_names_all_three_resolutions() {
         let spans = scan("// set the flag\n", "rust");
-        let text = directive_text("a.rs", &spans, 1);
+        let text = directive_text("a.rs", &spans, &[], 1);
         assert!(text.contains("Fix the code"));
         assert!(text.contains("markdown document"));
         assert!(text.contains("Delete it"));
@@ -698,15 +871,133 @@ mod tests {
     #[test]
     fn a_first_report_carries_no_escalation() {
         let spans = scan("// set the flag\n", "rust");
-        assert!(!directive_text("a.rs", &spans, 1).contains("not acted on"));
+        assert!(!directive_text("a.rs", &spans, &[], 1).contains("not acted on"));
     }
 
     #[test]
     fn a_repeat_report_escalates() {
         let spans = scan("// set the flag\n", "rust");
-        let text = directive_text("a.rs", &spans, 2);
+        let text = directive_text("a.rs", &spans, &[], 2);
         assert!(text.contains("report 2 for this file"));
         assert!(text.contains("not acted on"));
+    }
+
+    fn docs(src: &str) -> Vec<DocSpan> {
+        scan_docs(src, Syntax::CStyle)
+    }
+
+    #[test]
+    fn a_short_doc_on_an_exported_item_is_not_reported() {
+        assert!(docs("/// Adds one.\npub fn f() {}\n").is_empty());
+        assert!(docs("/** Adds one. */\nexport function f() {}\n").is_empty());
+        assert!(docs("/// Adds one.\n/// Twice, even.\npub fn f() {}\n").is_empty());
+    }
+
+    #[test]
+    fn a_one_line_doc_on_a_private_item_is_not_reported() {
+        assert!(docs("/// Adds one.\nfn f() {}\n").is_empty());
+    }
+
+    #[test]
+    fn a_multi_line_doc_on_a_private_item_is_reported() {
+        let found = docs("/// Adds one.\n/// Callers rely on the wrap.\nfn f() {}\n");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].private);
+        assert_eq!(found[0].line, 1);
+    }
+
+    #[test]
+    fn a_long_doc_is_reported_even_on_an_exported_item() {
+        let src = "/// One.\n/// Two.\n/// Three.\n/// Four.\npub fn f() {}\n";
+        let found = docs(src);
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].private);
+        assert_eq!(found[0].lines, 4);
+    }
+
+    #[test]
+    fn a_long_jsdoc_block_is_reported() {
+        let src = "/**\n * Rekicks the dispatcher.\n * Returns how many triggers were issued.\n * One bad batch cannot abort the sweep.\n */\nexport function rekick() {}\n";
+        let found = docs(src);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].lines, 5);
+        assert!(!found[0].private);
+    }
+
+    #[test]
+    fn an_attribute_or_decorator_line_does_not_make_an_item_private() {
+        let src = "/// One.\n/// Two.\n#[derive(Debug)]\npub struct S;\n";
+        assert!(docs(src).is_empty());
+    }
+
+    #[test]
+    fn module_docs_at_the_top_of_a_file_are_reported_when_long() {
+        let src = "//! One.\n//! Two.\n//! Three.\n//! Four.\n\nuse std::fmt;\n";
+        let found = docs(src);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].lines, 4);
+    }
+
+    #[test]
+    fn the_docs_section_names_its_reason_and_its_rule() {
+        let src = "/// One.\n/// Two.\nfn f() {}\n";
+        let text = directive_text("a.rs", &[], &docs(src), 1);
+        assert!(text.contains("<docs file=\"a.rs\">"));
+        assert!(text.contains("private item"));
+        assert!(text.contains("markdown document"));
+        assert!(!text.contains("<comments"));
+    }
+
+    #[test]
+    fn a_long_doc_reports_its_length_as_the_reason() {
+        let src = "/// One.\n/// Two.\n/// Three.\n/// Four.\npub fn f() {}\n";
+        let text = directive_text("a.rs", &[], &docs(src), 1);
+        assert!(text.contains("(4 lines, over 3 lines)"), "{text}");
+    }
+
+    #[test]
+    fn both_sections_appear_together() {
+        let src = "// set the flag\n/// One.\n/// Two.\nfn f() {}\n";
+        let text = directive_text("a.rs", &scan(src, "rust"), &docs(src), 1);
+        assert!(text.contains("<comments"));
+        assert!(text.contains("<docs"));
+    }
+
+    #[test]
+    fn a_file_with_only_long_docs_still_produces_a_report() {
+        let src = "/// One.\n/// Two.\nfn f() {}\n";
+        let dir = std::env::temp_dir().join(format!("jcode-cc-docs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("docs_only.rs");
+        std::fs::write(&path, src).expect("write");
+
+        let report = comment_notice("docs_only.rs", src, &path).expect("a report");
+        assert!(report.contains("<docs"));
+        assert!(!report.contains("<comments"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn the_docs_list_is_capped() {
+        let src: String = (0..15)
+            .map(|i| format!("/// One {i}.\n/// Two.\nfn f{i}() {{}}\n\n"))
+            .collect();
+        let text = directive_text("a.rs", &[], &docs(&src), 1);
+        assert!(text.contains("... 5 more"), "{text}");
+    }
+
+    #[test]
+    fn docs_are_only_scanned_in_c_style_files() {
+        assert!(scan_docs("### One.\n### Two.\ndef f():\n    pass\n", Syntax::Hash).is_empty());
+    }
+
+    #[test]
+    fn an_unterminated_jsdoc_block_does_not_hang_or_overrun() {
+        let found = docs("/**\n * One.\n * Two.\n * Three.\n");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].lines, 4, "the block runs to the end of the file");
+        assert!(!found[0].private, "no item follows an unterminated block");
     }
 
     #[test]
