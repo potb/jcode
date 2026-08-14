@@ -52,6 +52,9 @@ pub struct AuthStatus {
     pub google: AuthState,
     /// Google Gmail has send capability (Full tier)
     pub google_can_send: bool,
+    /// Any OpenAI-compatible profile (Cerebras, Groq, ...) has credentials,
+    /// probed once per snapshot because resolving it reads a file per profile.
+    pub openai_compatible: AuthState,
 }
 
 /// Auth state for Anthropic which has multiple auth methods

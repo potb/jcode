@@ -426,7 +426,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
-            || Self::has_any_openai_compatible_available()
+            || self.openai_compatible == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -1031,6 +1031,13 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
         status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
+    });
+    record_auth_probe_step(&mut timings, "openai_compatible", || {
+        status.openai_compatible = if AuthStatus::has_any_openai_compatible_available() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
