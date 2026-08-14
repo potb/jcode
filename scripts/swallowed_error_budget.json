@@ -1,7 +1,7 @@
 {
-  "total": 3412,
+  "total": 3413,
   "totals_by_pattern": {
-    "dot_ok": 1292,
+    "dot_ok": 1293,
     "let_underscore": 1248,
     "unwrap_or_default": 872
   },
@@ -2552,7 +2552,7 @@
       "unwrap_or_default": 0
     },
     "src/cli/startup.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
