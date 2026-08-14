@@ -184,3 +184,41 @@ fn dynamic_gate_empty_input_returns_empty() {
     let out = dynamic_gate_select(Vec::new(), 5);
     assert!(out.is_empty());
 }
+
+fn decayed_entry(content: &str) -> MemoryEntry {
+    let mut entry = MemoryEntry::new(MemoryCategory::Fact, content);
+    entry.confidence = 0.0;
+    entry.created_at = Utc::now() - chrono::Duration::days(7);
+    entry
+}
+
+#[test]
+fn prune_collects_an_old_forgotten_low_confidence_memory() {
+    let entry = decayed_entry("a one-off observation nobody read again");
+    assert!(should_prune(&entry, Utc::now()));
+}
+
+#[test]
+fn prune_keeps_a_low_confidence_memory_that_is_read_often() {
+    let mut entry = decayed_entry("a standing rule consulted every cycle");
+    entry.access_count = PRUNE_KEEP_ACCESS_COUNT;
+    assert!(!should_prune(&entry, Utc::now()));
+}
+
+#[test]
+fn prune_keeps_a_memory_tagged_never_prune() {
+    let mut entry = decayed_entry("the git identity rule");
+    entry.tags = vec!["Never-Prune".to_string()];
+    assert!(!should_prune(&entry, Utc::now()));
+}
+
+#[test]
+fn prune_spares_recent_and_confident_memories() {
+    let mut recent = decayed_entry("written an hour ago");
+    recent.created_at = Utc::now() - chrono::Duration::hours(1);
+    assert!(!should_prune(&recent, Utc::now()));
+
+    let mut confident = decayed_entry("still trusted");
+    confident.confidence = PRUNE_MIN_CONFIDENCE;
+    assert!(!should_prune(&confident, Utc::now()));
+}

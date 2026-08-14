@@ -1477,8 +1477,6 @@ fn apply_cluster_assignment(
 }
 
 fn prune_low_confidence(manager: &MemoryManager) -> Result<usize> {
-    let min_confidence = 0.15;
-    let min_age_hours = 24;
     let now = Utc::now();
     let mut pruned = 0usize;
 
@@ -1492,10 +1490,7 @@ fn prune_low_confidence(manager: &MemoryManager) -> Result<usize> {
         let ids_to_prune: Vec<String> = graph
             .memories
             .iter()
-            .filter(|(_, entry)| {
-                let age_hours = (now - entry.created_at).num_hours();
-                age_hours >= min_age_hours && entry.confidence < min_confidence
-            })
+            .filter(|(_, entry)| should_prune(entry, now))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1519,13 +1514,49 @@ fn prune_low_confidence(manager: &MemoryManager) -> Result<usize> {
                 "Pruned {} low-confidence {} memories (conf < {}, age >= {}h)",
                 ids_to_prune.len(),
                 scope,
-                min_confidence,
-                min_age_hours
+                PRUNE_MIN_CONFIDENCE,
+                PRUNE_MIN_AGE_HOURS
             ));
         }
     }
 
     Ok(pruned)
+}
+
+/// Confidence below which a memory becomes a garbage-collection candidate.
+const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
+/// Memories younger than this are never collected, however low their confidence.
+const PRUNE_MIN_AGE_HOURS: i64 = 24;
+/// A memory retrieved at least this many times is load-bearing: keep it even
+/// once time decay has driven its confidence to zero.
+const PRUNE_KEEP_ACCESS_COUNT: u32 = 5;
+/// Tag that opts a memory out of garbage collection entirely.
+const PRUNE_EXEMPT_TAG: &str = "never-prune";
+
+/// Decide whether a single memory is eligible for garbage collection.
+///
+/// Confidence decays with age, so a permanent rule that is read often but never
+/// re-written drifts towards zero and would otherwise be collected. Access
+/// count and an explicit opt-out tag protect exactly those entries; everything
+/// else still decays away as intended.
+fn should_prune(entry: &MemoryEntry, now: chrono::DateTime<Utc>) -> bool {
+    if entry.confidence >= PRUNE_MIN_CONFIDENCE {
+        return false;
+    }
+    if (now - entry.created_at).num_hours() < PRUNE_MIN_AGE_HOURS {
+        return false;
+    }
+    if entry.access_count >= PRUNE_KEEP_ACCESS_COUNT {
+        return false;
+    }
+    if entry
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(PRUNE_EXEMPT_TAG))
+    {
+        return false;
+    }
+    true
 }
 
 fn stable_hash(values: &[String]) -> u64 {
