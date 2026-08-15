@@ -1059,3 +1059,72 @@ fn side_panel_mermaid_width_scale_is_gated_above_the_zoom_threshold() {
         "the scale must stay within the mermaid crate's accepted bound"
     );
 }
+
+/// Issue #150 direction (3), acceptance: drives the side panel's real render
+/// entry point and observes the PNG it actually produced, rather than testing
+/// the width-scale helper in isolation. Zooming back out reuses the wider PNG,
+/// since a wider raster satisfies a narrower request.
+#[test]
+fn side_panel_renders_a_sharper_mermaid_png_when_zoomed_in() {
+    with_mermaid_placeholder_mode(|| {
+        let diagram = "```mermaid\nflowchart TD\n    A[Ingest] --> B[Validate]\n    B --> C[Normalize]\n    C --> D[Enrich]\n    D --> E[Store]\n    E --> F[Index]\n    F --> G[Serve]\n    G --> H[Archive]\n```";
+        let page = sample_mermaid_page(diagram);
+        let pane = Rect::new(0, 0, 80, 40);
+
+        let png_for_zoom = |zoom: u8| {
+            clear_side_panel_render_caches();
+            let rendered =
+                render_side_panel_markdown_cached_with_zoom(&page, pane, true, false, zoom);
+            let placement = rendered.image_placements.first().unwrap_or_else(|| {
+                panic!("zoom {zoom}%: the diagram must produce an image placement")
+            });
+            let (_, w, h) = mermaid::get_cached_png(placement.hash)
+                .unwrap_or_else(|| panic!("zoom {zoom}%: placement must have a rasterized PNG"));
+            (w, h)
+        };
+
+        let (unzoomed_w, unzoomed_h) = png_for_zoom(100);
+        let (zoomed_w, zoomed_h) = png_for_zoom(200);
+
+        println!(
+            "side panel {}x{} cells: zoom 100% -> png {unzoomed_w}x{unzoomed_h}, \
+             zoom 200% -> png {zoomed_w}x{zoomed_h}",
+            pane.width, pane.height
+        );
+
+        assert!(
+            zoomed_w > unzoomed_w,
+            "zooming in must rasterize a wider PNG through the real render path \
+             (100% gave {unzoomed_w}, 200% gave {zoomed_w})"
+        );
+
+        // The sharpness claim: more source pixels per displayed cell. Anything
+        // else (a taller PNG at the same width) would not reduce upscaling.
+        let displayed_cells = pane.width as u32;
+        assert!(
+            zoomed_w / displayed_cells > unzoomed_w / displayed_cells,
+            "the zoomed PNG must carry more pixels per displayed cell"
+        );
+
+        // Acceptance boundary: the planner's decision governs the draw path, so
+        // the larger PNG must still land inside the <=200% Kitty fast path.
+        let planned = estimate_side_panel_image_layout_with_font(
+            zoomed_w,
+            zoomed_h,
+            pane.width,
+            pane.height,
+            0,
+            false,
+            Some((8, 16)),
+        );
+        let planned_zoom = match planned.render_mode {
+            SidePanelImageRenderMode::Fit => 100u16,
+            SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => zoom_percent,
+        };
+        assert!(
+            planned_zoom <= 200,
+            "the PNG the side panel really produced must stay inside the Kitty \
+             fast path, got {planned_zoom}%"
+        );
+    });
+}
