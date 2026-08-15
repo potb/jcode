@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use std::path::PathBuf;
 
-use super::paths::{lock_path, state_path};
+use super::paths::lock_path;
+use super::state_file::AmbientStateFile;
 use super::{AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, ScheduledItem};
 use crate::storage;
 
@@ -11,17 +12,17 @@ use crate::storage;
 // ---------------------------------------------------------------------------
 
 impl AmbientState {
+    /// The global slot of `state.json`, migrating a pre-envelope file on read.
     pub fn load() -> Result<Self> {
-        let path = state_path()?;
-        if path.exists() {
-            storage::read_json(&path)
-        } else {
-            Ok(Self::default())
-        }
+        Ok(AmbientStateFile::load()?.global)
     }
 
+    /// Write this state into the global slot, leaving per-project state intact.
+    /// Fails rather than overwriting a `state.json` it could not read.
     pub fn save(&self) -> Result<()> {
-        storage::write_json(&state_path()?, self)
+        let mut file = AmbientStateFile::load()?;
+        file.global = self.clone();
+        file.save()
     }
 
     pub fn record_cycle(&mut self, result: &AmbientCycleResult) {

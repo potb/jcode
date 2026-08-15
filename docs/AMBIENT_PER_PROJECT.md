@@ -44,8 +44,36 @@ and `ScheduledItem::project_key()` falls back to resolving `working_dir` on
 read. That fallback is what keeps items queued by an older build attributable
 without a migration pass over the file.
 
+## Per-project state
+
+Stage 2. `state.json` used to hold one flat `AmbientState`, so a cycle spent on
+one project overwrote the visible history of every other one. It now holds an
+envelope, `AmbientStateFile`:
+
+- `global` — exactly the old shape. Cycles that belong to no project
+  (gardening, memory work) are real, and the daemon's own scheduling status is
+  a single process-wide fact, so both keep living here. `ambient status`, the
+  scheduler and the prompt still read this slot and are unchanged by stage 2.
+- `projects` — a map keyed by the stage 1 project identity, so a project's
+  cycle count, last run and last summary are attributable to it.
+
+`AmbientStateFile::record_cycle(project, result)` updates the project slot when
+there is one, and always updates `global`.
+
+### Migration
+
+The acceptance criterion on #126 says migrate, not discard, so a pre-envelope
+`state.json` is not defaulted away: it parses as a bare object with neither
+`global` nor `projects`, and the whole legacy record is adopted as `global`.
+The live daemon's 145+ cycle count therefore survives the upgrade. Reading
+never rewrites the file; the envelope shape reaches disk on the next save.
+
+`AmbientState::load`/`save` remain the daemon's read and write path and now go
+through the envelope. `save` re-reads the file and replaces only the `global`
+slot, so a component that knows nothing about per-project state cannot destroy
+it.
+
 ## Remaining stages
 
-2. Per-project state, with a global envelope and a real `state.json` migration.
 3. Per-project scheduler and lock (only meaningful once 1 and 2 exist).
 4. Per-project prompt and cycle — the observable behaviour change, last.
