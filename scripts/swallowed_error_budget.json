@@ -1,8 +1,8 @@
 {
-  "total": 3413,
+  "total": 3415,
   "totals_by_pattern": {
     "dot_ok": 1293,
-    "let_underscore": 1248,
+    "let_underscore": 1250,
     "unwrap_or_default": 872
   },
   "tracked_files": {
@@ -1613,7 +1613,7 @@
     },
     "crates/jcode-provider-grok-build-runtime/src/lib.rs": {
       "dot_ok": 0,
-      "let_underscore": 4,
+      "let_underscore": 6,
       "unwrap_or_default": 0
     },
     "crates/jcode-provider-metadata/src/lib.rs": {

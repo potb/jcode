@@ -445,6 +445,7 @@ impl App {
             todo_widget_yields_to_band: !crate::tui::info_widget::todo_widget_visible(),
             todo_widget_mode_off: crate::config::config().display.todo_widget
                 == jcode_config_types::TodoWidgetMode::Off,
+            usage_display_used: crate::config::config().display.usage_display_used(),
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name

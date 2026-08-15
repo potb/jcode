@@ -179,7 +179,23 @@ pub fn sanitize_mcp_name_segment(segment: &str) -> String {
 /// interpolating the raw server name, or they will miss every server whose name
 /// needed sanitizing.
 pub fn mcp_tool_prefix(server_name: &str) -> String {
-    format!("mcp__{}__", sanitize_mcp_name_segment(server_name))
+    format!("mcp__{}__", dispatch_segment(server_name))
+}
+
+/// Sanitize one name segment for dispatch, collapsing `-` to `_` as well.
+///
+/// Providers accept `-`, but several tool dispatchers key on the underscore
+/// form, so a hyphenated server or tool name never reached its handler
+/// (issue #936). Advertised and dispatched names must agree, so both go
+/// through this stricter mapping.
+fn dispatch_segment(segment: &str) -> String {
+    sanitize_mcp_name_segment(segment).replace('-', "_")
+}
+
+/// The provider-safe dispatch name for one MCP tool. Alias of
+/// [`mcp_tool_name`], kept for callers that read better as "dispatch".
+pub fn dispatch_name(server_name: &str, tool_name: &str) -> String {
+    mcp_tool_name(server_name, tool_name)
 }
 
 /// The provider-safe advertised name for one MCP tool.
@@ -190,8 +206,8 @@ pub fn mcp_tool_prefix(server_name: &str) -> String {
 pub fn mcp_tool_name(server_name: &str, tool_name: &str) -> String {
     let mut name = format!(
         "mcp__{}__{}",
-        sanitize_mcp_name_segment(server_name),
-        sanitize_mcp_name_segment(tool_name)
+        dispatch_segment(server_name),
+        dispatch_segment(tool_name)
     );
     if name.len() > MAX_TOOL_NAME_LEN {
         name.truncate(MAX_TOOL_NAME_LEN);
@@ -363,5 +379,24 @@ done
         );
 
         manager.read().await.disconnect_all().await;
+    }
+}
+
+#[cfg(test)]
+mod dispatch_name_tests {
+    use super::dispatch_name;
+
+    /// Issue #936: hyphenated MCP names must dispatch under the underscore
+    /// form the standard dispatcher looks up.
+    #[test]
+    fn hyphenated_mcp_names_are_safe_for_the_standard_dispatcher() {
+        assert_eq!(
+            dispatch_name("context7", "resolve-library-id"),
+            "mcp__context7__resolve_library_id"
+        );
+        assert_eq!(
+            dispatch_name("hyphenated-server", "query-docs"),
+            "mcp__hyphenated_server__query_docs"
+        );
     }
 }
