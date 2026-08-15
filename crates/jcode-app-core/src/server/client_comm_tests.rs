@@ -142,6 +142,7 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            is_detaching: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -300,6 +301,7 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            is_detaching: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));

@@ -1170,6 +1170,12 @@ pub(super) async fn handle_list_sessions(
 
     let mut attached_counts: HashMap<String, usize> = HashMap::new();
     for info in client_connections.read().await.values() {
+        // A connection whose detach has been accepted is no longer an
+        // attachment: this listing is how another client decides a session is
+        // free to attach, so it must not report a surrendered owner (#133).
+        if info.is_detaching {
+            continue;
+        }
         *attached_counts.entry(info.session_id.clone()).or_insert(0) += 1;
     }
 

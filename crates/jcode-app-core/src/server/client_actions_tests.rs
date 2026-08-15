@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    NotifySessionContext, clone_split_session, handle_notify_session, handle_rename_session,
-    handle_resume_all_sessions, handle_set_feature,
+    NotifySessionContext, clone_split_session, handle_list_sessions, handle_notify_session,
+    handle_rename_session, handle_resume_all_sessions, handle_set_feature,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -388,6 +388,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            is_detaching: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -506,6 +507,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            is_detaching: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -805,4 +807,93 @@ async fn resume_all_skips_session_with_completed_turn() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+/// A connection record for `session_id`, optionally mid-detach.
+fn connection_for(client_id: &str, session_id: &str, is_detaching: bool) -> ClientConnectionInfo {
+    ClientConnectionInfo {
+        client_id: client_id.to_string(),
+        session_id: session_id.to_string(),
+        client_instance_id: None,
+        debug_client_id: None,
+        connected_at: Instant::now(),
+        last_seen: Instant::now(),
+        is_processing: false,
+        current_tool_name: None,
+        terminal_env: Vec::new(),
+        is_detaching,
+        disconnect_tx: mpsc::unbounded_channel().0,
+    }
+}
+
+/// Issue #133, the attach/detach race as the *listing* sees it.
+///
+/// A detach is accepted before the connection record disappears: the Ack write
+/// and the loop teardown both happen while the record is still mapped. A
+/// listing served inside that window must already report the session as
+/// unattached, because that count is precisely what another client uses to
+/// decide the session is free — reporting the departing owner as an attachment
+/// makes the session look occupied when it has already been surrendered.
+#[tokio::test]
+async fn list_sessions_does_not_count_a_connection_whose_detach_was_accepted() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let detaching_agent = Arc::new(Mutex::new(Agent::new(provider.clone(), registry.clone())));
+    let attached_agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let detaching_id = detaching_agent.lock().await.session_id().to_string();
+    let attached_id = attached_agent.lock().await.session_id().to_string();
+
+    let sessions = Arc::new(RwLock::new(HashMap::from([
+        (detaching_id.clone(), detaching_agent),
+        (attached_id.clone(), attached_agent),
+    ])));
+    let client_connections = Arc::new(RwLock::new(HashMap::from([
+        (
+            "conn-detaching".to_string(),
+            connection_for("conn-detaching", &detaching_id, true),
+        ),
+        (
+            "conn-attached".to_string(),
+            connection_for("conn-attached", &attached_id, false),
+        ),
+    ])));
+    let swarm_members = Arc::new(RwLock::new(HashMap::<String, SwarmMember>::new()));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_list_sessions(
+        7,
+        &sessions,
+        &swarm_members,
+        &client_connections,
+        &client_event_tx,
+    )
+    .await;
+
+    let listed = match client_event_rx.try_recv() {
+        Ok(ServerEvent::SessionList { id, sessions }) => {
+            assert_eq!(id, 7);
+            sessions
+        }
+        other => panic!("expected a SessionList response, got {other:?}"),
+    };
+
+    let detaching = listed
+        .iter()
+        .find(|entry| entry.session_id == detaching_id)
+        .expect("a session mid-detach must still be listed, or the user cannot find it again");
+    assert_eq!(
+        detaching.attached_clients, 0,
+        "a connection whose detach was accepted must not be counted as an attachment"
+    );
+
+    // The still-attached session in the same listing proves the zero above
+    // describes the detaching connection and not a listing that counts nothing.
+    let attached = listed
+        .iter()
+        .find(|entry| entry.session_id == attached_id)
+        .expect("the ordinary attached session must be listed");
+    assert_eq!(
+        attached.attached_clients, 1,
+        "an ordinary connection must still be counted"
+    );
 }
