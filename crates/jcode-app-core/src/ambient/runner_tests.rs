@@ -192,6 +192,7 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         },
         created_by_session: parent.id.clone(),
         created_at: chrono::Utc::now(),
+        project: None,
         working_dir: parent.working_dir.clone(),
         task_description: Some("Follow up later".to_string()),
         relevant_files: vec!["src/lib.rs".to_string()],

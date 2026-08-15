@@ -185,6 +185,7 @@ impl AmbientManager {
             target: request.target,
             created_by_session: request.created_by_session,
             created_at: Utc::now(),
+            project: super::prompt::resolve_project_key(request.working_dir.as_deref()),
             working_dir: request.working_dir,
             task_description: request.task_description,
             relevant_files: request.relevant_files,

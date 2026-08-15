@@ -133,6 +133,11 @@ pub struct ScheduledItem {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Canonical path of the configured project this item belongs to.
+    ///
+    /// See `docs/AMBIENT_PER_PROJECT.md`; read it via [`Self::project_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +146,16 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+}
+
+impl ScheduledItem {
+    /// The project owning this item, resolving `working_dir` when the stored
+    /// `project` is absent, as it is for items queued by an older build.
+    pub fn project_key(&self) -> Option<String> {
+        self.project
+            .clone()
+            .or_else(|| prompt::resolve_project_key(self.working_dir.as_deref()))
+    }
 }
 
 /// Persistent ambient state
