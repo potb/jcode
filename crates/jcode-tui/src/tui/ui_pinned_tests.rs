@@ -1067,7 +1067,17 @@ fn side_panel_mermaid_width_scale_is_gated_above_the_zoom_threshold() {
 #[test]
 fn side_panel_renders_a_sharper_mermaid_png_when_zoomed_in() {
     with_mermaid_placeholder_mode(|| {
-        let diagram = "```mermaid\nflowchart TD\n    A[Ingest] --> B[Validate]\n    B --> C[Normalize]\n    C --> D[Enrich]\n    D --> E[Store]\n    E --> F[Index]\n    F --> G[Serve]\n    G --> H[Archive]\n```";
+        // The mermaid PNG cache is keyed by diagram content and is shared
+        // on disk across runs and worktrees, so a fixed diagram can be answered
+        // by a stale entry rasterized at an unrelated width. A unique label per
+        // run guarantees this test rasterizes for real.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let diagram = format!(
+            "```mermaid\nflowchart TD\n    A[Ingest {nonce}] --> B[Validate]\n    B --> C[Normalize]\n    C --> D[Enrich]\n    D --> E[Store]\n    E --> F[Index]\n    F --> G[Serve]\n    G --> H[Archive]\n```"
+        );
         let page = sample_mermaid_page(diagram);
         let pane = Rect::new(0, 0, 80, 40);
 

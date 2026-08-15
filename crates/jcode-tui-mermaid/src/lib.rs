@@ -1200,7 +1200,6 @@ static MERMAID_DEBUG: LazyLock<Mutex<MermaidDebugState>> =
 struct PendingDeferredRender {
     register_active: bool,
     terminal_width: Option<u16>,
-    width_scale_percent: u16,
     content: String,
     stream_scope: Option<u64>,
 }

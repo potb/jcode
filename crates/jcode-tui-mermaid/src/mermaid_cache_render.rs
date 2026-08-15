@@ -1061,7 +1061,6 @@ fn render_mermaid_deferred_inner(
                             vacant.insert(PendingDeferredRender {
                                 register_active,
                                 terminal_width,
-                                width_scale_percent,
                                 content: content.to_string(),
                                 stream_scope,
                             });

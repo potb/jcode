@@ -1801,3 +1801,4 @@ fn assert_clear_swarm_plan_reset(app: &App) {
     assert_eq!(app.swarm_plan_version, None);
     assert_eq!(app.swarm_plan_swarm_id, None);
 }
+include!("tests/issue_150_side_panel_zoom_sharpness.rs");
