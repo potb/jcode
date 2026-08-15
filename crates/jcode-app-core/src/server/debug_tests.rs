@@ -152,6 +152,7 @@ mod transcript_routing_tests {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            is_detaching: false,
             disconnect_tx: mpsc::unbounded_channel().0,
         }
     }

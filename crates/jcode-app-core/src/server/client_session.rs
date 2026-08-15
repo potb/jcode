@@ -1245,7 +1245,7 @@ pub(super) async fn handle_resume_session(
             connections
                 .values()
                 .find(|info| {
-                    info.client_id != client_connection_id && info.session_id == session_id
+                    info.client_id != client_connection_id && info.owns_session(&session_id)
                 })
                 .cloned()
         };
@@ -1432,7 +1432,7 @@ pub(super) async fn handle_resume_session(
         let connections = client_connections.read().await;
         connections
             .values()
-            .find(|info| info.client_id != client_connection_id && info.session_id == session_id)
+            .find(|info| info.client_id != client_connection_id && info.owns_session(&session_id))
             .cloned()
     };
 

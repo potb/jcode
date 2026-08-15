@@ -57,7 +57,27 @@ pub(super) struct ClientConnectionInfo {
     /// kitty/DISPLAY/...). Used to route spawn/focus hooks to the client's
     /// terminal instead of the long-lived server's stale startup env (#405).
     pub(super) terminal_env: Vec<(String, String)>,
+    /// Set when a `Detach` request is accepted, which happens before the Ack is
+    /// written and before disconnect cleanup removes this record. In that
+    /// window the connection is leaving but still mapped, so ownership
+    /// questions must ignore it (issue #133).
+    pub(super) is_detaching: bool,
     pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
+}
+
+impl ClientConnectionInfo {
+    /// Whether this connection still owns `session_id` for the purposes of
+    /// attach conflicts, successor checks and attachment counts.
+    ///
+    /// A connection whose detach has been accepted answers `false` from that
+    /// moment, even though its record survives until socket teardown. The
+    /// window is short but real -- the Ack write, the loop break and cleanup
+    /// all sit inside it -- and an attach landing there would otherwise be
+    /// refused as a duplicate live attach by an owner that has already
+    /// surrendered the session (issue #133).
+    pub(super) fn owns_session(&self, session_id: &str) -> bool {
+        !self.is_detaching && self.session_id == session_id
+    }
 }
 
 impl ClientDebugState {

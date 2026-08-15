@@ -52,7 +52,7 @@ async fn session_has_live_successor(
         .read()
         .await
         .values()
-        .any(|info| info.session_id == session_id)
+        .any(|info| info.owns_session(session_id))
 }
 
 #[expect(
@@ -418,6 +418,16 @@ mod tests {
     }
 
     async fn run_cleanup(session_id: &str, client_detached: bool) -> CleanupFixture {
+        run_cleanup_with_extra_connection(session_id, client_detached, None).await
+    }
+
+    /// `extra` is a second connection left in the map for the same session,
+    /// with its `is_detaching` flag as given.
+    async fn run_cleanup_with_extra_connection(
+        session_id: &str,
+        client_detached: bool,
+        extra: Option<bool>,
+    ) -> CleanupFixture {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
         let registry = Registry::new(provider.clone()).await;
         let session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
@@ -444,9 +454,30 @@ mod tests {
                 is_processing: false,
                 current_tool_name: None,
                 terminal_env: Vec::new(),
+                is_detaching: false,
                 disconnect_tx,
             },
         );
+
+        if let Some(extra_is_detaching) = extra {
+            let mut connections = client_connections.write().await;
+            connections.insert(
+                "conn-2".to_string(),
+                ClientConnectionInfo {
+                    client_id: "client-2".to_string(),
+                    session_id: session_id.to_string(),
+                    client_instance_id: Some("inst-2".to_string()),
+                    debug_client_id: None,
+                    connected_at: std::time::Instant::now(),
+                    last_seen: std::time::Instant::now(),
+                    is_processing: false,
+                    current_tool_name: None,
+                    terminal_env: Vec::new(),
+                    is_detaching: extra_is_detaching,
+                    disconnect_tx: tokio::sync::mpsc::unbounded_channel().0,
+                },
+            );
+        }
 
         let shutdown_signals: Arc<RwLock<HashMap<String, jcode_agent_runtime::InterruptSignal>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -544,5 +575,39 @@ mod tests {
             "a non-detach disconnect must keep clearing the interrupt signal"
         );
         assert!(fixture.client_connections.read().await.is_empty());
+    }
+    /// Issue #133, the attach/detach race in its destructive direction.
+    ///
+    /// A detach is accepted before the detaching connection's record leaves the
+    /// map: the Ack write and the request-loop teardown both happen in between. If
+    /// a *different* client's ordinary disconnect is cleaned up inside that window,
+    /// the successor check must not mistake the detaching record for a client that
+    /// is still attached. Getting this wrong strands the session live with nobody
+    /// on it and no detach ever requested for it, which the idle-exit monitor then
+    /// keeps alive because it counts connections rather than sessions.
+    #[tokio::test]
+    async fn a_connection_mid_detach_is_not_a_live_successor() {
+        let fixture =
+            run_cleanup_with_extra_connection("stranded-session", false, Some(true)).await;
+        assert!(
+            !fixture
+                .sessions
+                .read()
+                .await
+                .contains_key("stranded-session"),
+            "a connection whose detach was accepted must not keep the session alive"
+        );
+    }
+
+    /// Positive control for the test above: an ordinary second client in exactly
+    /// the same position *must* still keep the session alive, so the assertion
+    /// there is about the detach flag and not about successor checks in general.
+    #[tokio::test]
+    async fn an_ordinary_second_connection_is_still_a_live_successor() {
+        let fixture = run_cleanup_with_extra_connection("shared-session", false, Some(false)).await;
+        assert!(
+            fixture.sessions.read().await.contains_key("shared-session"),
+            "a genuinely attached second client must keep the live session"
+        );
     }
 }

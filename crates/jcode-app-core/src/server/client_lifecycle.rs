@@ -540,6 +540,7 @@ pub(super) async fn handle_client(
                 is_processing: false,
                 current_tool_name: None,
                 terminal_env: active_terminal_env.clone(),
+                is_detaching: false,
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1075,6 +1076,17 @@ pub(super) async fn handle_client(
                 retry_after_secs: None,
             });
             continue;
+        }
+
+        // An accepted detach surrenders the session here, not at socket
+        // teardown: the Ack write, the loop break and cleanup all follow, and
+        // this connection must not read as the session's owner during them or
+        // an attach racing the detach is refused as a duplicate (issue #133).
+        if let Request::Detach { .. } = request {
+            let mut connections = client_connections.write().await;
+            if let Some(info) = connections.get_mut(&client_connection_id) {
+                info.is_detaching = true;
+            }
         }
 
         // Send ack
