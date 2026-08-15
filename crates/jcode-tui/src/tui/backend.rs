@@ -605,6 +605,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server which sessions it holds live, attached or not. The reply
+    /// is the only way to see a session nobody is attached to.
+    pub async fn list_sessions(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListSessions { id }).await?;
+        Ok(id)
+    }
+
     /// Ask the server to continue every live session that was interrupted and
     /// would auto-resume on a reload. Returns the request id so the client can
     /// correlate the `ResumeAllResult` event.
