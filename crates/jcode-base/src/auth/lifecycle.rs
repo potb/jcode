@@ -874,6 +874,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
+        "grok-build" | "grok_build" => Some("grok-build"),
         _ => None,
     }
 }
@@ -1157,6 +1158,7 @@ pub fn model_switch_request_for_provider_id(
         Some("copilot") => format!("copilot:{}", model),
         Some("gemini") => format!("gemini:{}", model),
         Some("antigravity") => format!("antigravity:{}", model),
+        Some("grok-build") => format!("grok-build:{}", model),
         _ => model.to_string(),
     }
 }
@@ -1367,6 +1369,7 @@ mod tests {
             ("copilot", "copilot", "GitHub Copilot"),
             ("gemini", "gemini", "Google Gemini"),
             ("antigravity", "antigravity", "Antigravity"),
+            ("grok-build", "grok-build", "Grok Build"),
         ] {
             assert_eq!(normalized_auth_provider_id(Some(hint)), Some(normalized));
             assert_eq!(provider_display_label(Some(hint)).as_deref(), Some(label));
@@ -1420,6 +1423,7 @@ mod tests {
             ("copilot", "copilot", "copilot"),
             ("gemini", "gemini", "gemini"),
             ("antigravity", "antigravity", "antigravity"),
+            ("grok-build", "grok-build", "openrouter"),
         ] {
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
@@ -1441,7 +1445,7 @@ mod tests {
             );
             assert_eq!(
                 std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
-                Ok("1")
+                Ok("login")
             );
         }
     }
@@ -1487,6 +1491,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::Antigravity => {
                     Some(("antigravity", "antigravity", "antigravity", "antigravity"))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 _ => None,
             }) else {
@@ -1539,7 +1546,7 @@ mod tests {
             );
             assert_eq!(
                 std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
-                Ok("1")
+                Ok("login")
             );
             let expected_switch = if switch_prefix.is_empty() {
                 "shared-model".to_string()
@@ -1566,6 +1573,7 @@ mod tests {
             "copilot",
             "gemini",
             "antigravity",
+            "grok-build",
         ] {
             assert!(
                 covered.contains(&expected),
@@ -1602,6 +1610,7 @@ mod tests {
             ("copilot", "copilot:shared-model"),
             ("gemini", "gemini:shared-model"),
             ("antigravity", "antigravity:shared-model"),
+            ("grok-build", "grok-build:shared-model"),
             ("cerebras", "cerebras:shared-model"),
         ] {
             assert_eq!(
