@@ -1157,3 +1157,46 @@ pub(super) async fn handle_agent_task(
         }
     }
 }
+
+/// Report every live session and how many clients are attached to each.
+pub(super) async fn handle_list_sessions(
+    id: u64,
+    sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let live_session_ids: Vec<String> = sessions.read().await.keys().cloned().collect();
+
+    let mut attached_counts: HashMap<String, usize> = HashMap::new();
+    for info in client_connections.read().await.values() {
+        *attached_counts.entry(info.session_id.clone()).or_insert(0) += 1;
+    }
+
+    let members = swarm_members.read().await;
+    let mut listed: Vec<crate::protocol::LiveSessionInfo> = live_session_ids
+        .into_iter()
+        .map(|session_id| {
+            let member = members.get(&session_id);
+            crate::protocol::LiveSessionInfo {
+                attached_clients: attached_counts.get(&session_id).copied().unwrap_or(0),
+                friendly_name: member.and_then(|member| member.friendly_name.clone()),
+                working_dir: member.and_then(|member| {
+                    member
+                        .working_dir
+                        .as_ref()
+                        .map(|dir| dir.to_string_lossy().to_string())
+                }),
+                status: member.map(|member| member.status.clone()),
+                session_id,
+            }
+        })
+        .collect();
+    drop(members);
+    listed.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+    let _ = client_event_tx.send(ServerEvent::SessionList {
+        id,
+        sessions: listed,
+    });
+}

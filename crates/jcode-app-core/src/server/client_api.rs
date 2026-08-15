@@ -166,6 +166,17 @@ impl Client {
         }
     }
 
+    /// Ask the server which sessions it holds live, attached or not.
+    pub async fn list_sessions(&mut self) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::ListSessions { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
     /// Send a `GetHistory` request and return its id, so a caller can match the
     /// `History` response rather than assuming it is the next event to arrive.
     pub async fn request_history(&mut self) -> Result<u64> {

@@ -435,6 +435,21 @@ impl PlanGraphStatus {
     }
 }
 
+/// One live session as the server sees it, including detached ones.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveSessionInfo {
+    pub session_id: String,
+    /// Number of clients currently attached. Zero means detached: the session
+    /// is alive on the server with nobody connected to it.
+    pub attached_clients: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 /// Swarm member status for lifecycle updates
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberStatus {
@@ -584,6 +599,7 @@ impl Request {
             Request::ResumeSession { id, .. } => *id,
             Request::Detach { id, .. } => *id,
             Request::ResumeAllSessions { id } => *id,
+            Request::ListSessions { id } => *id,
             Request::NotifySession { id, .. } => *id,
             Request::Transcript { id, .. } => *id,
             Request::InputShell { id, .. } => *id,
