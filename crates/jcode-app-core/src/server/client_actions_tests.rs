@@ -173,6 +173,9 @@ fn clone_split_session_uses_persisted_session_state() {
 
 #[tokio::test]
 async fn enabling_swarm_does_not_auto_elect_coordinator() {
+    // `swarm_id_for_session` honours JCODE_SWARM_ID, and other tests in this
+    // binary set it, so hold the shared env lock while asserting the default.
+    let _env_lock = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
@@ -245,7 +248,8 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .get(session_id)
             .and_then(|member| member.swarm_id.clone())
             .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+        Some("session:session_test_swarm_toggle"),
+        "enabling swarm must scope the swarm to the session, not the working dir"
     );
     assert_eq!(
         swarm_members
