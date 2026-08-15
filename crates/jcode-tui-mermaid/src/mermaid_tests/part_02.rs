@@ -960,3 +960,39 @@ fn extreme_aspect_render_is_capped_by_the_area_budget() {
     // Aspect ratio is still preserved after capping.
     assert!((height / width - 100.0).abs() < 0.01, "aspect drifted: {width}x{height}");
 }
+
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
+#[test]
+fn fallback_retarget_gives_a_tall_diagram_the_full_target_width() {
+    // The legacy svg-retarget backend used the same min() fit that #154
+    // removed from the size-API path, so a tall diagram was still collapsed
+    // to a quarter of the pane on terminals taking this route.
+    let svg = r#"<svg viewBox="0 0 300 900" xmlns="http://www.w3.org/2000/svg"></svg>"#;
+    let out = super::svg::retarget_svg_for_png(svg, 600.0);
+    assert!(out.contains(r#"width="600""#), "expected full target width: {out}");
+    assert!(out.contains(r#"height="1800""#), "height must follow natural aspect: {out}");
+
+    // Positive control: what the old min(target_h/natural_h) fit produced.
+    let old_scale = (600.0f64 / 300.0).min(450.0 / 900.0);
+    assert_eq!((300.0 * old_scale).round(), 150.0);
+}
+
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
+#[test]
+fn fallback_measured_dimensions_match_the_retargeted_svg() {
+    // The measured dimensions feed the zoom planner, so they must describe
+    // the SVG that is actually rasterized, not a differently-fitted one.
+    let svg = r#"<svg viewBox="0 0 300 900" xmlns="http://www.w3.org/2000/svg"></svg>"#;
+    let measured = super::measure_svg_dimensions_from_svg(svg, Some((600.0, 450.0)));
+    assert_eq!(measured.width.round(), 600.0);
+    assert_eq!(measured.height.round(), 1800.0);
+    let out = super::svg::retarget_svg_for_png(svg, 600.0);
+    assert!(out.contains(r#"width="600""#), "{out}");
+    assert!(out.contains(r#"height="1800""#), "{out}");
+}
