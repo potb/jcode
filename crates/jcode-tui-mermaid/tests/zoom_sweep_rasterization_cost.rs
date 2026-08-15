@@ -132,3 +132,52 @@ fn zoom_sweep_rasterization_cost() {
          (got {with_direction_3} of {naive_worst_case})"
     );
 }
+
+/// Issue #150 direction (3), implementation guard: the scoped width scale must
+/// reach rasterization and produce a genuinely larger PNG, and must be inert at
+/// 100% so the unzoomed side panel is a provable negative control.
+#[test]
+#[ignore = "rasterizes real SVGs; run with --ignored alongside the cost probe"]
+fn render_width_scale_percent_widens_the_rasterized_png() {
+    clear_cache().expect("clear_cache");
+    let (unscaled_w, unscaled_h) = render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS);
+
+    clear_cache().expect("clear_cache");
+    let (neutral_w, neutral_h) = jcode_tui_mermaid::with_render_width_scale_percent(100, || {
+        render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS)
+    });
+
+    clear_cache().expect("clear_cache");
+    let (scaled_w, scaled_h) = jcode_tui_mermaid::with_render_width_scale_percent(200, || {
+        render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS)
+    });
+
+    println!(
+        "\n[width scale] backend={} pane={PANE_CELLS} cells: 100%(implicit)={unscaled_w}x{unscaled_h} \
+         100%(explicit)={neutral_w}x{neutral_h} 200%={scaled_w}x{scaled_h}",
+        backend()
+    );
+
+    assert_eq!(
+        (neutral_w, neutral_h),
+        (unscaled_w, unscaled_h),
+        "a 100% scale must be indistinguishable from no scope at all"
+    );
+    assert!(
+        scaled_w > unscaled_w,
+        "a 200% scale must rasterize a wider PNG (got {scaled_w}, unscaled {unscaled_w})"
+    );
+
+    clear_cache().expect("clear_cache");
+    let (restored_w, _) = {
+        jcode_tui_mermaid::with_render_width_scale_percent(200, || {
+            render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS)
+        });
+        clear_cache().expect("clear_cache");
+        render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS)
+    };
+    assert_eq!(
+        restored_w, unscaled_w,
+        "the scope must not leak past its closure (got {restored_w}, unscaled {unscaled_w})"
+    );
+}

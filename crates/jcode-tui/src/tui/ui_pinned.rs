@@ -68,6 +68,19 @@ fn side_panel_mermaid_preferred_aspect_ratio(
     super::diagram_pane::content_area_preferred_aspect_ratio(inner)
 }
 
+/// Zoom below this keeps the unzoomed rasterization width, so the default view
+/// is unaffected. See `docs/issue-150-direction-3-cost-probe.md`.
+const SIDE_PANEL_MERMAID_ZOOM_RESCALE_THRESHOLD_PERCENT: u8 = 150;
+
+/// Rasterization width scale for a side-panel zoom level, in percent.
+fn side_panel_mermaid_width_scale_percent(image_zoom_percent: u8) -> u16 {
+    if image_zoom_percent > SIDE_PANEL_MERMAID_ZOOM_RESCALE_THRESHOLD_PERCENT {
+        (image_zoom_percent as u16).min(mermaid::MAX_RENDER_WIDTH_SCALE_PERCENT)
+    } else {
+        100
+    }
+}
+
 fn side_panel_mermaid_profile_area(inner: Rect, reserve_native_scrollbar: bool) -> Rect {
     if reserve_native_scrollbar && inner.width > 1 {
         Rect {
@@ -153,6 +166,7 @@ struct SidePanelMarkdownKey {
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
+    mermaid_width_scale_percent: u16,
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
 }
@@ -1754,6 +1768,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
         inner.width,
         has_protocol,
         centered,
+        side_panel_mermaid_width_scale_percent(image_zoom_percent),
         mermaid_aspect_ratio,
         mermaid_aspect_bucket,
     );
@@ -1862,6 +1877,7 @@ fn render_side_panel_markdown_lines_cached(
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
+    mermaid_width_scale_percent: u16,
     mermaid_aspect_ratio: Option<f32>,
     mermaid_aspect_bucket: Option<u16>,
 ) -> RenderedSidePanelMarkdown {
@@ -1871,6 +1887,7 @@ fn render_side_panel_markdown_lines_cached(
         inner_width,
         has_protocol,
         centered,
+        mermaid_width_scale_percent,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
         mermaid_aspect_bucket,
     };
@@ -1899,8 +1916,10 @@ fn render_side_panel_markdown_lines_cached(
     // override here would race concurrent renders/tests that read or set it.
     let rendered_lines =
         markdown::with_diagram_mode_scope(crate::config::DiagramDisplayMode::None, || {
-            mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
-                markdown::render_markdown_with_width(&page.content, Some(inner_width as usize))
+            mermaid::with_render_width_scale_percent(mermaid_width_scale_percent, || {
+                mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
+                    markdown::render_markdown_with_width(&page.content, Some(inner_width as usize))
+                })
             })
         });
     let rendered_lines = if has_protocol {

@@ -91,6 +91,7 @@ impl RenderProfile {
 
 thread_local! {
     static RENDER_PROFILE_CONTEXT: Cell<RenderProfile> = Cell::new(RenderProfile::default());
+    static RENDER_WIDTH_SCALE_PERCENT: Cell<u16> = const { Cell::new(100) };
 }
 
 fn current_render_profile() -> RenderProfile {
@@ -103,6 +104,37 @@ pub fn current_preferred_aspect_ratio_bucket() -> Option<u16> {
 
 pub fn preferred_aspect_ratio_bucket(ratio: Option<f32>) -> Option<u16> {
     RenderProfile::from_preferred_aspect_ratio(ratio).preferred_aspect_per_mille
+}
+
+/// Upper bound accepted by [`with_render_width_scale_percent`].
+pub const MAX_RENDER_WIDTH_SCALE_PERCENT: u16 = 400;
+
+pub(crate) fn current_render_width_scale_percent() -> u16 {
+    RENDER_WIDTH_SCALE_PERCENT.with(|scale| scale.get())
+}
+
+struct RenderWidthScaleGuard {
+    previous: u16,
+}
+
+impl Drop for RenderWidthScaleGuard {
+    fn drop(&mut self) {
+        RENDER_WIDTH_SCALE_PERCENT.with(|scale| scale.set(self.previous));
+    }
+}
+
+/// Render `f` with rasterization widths scaled by `percent`, clamped to
+/// `100..=MAX_RENDER_WIDTH_SCALE_PERCENT`. Text layout width is unaffected.
+/// See `docs/issue-150-direction-3-cost-probe.md`.
+pub fn with_render_width_scale_percent<R>(percent: u16, f: impl FnOnce() -> R) -> R {
+    let percent = percent.clamp(100, MAX_RENDER_WIDTH_SCALE_PERCENT);
+    let previous = RENDER_WIDTH_SCALE_PERCENT.with(|scale| {
+        let previous = scale.get();
+        scale.set(percent);
+        previous
+    });
+    let _guard = RenderWidthScaleGuard { previous };
+    f()
 }
 
 struct RenderProfileGuard {
@@ -1168,6 +1200,7 @@ static MERMAID_DEBUG: LazyLock<Mutex<MermaidDebugState>> =
 struct PendingDeferredRender {
     register_active: bool,
     terminal_width: Option<u16>,
+    width_scale_percent: u16,
     content: String,
     stream_scope: Option<u64>,
 }
@@ -1176,6 +1209,7 @@ struct PendingDeferredRender {
 struct DeferredRenderTask {
     content: String,
     terminal_width: Option<u16>,
+    width_scale_percent: u16,
     render_key: (u64, u32, RenderProfile),
 }
 
