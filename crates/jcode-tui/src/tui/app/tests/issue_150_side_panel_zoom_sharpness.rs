@@ -112,3 +112,60 @@ fn pressing_plus_on_the_side_panel_rasterizes_a_sharper_diagram() {
          (100% gave {unzoomed_png_width}px, 200% gave {zoomed_png_width}px)"
     );
 }
+
+// Negative control for the >150% gate, at the same end-user boundary: a
+// modest zoom must NOT change what the terminal receives, so ordinary
+// zooming keeps today's cost and cache behaviour exactly.
+#[test]
+fn pressing_plus_below_the_gate_does_not_change_the_rasterized_diagram() {
+    let _lock = scroll_render_test_lock();
+    struct ResetVideoExportMode;
+    impl Drop for ResetVideoExportMode {
+        fn drop(&mut self) {
+            crate::tui::mermaid::set_video_export_mode(false);
+        }
+    }
+    crate::tui::mermaid::set_video_export_mode(true);
+    let _reset = ResetVideoExportMode;
+
+    let mut app = side_panel_app_with_diagram();
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+
+    assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
+
+    crate::tui::clear_side_panel_render_caches();
+    let unzoomed_png_width = draw_until_diagram_rasterized(&app, &mut terminal, "zoom 100%");
+
+    // Five `+` presses: 100% -> 150%, the boundary itself, still not above it.
+    for _ in 0..5 {
+        app.handle_key(KeyCode::Char('+'), KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(
+        app.side_panel_image_zoom_percent, 150,
+        "five `+` presses must land exactly on the gate boundary"
+    );
+
+    let gated_png_width = draw_until_diagram_rasterized(&app, &mut terminal, "zoom 150%");
+
+    println!(
+        "keystroke-driven negative control: zoom 100% -> widest png \
+         {unzoomed_png_width}px, at the 150% boundary -> {gated_png_width}px"
+    );
+
+    assert_eq!(
+        gated_png_width, unzoomed_png_width,
+        "zoom at or below the gate must not re-rasterize (100% gave \
+         {unzoomed_png_width}px, 150% gave {gated_png_width}px)"
+    );
+
+    // Equality alone would also hold if the gate were ignored and BOTH draws
+    // were scaled up, so pin the unzoomed draw to the width the pane implies.
+    // 47 content cells at an 8px font is 376px, which the renderer clamps to
+    // its 400px floor; anything wider means a scale leaked into the 100% path.
+    assert!(
+        unzoomed_png_width <= 512,
+        "the unzoomed draw must not be scaled at all, got {unzoomed_png_width}px"
+    );
+}
