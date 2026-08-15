@@ -1417,3 +1417,47 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
 }
+
+#[test]
+fn detach_for_the_owned_session_is_allowed() {
+    assert_eq!(
+        detach_rejection_reason("sess-1", "sess-1", Some("inst-a"), Some("inst-a")),
+        None
+    );
+}
+
+#[test]
+fn detach_for_a_different_session_is_refused() {
+    let reason = detach_rejection_reason("sess-2", "sess-1", None, None)
+        .expect("a detach naming another session must be refused");
+    assert!(reason.contains("sess-2"), "unhelpful reason: {reason}");
+    assert!(reason.contains("sess-1"), "unhelpful reason: {reason}");
+}
+
+#[test]
+fn detach_from_a_superseded_client_instance_is_refused() {
+    assert!(
+        detach_rejection_reason(
+            "sess-1",
+            "sess-1",
+            Some("old-instance"),
+            Some("new-instance")
+        )
+        .is_some(),
+        "a client whose session was taken over must not be able to detach it"
+    );
+}
+
+#[test]
+fn detach_without_instance_ids_stays_allowed_for_legacy_clients() {
+    assert_eq!(
+        detach_rejection_reason("sess-1", "sess-1", None, Some("inst-a")),
+        None,
+        "an absent id does not prove a mismatch"
+    );
+    assert_eq!(
+        detach_rejection_reason("sess-1", "sess-1", Some("inst-a"), None),
+        None,
+        "an absent id does not prove a mismatch"
+    );
+}
