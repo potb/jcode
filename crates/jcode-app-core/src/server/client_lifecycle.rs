@@ -1778,6 +1778,12 @@ pub(super) async fn handle_client(
                     "SERVER_DETACH_REQUEST id={} session={} connection={}",
                     id, client_session_id, client_connection_id
                 ));
+                // Tests only: hold the connection inside the detach window so
+                // the ownership rules that apply there can be observed from a
+                // real client. Never set in a real run (issue #133).
+                if let Some(delay) = super::util::detach_window_test_delay() {
+                    tokio::time::sleep(delay).await;
+                }
                 client_detached = true;
                 break;
             }

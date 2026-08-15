@@ -517,6 +517,24 @@ impl ServerIdentity {
     }
 }
 
+/// How long to hold a connection inside the detach window, for tests.
+///
+/// The window between accepting a `Detach` and disconnect cleanup removing the
+/// connection record is microseconds wide and cannot be held open from outside
+/// the process: the `Ack` is a few dozen bytes, so it never blocks even against
+/// a client that has stopped reading. Without a delay here a test can only
+/// observe an ordinary completed detach, which is why the ownership rules that
+/// govern the window were otherwise assertable only at the unit boundary
+/// (issue #133).
+///
+/// Same shape and rationale as `startup_headless_recovery_test_delay`: unset in
+/// every real run, so the production path is unchanged.
+pub(crate) fn detach_window_test_delay() -> Option<std::time::Duration> {
+    let raw = std::env::var("JCODE_TEST_DETACH_WINDOW_HOLD_MS").ok()?;
+    let delay_ms = raw.trim().parse::<u64>().ok()?;
+    (delay_ms > 0).then(|| std::time::Duration::from_millis(delay_ms))
+}
+
 pub(crate) fn startup_headless_recovery_test_delay() -> Option<std::time::Duration> {
     let raw = std::env::var("JCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS").ok()?;
     let delay_ms = raw.trim().parse::<u64>().ok()?;

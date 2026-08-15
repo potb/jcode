@@ -470,3 +470,146 @@ async fn a_quit_session_disappears_from_the_listing() -> Result<()> {
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
+
+/// Acceptance test for the attach/detach race (#133), observed from real
+/// clients over real sockets while the server genuinely sits inside the window.
+///
+/// The window between accepting a `Detach` and disconnect cleanup removing the
+/// connection record is microseconds wide, and it cannot be widened from
+/// outside the process: the `Ack` is a few dozen bytes, so it never blocks even
+/// against a client that has stopped reading. `JCODE_TEST_DETACH_WINDOW_HOLD_MS`
+/// holds it open, the same way `JCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS`
+/// makes the startup recovery race observable.
+///
+/// Inside the window the session must already read as unattached, because
+/// `attached_clients` is exactly what another client uses to decide a session is
+/// free to take. This is the user-visible consequence, asserted through the same
+/// `list_sessions` call the session picker uses.
+#[tokio::test]
+async fn a_session_reads_as_unattached_from_the_moment_its_detach_is_accepted() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _hold = EnvVarGuard::set("JCODE_TEST_DETACH_WINDOW_HOLD_MS", "3000");
+
+    let (socket_path, debug_socket_path, server_handle) = start_inprocess_server("window").await?;
+
+    let result = async {
+        let (mut owner, session_id) = subscribe_new_session(&socket_path).await?;
+        let (mut observer, observer_id) = subscribe_new_session(&socket_path).await?;
+
+        // Baseline through the same public call the assertion uses, so a later
+        // zero means something actually changed.
+        let before = find_listed_session(&mut observer, &session_id)
+            .await?
+            .expect("the attached session must be listed");
+        assert_eq!(
+            before.attached_clients, 1,
+            "a normally attached session must report one attachment"
+        );
+
+        // The server accepts this and then stays inside the window for 3s.
+        owner.detach(&session_id, None).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Precondition: the window really is open right now. Without this the
+        // test could silently degrade into observing a completed detach, which
+        // is how an earlier version of it passed against a broken server.
+        let (_live, connected) = live_session_population(&debug_socket_path).await?;
+        assert_eq!(
+            connected, 2,
+            "expected the detaching connection to still be registered (window open)"
+        );
+
+        let during = find_listed_session(&mut observer, &session_id)
+            .await?
+            .expect("a session mid-detach must stay listed, or the user cannot find it again");
+        assert_eq!(
+            during.attached_clients, 0,
+            "from the moment a detach is accepted the session must report no attachment, \
+             even though the connection record still exists"
+        );
+
+        // Proves the zero describes the detaching connection rather than a
+        // listing that has stopped counting.
+        let observer_entry = find_listed_session(&mut observer, &observer_id)
+            .await?
+            .expect("the observing session must be listed");
+        assert_eq!(
+            observer_entry.attached_clients, 1,
+            "the still-connected observer must not be reported as detached"
+        );
+
+        drop(owner);
+        drop(observer);
+        Ok(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
+/// The destructive half of the same race (#133), at the same acceptance level.
+///
+/// While one connection sits inside its detach window, a *different* client
+/// attaches to that session and then quits normally. Its disconnect cleanup
+/// asks whether any other client is still attached; the detaching connection
+/// must not answer yes. If it does, the session stays live with nobody on it
+/// and no detach ever requested for it, and the idle-exit monitor will not
+/// reclaim it because it counts connections rather than sessions.
+#[tokio::test]
+async fn a_session_is_reclaimed_when_its_only_real_client_quits_mid_detach() -> Result<()> {
+    let _env = setup_test_env()?;
+    let _hold = EnvVarGuard::set("JCODE_TEST_DETACH_WINDOW_HOLD_MS", "5000");
+
+    let (socket_path, debug_socket_path, server_handle) = start_inprocess_server("reclaim").await?;
+
+    let result = async {
+        let (mut owner, session_id) = subscribe_new_session(&socket_path).await?;
+        let (mut observer, _observer_id) = subscribe_new_session(&socket_path).await?;
+
+        owner.detach(&session_id, None).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Precondition: the detaching connection is still registered, so the
+        // cleanup below really does run while the window is open.
+        let (_live, connected) = live_session_population(&debug_socket_path).await?;
+        assert_eq!(
+            connected, 2,
+            "expected the detaching connection to still be registered (window open)"
+        );
+
+        // A second client takes the session, then quits normally. No detach.
+        let mut attacher = server::Client::connect_with_path(socket_path.to_path_buf()).await?;
+        let sub = attacher
+            .subscribe_with_info(None, None, Some(session_id.clone()), false, false)
+            .await?;
+        let _ = collect_until_done_unix(&mut attacher, sub).await?;
+        drop(attacher);
+
+        // The session must disappear: nobody is attached and nobody detached it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if find_listed_session(&mut observer, &session_id)
+                .await?
+                .is_none()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "session {session_id} stayed live after its only real client quit: the \
+                     connection inside its detach window was counted as a live successor"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        drop(owner);
+        drop(observer);
+        Ok(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
