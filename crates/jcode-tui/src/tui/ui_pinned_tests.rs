@@ -986,3 +986,53 @@ fn render_side_panel_linked_file_missing_file_falls_back_to_snapshot_content() {
         text
     );
 }
+
+#[test]
+fn side_panel_plans_the_kitty_fast_path_for_the_png_direction_3_would_render() {
+    let pane_width_cells = 80;
+    let pane_height_cells = 40;
+    let font = Some((8u16, 16u16));
+
+    let today = estimate_side_panel_image_layout_with_font(
+        576,
+        2708,
+        pane_width_cells,
+        pane_height_cells,
+        0,
+        false,
+        font,
+    );
+    let with_direction_3 = estimate_side_panel_image_layout_with_font(
+        959,
+        4506,
+        pane_width_cells,
+        pane_height_cells,
+        0,
+        false,
+        font,
+    );
+
+    let planned_zoom = |layout: SidePanelImageLayout| match layout.render_mode {
+        SidePanelImageRenderMode::Fit => 100u16,
+        SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => zoom_percent,
+    };
+
+    let today_zoom = planned_zoom(today);
+    let direction_3_zoom = planned_zoom(with_direction_3);
+
+    println!(
+        "pane {pane_width_cells}x{pane_height_cells} cells: today png 576x2708 -> {today_zoom}%, \
+         direction(3) png 959x4506 -> {direction_3_zoom}%"
+    );
+
+    assert!(
+        direction_3_zoom <= 200,
+        "the larger PNG direction (3) renders must still plan inside the <=200% Kitty fast path, \
+         got {direction_3_zoom}%"
+    );
+    assert!(
+        direction_3_zoom <= today_zoom,
+        "a higher-resolution PNG must not require MORE upscaling (today {today_zoom}%, \
+         direction(3) {direction_3_zoom}%)"
+    );
+}
