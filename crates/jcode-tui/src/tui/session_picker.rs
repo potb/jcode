@@ -157,7 +157,7 @@ const SESSION_PAGE_STEP_COUNT: usize = 3;
 
 /// How often the Active view re-snapshots live presence (which sessions are
 /// still working vs ready) while it is on screen.
-const LIVE_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const LIVE_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Interactive session picker
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +286,9 @@ pub struct SessionPicker {
     /// membership. Refreshed on load/reseed and periodically while the Active
     /// view is on screen.
     live_presence: std::collections::HashMap<String, crate::session::SessionPresence>,
+    /// Sessions the server reports as live with no client attached. These have
+    /// no local process, so `live_presence` structurally cannot see them.
+    detached_sessions: std::collections::HashSet<String>,
     /// When `live_presence` was last snapshotted (throttles periodic refresh).
     live_presence_refreshed_at: Option<std::time::Instant>,
     /// ID of the session the picker was opened from, labeled "current" in the
@@ -343,6 +346,7 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            detached_sessions: std::collections::HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -388,6 +392,7 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            detached_sessions: std::collections::HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -465,6 +470,7 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            detached_sessions: std::collections::HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -561,9 +567,28 @@ impl SessionPicker {
         changed
     }
 
-    /// Whether the session has a live process right now.
+    /// Whether the session has a live process right now, or is held live on a
+    /// server with no client attached (detached).
     pub(super) fn session_is_live(&self, session: &SessionInfo) -> bool {
-        self.live_presence.contains_key(&session.id)
+        self.live_presence.contains_key(&session.id) || self.session_is_detached(session)
+    }
+
+    /// Whether a server holds this session live with no client attached.
+    pub(super) fn session_is_detached(&self, session: &SessionInfo) -> bool {
+        !self.live_presence.contains_key(&session.id)
+            && self.detached_sessions.contains(&session.id)
+    }
+
+    /// Record which sessions the server reports as live-but-unattached, and
+    /// rebuild so the Active view reflects them. Returns true when the set
+    /// changed, so callers can redraw.
+    pub fn set_detached_sessions(&mut self, detached: std::collections::HashSet<String>) -> bool {
+        if self.detached_sessions == detached {
+            return false;
+        }
+        self.detached_sessions = detached;
+        self.rebuild_items();
+        true
     }
 
     fn selected_live_claude_target(&self) -> Option<ResumeTarget> {

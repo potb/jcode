@@ -2506,3 +2506,104 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
         "no search means no highlight color in preview"
     );
 }
+
+/// A detached session is alive on the server with no client process, so the
+/// active-PID snapshot cannot see it. Once the server reports it, the Active
+/// view must list it and label it, or a user who detached has no way back.
+#[test]
+fn detached_sessions_appear_in_the_active_view() {
+    let attached = make_session("session_attached", "alpha", false, SessionStatus::Active);
+    let detached = make_session("session_detached", "beta", false, SessionStatus::Closed);
+    let gone = make_session("session_gone", "gamma", false, SessionStatus::Closed);
+
+    let mut picker = SessionPicker::new(vec![attached, detached, gone]);
+    picker.activate_active_filter();
+    picker.set_live_presence_for_test(vec![live_presence("session_attached", false)]);
+
+    let before: Vec<&str> = picker
+        .visible_session_iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    assert_eq!(
+        before,
+        vec!["session_attached"],
+        "without server presence only the local process is visible"
+    );
+
+    let changed = picker.set_detached_sessions(
+        ["session_detached".to_string()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+    );
+    assert!(changed, "a new detached set must report a change");
+
+    let mut after: Vec<&str> = picker
+        .visible_session_iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    after.sort_unstable();
+    assert_eq!(
+        after,
+        vec!["session_attached", "session_detached"],
+        "the detached session must become visible, and session_gone must not"
+    );
+
+    let detached_row = picker
+        .visible_session_iter()
+        .find(|session| session.id == "session_detached")
+        .cloned()
+        .expect("detached row visible");
+    let attached_row = picker
+        .visible_session_iter()
+        .find(|session| session.id == "session_attached")
+        .cloned()
+        .expect("attached row visible");
+    assert!(picker.session_is_detached(&detached_row));
+    assert!(
+        !picker.session_is_detached(&attached_row),
+        "a session with a local process must not be labelled detached"
+    );
+
+    let detached_text = picker
+        .render_session_item_lines(&detached_row, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        detached_text.contains("detached"),
+        "the row must say it is detached, got: {detached_text}"
+    );
+
+    let attached_text = picker
+        .render_session_item_lines(&attached_row, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !attached_text.contains("detached"),
+        "an attached session must not be labelled detached, got: {attached_text}"
+    );
+}
+
+/// Re-applying the same set must not churn: the picker rebuilds its item list
+/// on change, and the tick loop calls this repeatedly while the picker is open.
+#[test]
+fn repeating_the_same_detached_set_reports_no_change() {
+    let session = make_session("session_detached", "beta", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.activate_active_filter();
+
+    let detached: std::collections::HashSet<String> =
+        ["session_detached".to_string()].into_iter().collect();
+    assert!(picker.set_detached_sessions(detached.clone()));
+    assert!(
+        !picker.set_detached_sessions(detached),
+        "an unchanged set must not report a change or trigger a rebuild"
+    );
+    assert!(
+        picker.set_detached_sessions(std::collections::HashSet::new()),
+        "clearing the set is a change: the session reattached or ended"
+    );
+}

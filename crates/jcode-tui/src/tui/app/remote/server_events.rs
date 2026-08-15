@@ -2834,6 +2834,8 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::SessionList { sessions, .. } => app.apply_server_session_presence(&sessions),
+
         ServerEvent::ResumeAllResult {
             resumed, message, ..
         } => {
