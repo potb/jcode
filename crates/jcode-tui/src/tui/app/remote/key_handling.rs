@@ -31,6 +31,35 @@ pub(in crate::tui::app) async fn send_interleave_now(
     }
 }
 
+pub(in crate::tui::app) async fn handle_remote_detach_command(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) {
+    let Some(session_id) = app.remote_session_id.clone() else {
+        app.push_display_message(DisplayMessage::error(
+            "Cannot detach: this client is not attached to a server session yet.".to_string(),
+        ));
+        return;
+    };
+
+    let request_id = match remote.detach(&session_id).await {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to detach: {}",
+                error
+            )));
+            return;
+        }
+    };
+
+    // Quitting before the server answers would close the socket while the
+    // request is still in flight, and the server would classify the loss as an
+    // ordinary disconnect and end the session -- the opposite of detaching.
+    app.pending_detach_request = Some(request_id);
+    app.set_status_notice("Detaching...");
+}
+
 pub(in crate::tui::app) async fn handle_remote_update_command(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -1048,6 +1077,11 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/update" {
                     handle_remote_update_command(app, remote).await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/detach" {
+                    handle_remote_detach_command(app, remote).await;
                     return Ok(());
                 }
 

@@ -1249,6 +1249,10 @@ pub struct App {
     tool_output_scan_index: usize,
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
+    /// Request id of an in-flight `/detach`. The client must not quit until the
+    /// server Acks it, or the socket closes while the request is still in
+    /// flight and the session is ended instead of detached.
+    pending_detach_request: Option<u64>,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,
