@@ -60,13 +60,38 @@ pub(super) fn configured_cache_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    if cfg!(test) {
+    if running_under_test_harness() {
         return std::env::temp_dir().join(format!("jcode-mermaid-test-{}", std::process::id()));
     }
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("jcode")
         .join("mermaid")
+}
+
+/// Whether this process is a `cargo test` binary.
+///
+/// `cfg!(test)` is compiled into this crate and is false when a *dependent*
+/// crate's tests call in, so it cannot protect the cache on its own. Cargo
+/// places test executables under `target/<profile>/deps/` (or a build-script
+/// `out/` dir); the shipped binary never lives there.
+fn running_under_test_harness() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    path_is_test_binary(&exe)
+}
+
+fn path_is_test_binary(exe: &Path) -> bool {
+    let mut saw_target = false;
+    for component in exe.iter() {
+        if component == "target" {
+            saw_target = true;
+        } else if saw_target && (component == "deps" || component == "build") {
+            return true;
+        }
+    }
+    false
 }
 
 impl MermaidCache {
@@ -1504,5 +1529,37 @@ mod width_selection_tests {
         assert_eq!(cache.width_miss_floor.get(&HASH), Some(&300));
 
         let _ = fs::remove_dir_all(&cache.cache_dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_dir_guard_tests {
+    use super::path_is_test_binary;
+    use std::path::Path;
+
+    #[test]
+    fn test_binaries_are_detected_and_shipped_binaries_are_not() {
+        for shipped in [
+            "/usr/local/bin/jcode",
+            "/home/user/.cargo/bin/jcode",
+            "/home/user/jcode/target/selfdev/jcode",
+            "/home/user/jcode/target/release/jcode",
+        ] {
+            assert!(
+                !path_is_test_binary(Path::new(shipped)),
+                "{shipped} is a shipped binary and must use the real cache dir"
+            );
+        }
+
+        for harness in [
+            "/w/target/debug/deps/jcode_tui-1a2b3c",
+            "/w/target/selfdev/deps/jcode_tui_mermaid-9f8e",
+            "/w/target/debug/build/jcode-tui-markdown/abc/out/jcode_tui_markdown-abc",
+        ] {
+            assert!(
+                path_is_test_binary(Path::new(harness)),
+                "{harness} is a cargo test binary and must be sandboxed"
+            );
+        }
     }
 }
