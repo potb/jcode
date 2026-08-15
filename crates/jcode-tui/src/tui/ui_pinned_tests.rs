@@ -1036,3 +1036,26 @@ fn side_panel_plans_the_kitty_fast_path_for_the_png_direction_3_would_render() {
          direction(3) {direction_3_zoom}%)"
     );
 }
+
+#[test]
+fn side_panel_mermaid_width_scale_is_gated_above_the_zoom_threshold() {
+    for zoom in [100u8, 120, 150] {
+        assert_eq!(
+            super::side_panel_mermaid_width_scale_percent(zoom),
+            100,
+            "zoom {zoom}% is at or below the threshold and must not change rasterization width"
+        );
+    }
+    for zoom in [151u8, 200, 250] {
+        assert_eq!(
+            super::side_panel_mermaid_width_scale_percent(zoom),
+            zoom as u16,
+            "zoom {zoom}% is above the threshold and must scale rasterization width"
+        );
+    }
+    assert_eq!(
+        super::side_panel_mermaid_width_scale_percent(u8::MAX),
+        mermaid::MAX_RENDER_WIDTH_SCALE_PERCENT.min(u8::MAX as u16),
+        "the scale must stay within the mermaid crate's accepted bound"
+    );
+}

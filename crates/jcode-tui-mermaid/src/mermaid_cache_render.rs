@@ -785,13 +785,27 @@ pub(super) fn calculate_render_size(
     edge_count: usize,
     terminal_width: Option<u16>,
 ) -> (f64, f64) {
-    let (width, height) = svg::calculate_render_size(node_count, edge_count, terminal_width);
+    let (width, height) = svg::calculate_render_size(
+        node_count,
+        edge_count,
+        scaled_terminal_width(terminal_width),
+    );
     if let Some(aspect) = current_render_profile().preferred_aspect_ratio() {
         let profile_height = (width / aspect as f64).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
         (width, profile_height)
     } else {
         (width, height)
     }
+}
+
+/// Widen the requested cell width by the scope's zoom scale, saturating at
+/// `u16::MAX`; `svg::calculate_render_size` clamps the pixel result.
+fn scaled_terminal_width(terminal_width: Option<u16>) -> Option<u16> {
+    let scale = crate::current_render_width_scale_percent();
+    terminal_width.map(|width| {
+        let scaled = (width as u32).saturating_mul(scale as u32) / 100;
+        scaled.min(u16::MAX as u32) as u16
+    })
 }
 
 #[cfg(feature = "renderer")]
@@ -897,8 +911,10 @@ fn deferred_render_worker(rx: mpsc::Receiver<DeferredRenderTask>) {
         }
 
         let profile = task.render_key.2;
-        let _ = with_preferred_aspect_ratio(profile.preferred_aspect_ratio(), || {
-            render_mermaid_sized_internal(&task.content, task.terminal_width, register_active)
+        let _ = with_render_width_scale_percent(task.width_scale_percent, || {
+            with_preferred_aspect_ratio(profile.preferred_aspect_ratio(), || {
+                render_mermaid_sized_internal(&task.content, task.terminal_width, register_active)
+            })
         });
 
         if let Ok(mut pending) = PENDING_RENDER_REQUESTS.lock() {
@@ -962,6 +978,7 @@ fn render_mermaid_deferred_inner(
     let (target_width, _) = calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
     let render_profile = current_render_profile();
+    let width_scale_percent = crate::current_render_width_scale_percent();
 
     if let Some(cached) =
         get_cached_diagram_for_profile(hash, Some(target_width_u32), render_profile)
@@ -1044,6 +1061,7 @@ fn render_mermaid_deferred_inner(
                             vacant.insert(PendingDeferredRender {
                                 register_active,
                                 terminal_width,
+                                width_scale_percent,
                                 content: content.to_string(),
                                 stream_scope,
                             });
@@ -1068,6 +1086,7 @@ fn render_mermaid_deferred_inner(
         let task = DeferredRenderTask {
             content: content.to_string(),
             terminal_width,
+            width_scale_percent,
             render_key,
         };
         if deferred_render_sender().send(task).is_err() {

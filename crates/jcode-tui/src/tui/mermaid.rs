@@ -1,3 +1,4 @@
+pub use jcode_tui_mermaid::MAX_RENDER_WIDTH_SCALE_PERCENT;
 pub use jcode_tui_mermaid::{
     DiagramBlock, DiagramCacheKey, DiagramId, DiagramInfo, DiagramOrigin, DiagramRenderProfile,
     DiagramRenderRequest, ImageStateInfo, InlineFitReadiness, MermaidCacheEntry, MermaidContent,
@@ -30,7 +31,8 @@ pub use jcode_tui_mermaid::{
     set_video_export_mode, snapshot_active_diagrams, take_terminal_image_cleanup_payload,
     text_image_fallback_note_line, transcript_preferred_aspect_ratio,
     transcript_preferred_aspect_ratio_with_font, uses_text_image_fallback,
-    with_image_protocol_override, with_preferred_aspect_ratio, write_video_export_marker,
+    with_image_protocol_override, with_preferred_aspect_ratio, with_render_width_scale_percent,
+    write_video_export_marker,
 };
 pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
 
