@@ -10,6 +10,17 @@ async fn start_inprocess_server(
     std::path::PathBuf,
     tokio::task::JoinHandle<Result<()>>,
 )> {
+    start_inprocess_server_with_provider(label, Arc::new(MockProvider::new())).await
+}
+
+async fn start_inprocess_server_with_provider(
+    label: &str,
+    provider: Arc<dyn Provider>,
+) -> Result<(
+    std::path::PathBuf,
+    std::path::PathBuf,
+    tokio::task::JoinHandle<Result<()>>,
+)> {
     let runtime_dir = short_runtime_dir(format!(
         "jcode-detach-{label}-{}",
         std::time::SystemTime::now()
@@ -21,7 +32,6 @@ async fn start_inprocess_server(
     let socket_path = runtime_dir.join("jcode.sock");
     let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let server_instance =
         server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
     let server_handle = tokio::spawn(async move { server_instance.run().await });
@@ -90,6 +100,23 @@ async fn wait_for_population(
     Ok(last)
 }
 
+/// Waits for the `Ack` matching `request_id`; an `Error` for it is a rejection.
+async fn wait_for_ack(client: &mut server::Client, request_id: u64) -> Result<bool> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), client.read_event()).await {
+            Ok(Ok(ServerEvent::Ack { id })) if id == request_id => return Ok(true),
+            Ok(Ok(ServerEvent::Error { id, message, .. })) if id == request_id => {
+                anyhow::bail!("request {request_id} rejected: {message}")
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) => return Ok(false),
+            Err(_) => continue,
+        }
+    }
+    Ok(false)
+}
+
 /// The behaviour the feature exists for: detach, disconnect, session stays live.
 /// `dropping_the_socket_ends_the_session` is the same flow without the request.
 #[tokio::test]
@@ -107,23 +134,10 @@ async fn detach_then_disconnect_leaves_the_session_live_on_the_server() -> Resul
         );
 
         let ack_id = client.detach(&session_id, None).await?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut acked = false;
-        while Instant::now() < deadline {
-            match timeout(Duration::from_millis(500), client.read_event()).await {
-                Ok(Ok(ServerEvent::Ack { id })) if id == ack_id => {
-                    acked = true;
-                    break;
-                }
-                Ok(Ok(ServerEvent::Error { id, message, .. })) if id == ack_id => {
-                    anyhow::bail!("detach rejected: {message}")
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) => break,
-                Err(_) => continue,
-            }
-        }
-        assert!(acked, "server never acknowledged the detach request");
+        assert!(
+            wait_for_ack(&mut client, ack_id).await?,
+            "server never acknowledged the detach request"
+        );
 
         drop(client);
 
@@ -207,6 +221,130 @@ async fn detach_for_another_session_is_rejected_and_keeps_the_client_attached() 
             (live, connected),
             (1, 1),
             "a rejected detach must leave the client attached"
+        );
+        Ok(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
+/// Requests the transcript and returns the `History` matching that request id.
+/// Reading the next event is not enough: unrelated events such as `SwarmStatus`
+/// arrive interleaved on the same socket.
+async fn read_history(client: &mut server::Client) -> Result<Vec<jcode::protocol::HistoryMessage>> {
+    let id = client.request_history().await?;
+    let events = collect_until_history_unix(client, id).await?;
+    for event in events {
+        if let ServerEvent::History {
+            id: history_id,
+            messages,
+            ..
+        } = event
+            && history_id == id
+        {
+            return Ok(messages);
+        }
+    }
+    anyhow::bail!("no History event matching request {id}")
+}
+
+/// Send `content`, wait for the turn to finish, and return the request id.
+async fn complete_a_turn(client: &mut server::Client, content: &str) -> Result<u64> {
+    let id = client.send_message(content).await?;
+    let _ = collect_until_done_unix(client, id).await?;
+    Ok(id)
+}
+
+/// Attach to an existing session by id and return its transcript.
+async fn attach_and_read_history(
+    socket_path: &std::path::Path,
+    session_id: &str,
+) -> Result<(server::Client, Vec<jcode::protocol::HistoryMessage>)> {
+    let mut client = server::Client::connect_with_path(socket_path.to_path_buf()).await?;
+    let sub = client
+        .subscribe_with_info(None, None, Some(session_id.to_string()), false, false)
+        .await?;
+    let _ = collect_until_done_unix(&mut client, sub).await?;
+    let messages = read_history(&mut client).await?;
+    Ok((client, messages))
+}
+
+/// The whole point of the feature, end to end: hold a conversation, detach,
+/// drop the connection, then come back and attach to the same session by id
+/// and find the conversation still there. This is the user-visible outcome the
+/// three earlier tests only approximate by counting live sessions.
+#[tokio::test]
+async fn a_detached_session_can_be_attached_again_with_its_conversation() -> Result<()> {
+    let _env = setup_test_env()?;
+
+    let provider = MockProvider::new();
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("the sky is blue".to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+    ]);
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("still here".to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+    ]);
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+
+    let (socket_path, debug_socket_path, server_handle) =
+        start_inprocess_server_with_provider("roundtrip", provider).await?;
+
+    let result = async {
+        let (mut client, session_id) = subscribe_new_session(&socket_path).await?;
+        complete_a_turn(&mut client, "why is the sky blue").await?;
+
+        let ack_id = client.detach(&session_id, None).await?;
+        assert!(
+            wait_for_ack(&mut client, ack_id).await?,
+            "server never acknowledged the detach"
+        );
+        drop(client);
+
+        // The discriminator between detaching and merely quitting: the session
+        // is still LIVE on the server with no attached client. Without it the
+        // reattach below would silently pass by rebuilding from the persisted
+        // session file, which happens for an ordinary quit too.
+        let (live_detached, connected_detached) =
+            wait_for_population(&debug_socket_path, 1, 0).await?;
+        assert_eq!(
+            (live_detached, connected_detached),
+            (1, 0),
+            "after detaching, the session must still be live with no attached client"
+        );
+
+        // Coming back: a brand new connection, exactly as a second `jcode`
+        // invocation would make, attaching by session id.
+        let (mut reattached, messages) = attach_and_read_history(&socket_path, &session_id).await?;
+
+        let transcript = messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            transcript.contains("why is the sky blue"),
+            "the user's question survived the detach; got: {transcript}"
+        );
+        assert!(
+            transcript.contains("the sky is blue"),
+            "the assistant's reply survived the detach; got: {transcript}"
+        );
+
+        // And the reattached client owns a working session, not a museum piece.
+        complete_a_turn(&mut reattached, "are you still there").await?;
+        let (live, connected) = wait_for_population(&debug_socket_path, 1, 1).await?;
+        assert_eq!(
+            (live, connected),
+            (1, 1),
+            "the reattached client must be a normal attached owner"
         );
         Ok(())
     }
