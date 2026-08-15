@@ -697,6 +697,21 @@ pub(crate) fn priority_rank(priority: &[String], dir: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// The configured project a working directory belongs to, as its canonical
+/// configured path, or `None` when it belongs to no configured project.
+///
+/// See `docs/AMBIENT_PER_PROJECT.md` for why identity is resolved centrally.
+pub fn resolve_project_key(working_dir: Option<&str>) -> Option<String> {
+    let dir = expand_project_path(working_dir?.trim());
+    if dir.is_empty() {
+        return None;
+    }
+    configured_projects()
+        .into_iter()
+        .find(|project| paths_match(&dir, &project.path))
+        .map(|project| project.path)
+}
+
 /// Build the dynamic system prompt for an ambient cycle.
 ///
 /// Populates the template from AMBIENT_MODE.md with real data from the
