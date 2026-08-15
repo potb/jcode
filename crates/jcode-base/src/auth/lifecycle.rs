@@ -807,9 +807,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
 
 pub fn normalized_auth_provider_id(provider_hint: Option<&str>) -> Option<&'static str> {
     let provider = provider_hint?.trim();
-    if provider.eq_ignore_ascii_case("azure")
-        || provider.eq_ignore_ascii_case("azure-openai")
-        || provider.eq_ignore_ascii_case("azure openai")
+    if provider.eq_ignore_ascii_case("azure openai")
+        || crate::provider_catalog::resolve_login_provider(provider)
+            .is_some_and(|descriptor| descriptor.id == "azure")
     {
         Some("azure-openai")
     } else if let Some(profile) =
@@ -874,7 +874,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
-        "grok-build" | "grok_build" => Some("grok-build"),
+        "grok-build" => Some("grok-build"),
         _ => None,
     }
 }
@@ -1374,6 +1374,49 @@ mod tests {
             assert_eq!(normalized_auth_provider_id(Some(hint)), Some(normalized));
             assert_eq!(provider_display_label(Some(hint)).as_deref(), Some(label));
         }
+    }
+
+    /// `normalized_auth_provider_id` resolves through the provider catalog
+    /// before reaching `normalized_login_provider_id`, so a spelling that no
+    /// descriptor lists as an alias can never reach the match. Alias arms are
+    /// only reachable when the catalog also carries the alias.
+    #[test]
+    fn login_normalization_alias_arms_are_reachable_through_the_catalog() {
+        for (alias, canonical) in [
+            ("anthropic", "claude"),
+            ("aws_bedrock", "bedrock"),
+            ("subscription", "jcode"),
+            ("azure_openai", "azure-openai"),
+            ("aoai", "azure-openai"),
+        ] {
+            assert_eq!(
+                normalized_auth_provider_id(Some(alias)),
+                Some(canonical),
+                "`{alias}` is a catalog alias, so its normalization arm must be reachable"
+            );
+        }
+
+        for provider in crate::provider_catalog::login_providers() {
+            let Some(canonical) = normalized_auth_provider_id(Some(provider.id)) else {
+                continue;
+            };
+            for alias in provider.aliases {
+                assert_eq!(
+                    normalized_auth_provider_id(Some(alias)),
+                    Some(canonical),
+                    "{} alias `{}` must normalize like its descriptor id",
+                    provider.id,
+                    alias
+                );
+            }
+        }
+
+        assert_eq!(
+            normalized_auth_provider_id(Some("grok_build")),
+            None,
+            "`grok_build` is not a catalog alias of grok-build; an arm matching it \
+             would be unreachable dead code rather than a working spelling"
+        );
     }
 
     #[test]
