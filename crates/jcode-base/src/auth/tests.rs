@@ -1108,7 +1108,6 @@ fn openai_compatible_credentials_make_any_provider_available() {
     AuthStatus::invalidate_cache();
 }
 
-
 #[test]
 fn has_any_available_reads_the_snapshot_without_touching_disk() {
     let _lock = crate::storage::lock_test_env();
