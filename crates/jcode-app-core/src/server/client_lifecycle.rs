@@ -1770,6 +1770,17 @@ pub(super) async fn handle_client(
                 break;
             }
 
+            Request::ListSessions { id } => {
+                super::client_actions::handle_list_sessions(
+                    id,
+                    &sessions,
+                    &swarm_members,
+                    &client_connections,
+                    &client_event_tx,
+                )
+                .await;
+            }
+
             Request::ResumeAllSessions { id } => {
                 super::client_actions::handle_resume_all_sessions(
                     id,

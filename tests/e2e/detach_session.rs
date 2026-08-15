@@ -353,3 +353,120 @@ async fn a_detached_session_can_be_attached_again_with_its_conversation() -> Res
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
+
+/// Ask the server for its live sessions and return the entry for `session_id`.
+async fn find_listed_session(
+    client: &mut server::Client,
+    session_id: &str,
+) -> Result<Option<jcode::protocol::LiveSessionInfo>> {
+    let id = client.list_sessions().await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), client.read_event()).await {
+            Ok(Ok(ServerEvent::SessionList {
+                id: response_id,
+                sessions,
+            })) if response_id == id => {
+                return Ok(sessions
+                    .into_iter()
+                    .find(|session| session.session_id == session_id));
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => continue,
+        }
+    }
+    anyhow::bail!("timed out waiting for session_list response {id}")
+}
+
+/// Discovery: a detached session has no client process, so no local view can
+/// find it. The server must be able to report it, or a user who detaches has
+/// no way back other than already knowing the session id.
+#[tokio::test]
+async fn a_detached_session_is_discoverable_from_another_client() -> Result<()> {
+    let _env = setup_test_env()?;
+    let (socket_path, debug_socket_path, server_handle) = start_inprocess_server("listing").await?;
+
+    let result = async {
+        let (mut owner, detached_id) = subscribe_new_session(&socket_path).await?;
+
+        // A second, unrelated client: this is the one doing the looking, exactly
+        // as a picker in another window would.
+        let (mut observer, observer_id) = subscribe_new_session(&socket_path).await?;
+
+        let before = find_listed_session(&mut observer, &detached_id)
+            .await?
+            .expect("the attached session must be listed");
+        assert_eq!(
+            before.attached_clients, 1,
+            "while its owner is connected the session must report one attachment"
+        );
+
+        let ack_id = owner.detach(&detached_id, None).await?;
+        assert!(
+            wait_for_ack(&mut owner, ack_id).await?,
+            "server never acknowledged the detach"
+        );
+        drop(owner);
+        wait_for_population(&debug_socket_path, 2, 1).await?;
+
+        let after = find_listed_session(&mut observer, &detached_id)
+            .await?
+            .expect("a detached session must still be discoverable");
+        assert_eq!(
+            after.attached_clients, 0,
+            "a detached session must report zero attachments, which is what marks it detached"
+        );
+
+        // The observer's own session must still read as attached, so the zero
+        // above describes the detached session rather than the whole listing.
+        let observer_entry = find_listed_session(&mut observer, &observer_id)
+            .await?
+            .expect("the observing session must be listed");
+        assert_eq!(
+            observer_entry.attached_clients, 1,
+            "the still-connected observer must not be reported as detached"
+        );
+        Ok(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
+/// Negative control: a session ended by an ordinary disconnect is gone from the
+/// listing entirely, so "listed" genuinely means "still available to attach".
+#[tokio::test]
+async fn a_quit_session_disappears_from_the_listing() -> Result<()> {
+    let _env = setup_test_env()?;
+    let (socket_path, debug_socket_path, server_handle) =
+        start_inprocess_server("listgone").await?;
+
+    let result = async {
+        let (quitter, quit_id) = subscribe_new_session(&socket_path).await?;
+        let (mut observer, _observer_id) = subscribe_new_session(&socket_path).await?;
+
+        assert!(
+            find_listed_session(&mut observer, &quit_id)
+                .await?
+                .is_some(),
+            "the session must be listed while it is attached"
+        );
+
+        drop(quitter);
+        wait_for_population(&debug_socket_path, 1, 1).await?;
+
+        assert!(
+            find_listed_session(&mut observer, &quit_id)
+                .await?
+                .is_none(),
+            "a session ended by an ordinary disconnect must not be listed as available"
+        );
+        Ok(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
