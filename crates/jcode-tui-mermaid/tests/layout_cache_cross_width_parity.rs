@@ -65,6 +65,24 @@ use jcode_tui_mermaid::{
     RenderResult, clear_cache, debug_stats, render_mermaid_untracked, with_preferred_aspect_ratio,
 };
 
+// Integration-test binaries are separate crates, so the library's `cfg!(test)`
+// sandbox does not apply here. Redirect the PNG cache before the first render:
+// `clear_cache` deletes every PNG in that directory, which would otherwise be
+// the real user's diagram cache.
+fn isolate_mermaid_cache_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-mermaid-it-{}-{}",
+            env!("CARGO_CRATE_NAME"),
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded, runs before any cache access in this binary.
+        unsafe { std::env::set_var("JCODE_MERMAID_CACHE_DIR", &dir) };
+    });
+}
+
 /// Narrow terminal width (cells): the render whose computed layout gets
 /// reused across the width change.
 const NARROW_CELLS: u16 = 90;
@@ -303,6 +321,7 @@ fn run_cell(label: &str, content: &str, expected_path_marker: Option<&str>) -> C
 #[test]
 #[ignore = "cross-width parity probe: run explicitly with --ignored --nocapture"]
 fn layout_cache_cross_width_parity() {
+    isolate_mermaid_cache_dir();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

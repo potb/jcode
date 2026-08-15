@@ -51,12 +51,27 @@ pub(super) struct CachedDiagram {
     pub(super) height: u32,
 }
 
+/// Directory holding rendered diagram PNGs, redirectable via
+/// `JCODE_MERMAID_CACHE_DIR`. Tests MUST redirect it: `clear_cache` deletes
+/// every PNG here, which would otherwise wipe the real user's diagram cache.
+pub(super) fn configured_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("JCODE_MERMAID_CACHE_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("jcode-mermaid-test-{}", std::process::id()));
+    }
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("jcode")
+        .join("mermaid")
+}
+
 impl MermaidCache {
     pub(super) fn new() -> Self {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("jcode")
-            .join("mermaid");
+        let cache_dir = configured_cache_dir();
 
         let _ = fs::create_dir_all(&cache_dir);
 

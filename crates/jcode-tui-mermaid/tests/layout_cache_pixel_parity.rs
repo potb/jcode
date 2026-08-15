@@ -33,6 +33,24 @@
 
 use jcode_tui_mermaid::{RenderResult, debug_stats, render_mermaid_untracked};
 
+// Integration-test binaries are separate crates, so the library's `cfg!(test)`
+// sandbox does not apply here. Redirect the PNG cache before the first render:
+// `clear_cache` deletes every PNG in that directory, which would otherwise be
+// the real user's diagram cache.
+fn isolate_mermaid_cache_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-mermaid-it-{}-{}",
+            env!("CARGO_CRATE_NAME"),
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded, runs before any cache access in this binary.
+        unsafe { std::env::set_var("JCODE_MERMAID_CACHE_DIR", &dir) };
+    });
+}
+
 /// Render and return (hash, png path, png bytes), panicking on render errors.
 fn render_png(label: &str, content: &str, width: u16) -> (u64, std::path::PathBuf, Vec<u8>) {
     match render_mermaid_untracked(content, Some(width)) {
@@ -55,6 +73,7 @@ fn decode_rgba(label: &str, bytes: &[u8]) -> image::RgbaImage {
 #[test]
 #[ignore = "pixel-parity probe: run explicitly with --ignored --nocapture"]
 fn layout_cache_hit_renders_pixel_identical_png_across_diagram_kinds_and_widths() {
+    isolate_mermaid_cache_dir();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
