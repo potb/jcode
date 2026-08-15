@@ -591,6 +591,20 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Leave the session attached state without ending it. Returns the request
+    /// id so the caller can wait for the matching `Ack` before closing.
+    pub async fn detach(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        let request = Request::Detach {
+            id,
+            session_id: session_id.to_string(),
+            client_instance_id: self.client_instance_id.clone(),
+        };
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Ask the server to continue every live session that was interrupted and
     /// would auto-resume on a reload. Returns the request id so the client can
     /// correlate the `ResumeAllResult` event.

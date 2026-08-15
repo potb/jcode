@@ -1007,6 +1007,19 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Ack { id } => {
+            if app.pending_detach_request == Some(id) {
+                app.pending_detach_request = None;
+                crate::telemetry::end_session_with_reason(
+                    app.provider.name(),
+                    &app.provider.model(),
+                    crate::telemetry::SessionEndReason::NormalExit,
+                );
+                // The server owns this session's persistence and has just agreed
+                // to keep it alive, so the client must exit without marking it
+                // closed the way a local quit would.
+                app.should_quit = true;
+                return false;
+            }
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
         }
@@ -1217,10 +1230,18 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
-            ..
         } => {
+            if app.pending_detach_request == Some(id) {
+                app.pending_detach_request = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Detach refused by the server: {}. This client is still attached.",
+                    message
+                )));
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history

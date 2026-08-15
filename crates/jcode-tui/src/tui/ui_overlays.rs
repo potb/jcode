@@ -417,6 +417,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/debug-visual",
         "Enable visual debugging for TUI issues",
     ));
+    lines.push(help_entry(
+        "/detach",
+        "Leave this session running on the server",
+    ));
     lines.push(help_entry("/quit", "Exit jcode"));
 
     // The sections above are hand-curated for ordering, but they drift as

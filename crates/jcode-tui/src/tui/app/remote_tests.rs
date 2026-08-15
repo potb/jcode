@@ -1150,3 +1150,174 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+/// Typing `/detach` must put a `detach` request on the wire naming this
+/// client's session, and must NOT quit before the server answers: quitting
+/// early closes the socket mid-request and the server ends the session.
+#[test]
+fn detach_command_sends_the_request_and_waits_for_the_ack() {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_detach".to_string());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut line = String::new();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote
+            .take_dummy_peer()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        app.input = "/detach".to_string();
+        crate::tui::app::remote::key_handling::handle_remote_key(
+            &mut app,
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+            &mut remote,
+        )
+        .await
+        .expect("/detach should be handled");
+
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("detach request should be readable by the peer");
+    });
+
+    let request: crate::protocol::Request =
+        serde_json::from_str(&line).expect("detach request should deserialize");
+    match request {
+        crate::protocol::Request::Detach { session_id, .. } => {
+            assert_eq!(
+                session_id, "session_detach",
+                "detach must name the session this client is attached to"
+            );
+        }
+        other => panic!("expected a Detach request, got {other:?}"),
+    }
+    assert!(
+        !app.should_quit,
+        "the client must stay alive until the server acknowledges the detach"
+    );
+}
+
+/// The Ack for the detach request is what makes the client exit. A stale Ack
+/// for some other request must not.
+#[test]
+fn detach_completes_only_on_the_matching_ack() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_detach".to_string());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut line = String::new();
+    rt.block_on(async {
+        use tokio::io::AsyncBufReadExt;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote
+            .take_dummy_peer()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        app.input = "/detach".to_string();
+        crate::tui::app::remote::key_handling::handle_remote_key(
+            &mut app,
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+            &mut remote,
+        )
+        .await
+        .expect("/detach should be handled");
+        reader.read_line(&mut line).await.expect("request readable");
+
+        let detach_id = match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("detach request should deserialize")
+        {
+            crate::protocol::Request::Detach { id, .. } => id,
+            other => panic!("expected a Detach request, got {other:?}"),
+        };
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Ack {
+                id: detach_id.wrapping_add(1),
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.should_quit,
+            "an Ack for a different request must not complete the detach"
+        );
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Ack { id: detach_id },
+            &mut remote,
+        );
+    });
+
+    assert!(app.should_quit, "the matching Ack must let the client exit");
+}
+
+/// A refused detach must leave the client running and say so, rather than
+/// waiting forever for an Ack that will never arrive.
+#[test]
+fn refused_detach_keeps_the_client_running() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_detach".to_string());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut line = String::new();
+    rt.block_on(async {
+        use tokio::io::AsyncBufReadExt;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote
+            .take_dummy_peer()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        app.input = "/detach".to_string();
+        crate::tui::app::remote::key_handling::handle_remote_key(
+            &mut app,
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+            &mut remote,
+        )
+        .await
+        .expect("/detach should be handled");
+        reader.read_line(&mut line).await.expect("request readable");
+
+        let detach_id = match serde_json::from_str::<crate::protocol::Request>(&line)
+            .expect("detach request should deserialize")
+        {
+            crate::protocol::Request::Detach { id, .. } => id,
+            other => panic!("expected a Detach request, got {other:?}"),
+        };
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: detach_id,
+                message: "detach targets session other but this connection owns session_detach"
+                    .to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+    });
+
+    assert!(
+        !app.should_quit,
+        "a refused detach must not close the client"
+    );
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| message.content.contains("Detach refused")),
+        "the user must be told the detach was refused"
+    );
+}
