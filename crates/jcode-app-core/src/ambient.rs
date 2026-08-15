@@ -20,6 +20,9 @@ pub mod schedule_window;
 #[cfg(test)]
 mod schedule_window_tests;
 pub mod scheduler;
+mod state_file;
+#[cfg(test)]
+mod state_file_tests;
 
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
@@ -34,6 +37,7 @@ pub use prompt::{
     gather_feedback_memories, gather_memory_graph_health, gather_project_graph_health,
     gather_recent_sessions,
 };
+pub use state_file::AmbientStateFile;
 
 use crate::storage;
 
