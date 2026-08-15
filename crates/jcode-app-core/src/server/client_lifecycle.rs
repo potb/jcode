@@ -1054,6 +1054,29 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // A detach that will be refused must be answered before the generic Ack
+        // below, which is written for every request: otherwise the client sees a
+        // success Ack followed by an Error for the same request id.
+        if let Request::Detach {
+            id,
+            ref session_id,
+            ref client_instance_id,
+        } = request
+            && let Some(reason) = detach_rejection_reason(
+                session_id,
+                &client_session_id,
+                client_instance_id.as_deref(),
+                current_client_instance_id.as_deref(),
+            )
+        {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: reason,
+                retry_after_secs: None,
+            });
+            continue;
+        }
+
         // Send ack
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
@@ -1738,39 +1761,10 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::Detach {
-                id,
-                session_id,
-                client_instance_id,
-            } => {
-                if session_id != client_session_id {
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: format!(
-                            "detach targets session {} but this connection owns {}",
-                            session_id, client_session_id
-                        ),
-                        retry_after_secs: None,
-                    });
-                    continue;
-                }
-                if let (Some(requested), Some(current)) = (
-                    client_instance_id.as_deref(),
-                    current_client_instance_id.as_deref(),
-                ) && requested != current
-                {
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: "detach rejected: client instance does not own this connection"
-                            .to_string(),
-                        retry_after_secs: None,
-                    });
-                    continue;
-                }
-                let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+            Request::Detach { id, .. } => {
                 crate::logging::info(&format!(
-                    "SERVER_DETACH_REQUEST session={} connection={} ack_queued={}",
-                    client_session_id, client_connection_id, ack_queued
+                    "SERVER_DETACH_REQUEST id={} session={} connection={}",
+                    id, client_session_id, client_connection_id
                 ));
                 client_detached = true;
                 break;
@@ -3340,6 +3334,29 @@ pub(super) async fn process_message_streaming_mpsc(
         );
     }
     result
+}
+
+/// Returns why a detach must be refused, or `None` when it may proceed.
+fn detach_rejection_reason(
+    requested_session_id: &str,
+    connection_session_id: &str,
+    requested_instance_id: Option<&str>,
+    connection_instance_id: Option<&str>,
+) -> Option<String> {
+    if requested_session_id != connection_session_id {
+        return Some(format!(
+            "detach targets session {} but this connection owns {}",
+            requested_session_id, connection_session_id
+        ));
+    }
+    // Absent ids do not prove identity, so only two present-and-different ids
+    // are treated as a mismatch; a legacy client sending none still detaches.
+    if let (Some(requested), Some(current)) = (requested_instance_id, connection_instance_id)
+        && requested != current
+    {
+        return Some("detach rejected: client instance does not own this connection".to_string());
+    }
+    None
 }
 
 #[cfg(test)]
