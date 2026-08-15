@@ -34,6 +34,24 @@ use std::time::Instant;
 
 use jcode_tui_mermaid::{RenderResult, debug_stats, render_mermaid_untracked};
 
+// Integration-test binaries are separate crates, so the library's `cfg!(test)`
+// sandbox does not apply here. Redirect the PNG cache before the first render:
+// `clear_cache` deletes every PNG in that directory, which would otherwise be
+// the real user's diagram cache.
+fn isolate_mermaid_cache_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-mermaid-it-{}-{}",
+            env!("CARGO_CRATE_NAME"),
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded, runs before any cache access in this binary.
+        unsafe { std::env::set_var("JCODE_MERMAID_CACHE_DIR", &dir) };
+    });
+}
+
 /// Deterministic ~40-node / 45-edge flowchart. There is no `infra` fixture in
 /// this crate (checked `crates/jcode-tui-mermaid/` for fixtures/), so this is
 /// the labeled substitute: a representative pipeline-shaped flowchart well
@@ -133,6 +151,7 @@ fn count_pngs(cache_dir: &Path, hash: u64) -> usize {
 #[test]
 #[ignore = "wall-clock probe; run explicitly with --ignored --nocapture (release build recommended)"]
 fn layout_cache_resize_speedup_probe() {
+    isolate_mermaid_cache_dir();
     // ---- Phase 0: warm process-global one-time costs (font DB scan) with a
     // throwaway diagram so they don't pollute the cold-render timing below.
     let warmup = probe_flowchart("warmup");

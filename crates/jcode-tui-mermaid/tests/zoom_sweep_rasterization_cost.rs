@@ -4,6 +4,24 @@
 
 use jcode_tui_mermaid::{RenderResult, clear_cache, debug_stats, render_mermaid_untracked};
 
+// Integration-test binaries are separate crates, so the library's `cfg!(test)`
+// sandbox does not apply here. Redirect the PNG cache before the first render:
+// `clear_cache` deletes every PNG in that directory, which would otherwise be
+// the real user's diagram cache.
+fn isolate_mermaid_cache_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-mermaid-it-{}-{}",
+            env!("CARGO_CRATE_NAME"),
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded, runs before any cache access in this binary.
+        unsafe { std::env::set_var("JCODE_MERMAID_CACHE_DIR", &dir) };
+    });
+}
+
 const PANE_CELLS: u16 = 80;
 
 const ZOOM_START: u32 = 100;
@@ -82,6 +100,7 @@ fn rasterizations_across_zoom_sweep(
 #[test]
 #[ignore = "explicit measurement probe for issue #150 direction (3); rasterizes real SVGs"]
 fn zoom_sweep_rasterization_cost() {
+    isolate_mermaid_cache_dir();
     println!(
         "\n=== issue #150 direction (3) cost probe | backend={} | pane={} cells | zoom {}..={} step {} ===",
         backend(),
@@ -139,6 +158,7 @@ fn zoom_sweep_rasterization_cost() {
 #[test]
 #[ignore = "rasterizes real SVGs; run with --ignored alongside the cost probe"]
 fn render_width_scale_percent_widens_the_rasterized_png() {
+    isolate_mermaid_cache_dir();
     clear_cache().expect("clear_cache");
     let (unscaled_w, unscaled_h) = render_png_dimensions(TALLER_THAN_4_3_FLOWCHART, PANE_CELLS);
 
