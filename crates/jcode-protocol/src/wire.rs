@@ -181,6 +181,16 @@ pub enum Request {
         allow_session_takeover: bool,
     },
 
+    /// Leave the session attached state without ending it: the server Acks,
+    /// then treats the socket close as deliberate and preserves the session.
+    #[serde(rename = "detach")]
+    Detach {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
+    },
+
     /// Resume/continue every live session that was interrupted and would
     /// auto-continue on a reload (e.g. crashed/errored mid-turn). This is the
     /// on-demand equivalent of the automatic post-reload recovery sweep.

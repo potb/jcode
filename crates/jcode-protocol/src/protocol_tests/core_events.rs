@@ -637,3 +637,43 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(retry_after_secs, None);
     Ok(())
 }
+
+#[test]
+fn test_detach_request_roundtrip_and_wire_name() -> Result<()> {
+    let req = Request::Detach {
+        id: 7,
+        session_id: "sess-1".to_string(),
+        client_instance_id: Some("inst-a".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(
+        json.contains("\"type\":\"detach\""),
+        "unexpected wire name: {json}"
+    );
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 7);
+    let Request::Detach {
+        session_id,
+        client_instance_id,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected Detach"));
+    };
+    assert_eq!(session_id, "sess-1");
+    assert_eq!(client_instance_id.as_deref(), Some("inst-a"));
+    Ok(())
+}
+
+#[test]
+fn test_detach_request_accepts_client_without_instance_id() -> Result<()> {
+    let decoded = parse_request_json(r#"{"type":"detach","id":9,"session_id":"sess-2"}"#)?;
+    let Request::Detach {
+        client_instance_id, ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected Detach"));
+    };
+    assert_eq!(client_instance_id, None);
+    Ok(())
+}

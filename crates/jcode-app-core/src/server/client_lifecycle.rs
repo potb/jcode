@@ -480,6 +480,7 @@ pub(super) async fn handle_client(
 
     // Per-client state
     let mut client_is_processing = false;
+    let mut client_detached = false;
     let (processing_done_tx, mut processing_done_rx) =
         mpsc::unbounded_channel::<(u64, Result<()>, Option<String>)>();
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -1737,6 +1738,44 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::Detach {
+                id,
+                session_id,
+                client_instance_id,
+            } => {
+                if session_id != client_session_id {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!(
+                            "detach targets session {} but this connection owns {}",
+                            session_id, client_session_id
+                        ),
+                        retry_after_secs: None,
+                    });
+                    continue;
+                }
+                if let (Some(requested), Some(current)) = (
+                    client_instance_id.as_deref(),
+                    current_client_instance_id.as_deref(),
+                ) && requested != current
+                {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "detach rejected: client instance does not own this connection"
+                            .to_string(),
+                        retry_after_secs: None,
+                    });
+                    continue;
+                }
+                let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+                crate::logging::info(&format!(
+                    "SERVER_DETACH_REQUEST session={} connection={} ack_queued={}",
+                    client_session_id, client_connection_id, ack_queued
+                ));
+                client_detached = true;
+                break;
+            }
+
             Request::ResumeAllSessions { id } => {
                 super::client_actions::handle_resume_all_sessions(
                     id,
@@ -2789,6 +2828,7 @@ pub(super) async fn handle_client(
             &sessions,
             &client_session_id,
             client_is_processing,
+            client_detached,
             &mut processing_task,
             event_handle,
             &swarm_members,
