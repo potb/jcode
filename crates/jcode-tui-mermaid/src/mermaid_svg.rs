@@ -220,7 +220,7 @@ pub(super) fn set_xml_attribute(tag: &str, attr: &str, value: &str) -> String {
     feature = "renderer",
     not(all(feature = "mmdr-size-api", mmdr_size_api_available))
 ))]
-pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: f64) -> String {
+pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64) -> String {
     let Some(start) = svg.find("<svg") else {
         return svg.to_string();
     };
@@ -233,16 +233,16 @@ pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: 
     let (resolved_width, resolved_height) = parse_svg_viewbox_size(root_tag)
         .or_else(|| parse_svg_explicit_size(root_tag))
         .map(|(width, height)| {
-            let target_width = target_width.max(1.0) as f32;
-            let target_height = target_height.max(1.0) as f32;
-            let width_scale = target_width / width.max(1.0);
-            let height_scale = target_height / height.max(1.0);
-            let scale = width_scale.min(height_scale).max(0.0001);
-            let output_width = (width * scale).max(1.0);
-            let output_height = (height * scale).max(1.0);
-            (output_width, output_height)
+            let (output_width, output_height) =
+                fit_natural_to_target_width(width as f64, height as f64, target_width);
+            (output_width as f32, output_height as f32)
         })
-        .unwrap_or_else(|| (target_width.max(1.0) as f32, target_height.max(1.0) as f32));
+        .unwrap_or_else(|| {
+            // No parseable natural size: the target width is all we know, so
+            // take it as-is rather than inventing an aspect ratio.
+            let target_width = target_width.max(1.0) as f32;
+            (target_width, target_width)
+        });
 
     let root_tag = set_xml_attribute(root_tag, "width", &format_svg_length(resolved_width));
     let root_tag = set_xml_attribute(&root_tag, "height", &format_svg_length(resolved_height));
