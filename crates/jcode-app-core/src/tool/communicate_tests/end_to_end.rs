@@ -7,6 +7,7 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "swarm-communicate-list-and-await-members-work-end-to-end");
     let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
@@ -136,6 +137,7 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "swarm-communicate-await-members-background-returns-immediately-and-notifies");
     let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
@@ -296,6 +298,7 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "swarm-communicate-status-returns-busy-snapshot-for-running-member");
     let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
@@ -561,6 +564,7 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "swarm-communicate-message-routes-as-dm-while-broadcast-targets-swarm");
     let _swarm_model = SwarmModelGuard::inherit();
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
