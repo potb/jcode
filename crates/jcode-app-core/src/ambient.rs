@@ -14,6 +14,9 @@ pub mod headroom;
 mod manager;
 mod paths;
 mod persistence;
+pub(crate) mod project_schedule;
+#[cfg(test)]
+mod project_schedule_tests;
 pub(crate) mod prompt;
 pub mod runner;
 pub mod schedule_window;
@@ -23,12 +26,17 @@ pub mod scheduler;
 mod state_file;
 #[cfg(test)]
 mod state_file_tests;
+#[cfg(test)]
+mod test_env;
 
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
 pub use manager::AmbientManager;
-pub use persistence::{AmbientLock, ScheduledQueue, is_locked_by_another_process};
+pub use persistence::{
+    AmbientLock, ScheduledQueue, is_locked_by_another_process, is_locked_by_another_process_for,
+};
+pub use project_schedule::{ProjectKey, ProjectWakeLedger};
 #[cfg(test)]
 pub(crate) use prompt::format_duration_rough;
 pub use prompt::{
