@@ -73,7 +73,48 @@ through the envelope. `save` re-reads the file and replaces only the `global`
 slot, so a component that knows nothing about per-project state cannot destroy
 it.
 
+## Per-project scheduler and lock
+
+Stage 3, and like stages 1 and 2 it adds the mechanism without changing
+observable behaviour: nothing constructs a `ProjectWakeLedger` in the runner
+yet, and the runner still takes the global lock. Stage 4 is what wires it.
+
+### Lock
+
+`AmbientLock::try_acquire_for(project)` takes a lock per project, under
+`~/.jcode/ambient/locks/`. Two projects can therefore run concurrently, which
+is the point: a long cycle in one project must not exclude every other one.
+
+`project = None` maps to the pre-existing `~/.jcode/ambient/ambient.lock`, byte
+for byte, so a daemon on the unconverted path still contends with older builds
+on exactly the file they used. Single-instance protection is unchanged *within*
+a project: a live foreign PID still blocks acquisition, and the `server reload`
+re-exec case (a lock naming our own PID is stale by definition) is inherited
+rather than reimplemented.
+
+The lock file name is a sanitized tail of the project path plus a hash of the
+*whole* key. The sanitizer is lossy — a project key is an absolute path, so it
+contains separators — and the hash is what guarantees uniqueness. Without it,
+`/a/b` and `/a.b` would sanitize to the same name and silently serialize.
+
+### Turn-taking
+
+`ProjectWakeLedger` records when each project may next run and answers "which
+project is due now". It deliberately does *not* hold quota headroom or
+rate-limit backoff: a provider limit is account-wide, not per project, so those
+stay in `AdaptiveScheduler`. What is genuinely per project is whose turn it is.
+
+Two properties are what make it fair rather than merely partitioned:
+
+- **A newly registered project is due immediately**, rather than waiting out an
+  interval it was never part of.
+- **The due project that has waited longest goes first.** Round-robin by
+  insertion order would let a project with cheap, fast cycles keep coming back
+  around ahead of one that has been waiting — the starvation #126 is about.
+
+`None` is a scheduling participant like any other, since gardening cycles are
+real work that must still get turns.
+
 ## Remaining stages
 
-3. Per-project scheduler and lock (only meaningful once 1 and 2 exist).
 4. Per-project prompt and cycle — the observable behaviour change, last.
