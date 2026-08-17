@@ -432,6 +432,50 @@ fn anthropic_input_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
+/// Mirrors `jcode_tool_core::TOOL_INTENT_DESCRIPTION`, which this crate cannot
+/// depend on; `curated_intent_description_matches_tool_core` pins the two.
+const CURATED_INTENT_DESCRIPTION: &str =
+    "Required short label shown in the UI: why this call is being made.";
+
+/// Adds the shared `intent` property to a hand-written OAuth builtin schema,
+/// standing in for `ensure_intent_in_schema`. See `docs/TOOL_INTENT.md`.
+fn with_curated_intent(mut schema: Value) -> Value {
+    let Some(object) = schema.as_object_mut() else {
+        return schema;
+    };
+
+    if let Some(properties) = object
+        .entry("properties")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+    {
+        properties.entry("intent").or_insert_with(|| {
+            json!({
+                "type": "string",
+                "description": CURATED_INTENT_DESCRIPTION,
+            })
+        });
+    } else {
+        return schema;
+    }
+
+    match object.get_mut("required") {
+        Some(Value::Array(required)) => {
+            if !required.iter().any(|v| v.as_str() == Some("intent")) {
+                required.push(Value::String("intent".to_string()));
+            }
+        }
+        _ => {
+            object.insert(
+                "required".to_string(),
+                Value::Array(vec![Value::String("intent".to_string())]),
+            );
+        }
+    }
+
+    schema
+}
+
 pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
     if is_oauth {
         // A curated builtin may only be advertised when at least one backing
@@ -455,7 +499,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Agent".to_string(),
                     description: "Launch a new agent to handle complex, multi-step tasks."
                         .to_string(),
-                    input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -465,7 +511,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Bash".to_string(),
                     description: "Executes a given bash command and returns its output."
                         .to_string(),
-                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -474,7 +522,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Edit".to_string(),
                     description: "Performs exact string replacements in files.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -483,7 +533,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Glob".to_string(),
                     description: "Fast file pattern matching tool.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -492,7 +544,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Grep".to_string(),
                     description: "A powerful search tool built on ripgrep.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -501,7 +555,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Read".to_string(),
                     description: "Reads a file from the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -510,7 +566,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Skill".to_string(),
                     description: "Execute a skill within the main conversation".to_string(),
-                    input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
@@ -519,7 +577,9 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 ApiTool {
                     name: "Write".to_string(),
                     description: "Writes a file to the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
+                    input_schema: with_curated_intent(
+                        json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
+                    ),
                     cache_control: None,
                 },
             ),
