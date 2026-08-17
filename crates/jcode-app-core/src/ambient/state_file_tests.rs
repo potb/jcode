@@ -178,3 +178,41 @@ fn saving_global_state_preserves_per_project_state() {
     );
     assert_eq!(reloaded.global.total_cycles, 2);
 }
+
+/// Stage 4 of #126: the runner records a finished cycle against the project it
+/// belonged to as well as globally, in one load/save, so the two cannot
+/// disagree about the same cycle.
+#[test]
+fn recording_a_cycle_for_a_project_updates_both_slots_once() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = crate::ambient::test_env::EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut mgr = crate::ambient::AmbientManager::new().expect("manager");
+    mgr.record_cycle_result_for(Some("/work/alpha"), cycle_result("alpha work"))
+        .expect("record");
+
+    let file = AmbientStateFile::load().expect("load");
+    assert_eq!(file.global.total_cycles, 1);
+    assert_eq!(file.project("/work/alpha").total_cycles, 1);
+    assert_eq!(
+        file.project("/work/alpha").last_summary.as_deref(),
+        Some("alpha work"),
+        "a project's own history must be attributable to it"
+    );
+    assert_eq!(
+        file.project("/work/beta").total_cycles,
+        0,
+        "another project's history must not move"
+    );
+
+    mgr.record_cycle_result_for(None, cycle_result("gardening"))
+        .expect("record");
+    let file = AmbientStateFile::load().expect("load");
+    assert_eq!(file.global.total_cycles, 2);
+    assert_eq!(
+        file.project("/work/alpha").total_cycles,
+        1,
+        "an unfocused cycle belongs to no project, so no project slot moves"
+    );
+}

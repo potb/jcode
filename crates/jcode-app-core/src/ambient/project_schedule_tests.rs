@@ -201,3 +201,60 @@ fn a_project_lock_still_excludes_a_foreign_holder_of_the_same_project() {
         "an unrelated project must not report as locked"
     );
 }
+
+#[test]
+fn a_due_queue_item_decides_the_cycle_project_over_the_rotation() {
+    let now = Utc::now();
+    let mut ledger = ProjectWakeLedger::new();
+    ledger.register(key("/a"), now - ChronoDuration::hours(3));
+    ledger.register(key("/b"), now - ChronoDuration::hours(1));
+
+    assert_eq!(
+        super::project_schedule::select_cycle_project(&ledger, &[key("/b")], now),
+        key("/b"),
+        "an item explicitly queued for a project must run as that project's \
+         cycle even when another project has waited longer"
+    );
+}
+
+#[test]
+fn without_a_due_item_the_rotation_decides_the_cycle_project() {
+    let now = Utc::now();
+    let mut ledger = ProjectWakeLedger::new();
+    ledger.register(key("/a"), now - ChronoDuration::hours(3));
+    ledger.register(key("/b"), now - ChronoDuration::hours(1));
+
+    assert_eq!(
+        super::project_schedule::select_cycle_project(&ledger, &[], now),
+        key("/a"),
+        "the longest-waiting project takes the turn"
+    );
+}
+
+#[test]
+fn a_project_less_due_item_does_not_hijack_the_rotation() {
+    let now = Utc::now();
+    let mut ledger = ProjectWakeLedger::new();
+    ledger.register(key("/a"), now - ChronoDuration::hours(3));
+
+    assert_eq!(
+        super::project_schedule::select_cycle_project(&ledger, &[None], now),
+        key("/a"),
+        "an unscoped item (gardening, a memory task) names no project, so it \
+         must not force an unfocused cycle while a project is due"
+    );
+}
+
+#[test]
+fn nothing_due_falls_back_to_an_unfocused_cycle() {
+    let now = Utc::now();
+    let mut ledger = ProjectWakeLedger::new();
+    ledger.record_cycle(key("/a"), now, Duration::from_secs(3600));
+
+    assert_eq!(
+        super::project_schedule::select_cycle_project(&ledger, &[], now),
+        None,
+        "a runner that got this far is starting a cycle regardless, so with no \
+         project due it must be an unfocused one rather than an arbitrary project"
+    );
+}

@@ -36,14 +36,15 @@ pub use manager::AmbientManager;
 pub use persistence::{
     AmbientLock, ScheduledQueue, is_locked_by_another_process, is_locked_by_another_process_for,
 };
-pub use project_schedule::{ProjectKey, ProjectWakeLedger};
+pub use project_schedule::{ProjectKey, ProjectWakeLedger, select_cycle_project};
 #[cfg(test)]
 pub(crate) use prompt::format_duration_rough;
+pub(crate) use prompt::workable_project_paths;
 pub use prompt::{
     MemoryGraphHealth, ProjectGraphHealth, RecentSessionInfo, ResourceBudget,
-    build_ambient_system_prompt, format_minutes_human, format_scheduled_session_message,
-    gather_feedback_memories, gather_memory_graph_health, gather_project_graph_health,
-    gather_recent_sessions,
+    build_ambient_system_prompt, build_ambient_system_prompt_for, format_minutes_human,
+    format_scheduled_session_message, gather_feedback_memories, gather_memory_graph_health,
+    gather_project_graph_health, gather_recent_sessions, resolve_project_key,
 };
 pub use state_file::AmbientStateFile;
 

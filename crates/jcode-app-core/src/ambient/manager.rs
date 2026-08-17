@@ -73,6 +73,24 @@ impl AmbientManager {
             .is_some_and(|due| Utc::now() >= due)
     }
 
+    /// Project keys of the ambient-targeted items that are due now, in the
+    /// order a cycle would receive them: highest priority, then earliest.
+    pub fn due_ambient_item_projects(&self) -> Vec<Option<String>> {
+        let now = Utc::now();
+        let mut due: Vec<&ScheduledItem> = self
+            .queue
+            .items()
+            .iter()
+            .filter(|item| !item.target.is_direct_delivery() && item.scheduled_for <= now)
+            .collect();
+        due.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+        });
+        due.into_iter().map(|item| item.project_key()).collect()
+    }
+
     /// Earliest scheduled time across every queue item, whatever its target.
     ///
     /// The runner must not sleep past this: it is a time the user or a previous
@@ -87,10 +105,28 @@ impl AmbientManager {
     }
 
     pub fn record_cycle_result(&mut self, result: AmbientCycleResult) -> Result<()> {
-        self.state.record_cycle(&result);
-        self.state.save()?;
+        self.record_cycle_result_for(None, result)
+    }
 
-        // If the cycle produced a schedule request, enqueue it
+    /// Record a finished cycle against the project it belonged to, and against
+    /// the global slot `ambient status` and the scheduler read.
+    ///
+    /// The two writes go through one load/save of the envelope so a project's
+    /// history and the global history cannot disagree about the same cycle.
+    pub fn record_cycle_result_for(
+        &mut self,
+        project: Option<&str>,
+        result: AmbientCycleResult,
+    ) -> Result<()> {
+        self.state.record_cycle(&result);
+
+        let mut file = super::AmbientStateFile::load()?;
+        file.global = self.state.clone();
+        if let Some(project) = project {
+            file.project_mut(project).record_cycle(&result);
+        }
+        file.save()?;
+
         if let Some(ref req) = result.next_schedule {
             self.schedule(req.clone())?;
         }
