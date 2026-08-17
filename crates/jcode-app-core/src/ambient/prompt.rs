@@ -558,10 +558,6 @@ pub(crate) fn workable_project_paths() -> Vec<String> {
     workable_projects().into_iter().map(|p| p.path).collect()
 }
 
-fn configured_project_priority() -> Vec<String> {
-    workable_project_paths()
-}
-
 /// Standing instructions declared for a project in config: the inline
 /// `instructions`, plus the contents of `instructions_file` when set.
 ///
