@@ -115,6 +115,43 @@ Two properties are what make it fair rather than merely partitioned:
 `None` is a scheduling participant like any other, since gardening cycles are
 real work that must still get turns.
 
-## Remaining stages
+## Per-project prompt and cycle
 
-4. Per-project prompt and cycle — the observable behaviour change, last.
+Stage 4, and the first stage with an observable behaviour change: a cycle now
+belongs to one project.
+
+### Choosing the project
+
+`select_cycle_project` answers "whose cycle is this". A due queue item wins,
+because an item queued for a project is explicit work for it and outranks a
+rotation; otherwise the ledger's longest-waiting due project takes the turn,
+and `None` — the unfocused, project-less cycle — falls out when nothing is due.
+An item with no project of its own does *not* force an unfocused cycle, since
+gardening work is doable inside any cycle while a due project is not.
+
+Every workable project is registered on each loop pass, so a project added to
+config while the daemon is running joins the rotation without a restart. Only
+*workable* projects are registered: a project whose window is closed cannot
+take a turn, which is the acceptance criterion #126 states.
+
+The cycle then takes that project's lock rather than the global one, so two
+projects can run concurrently, and records its result through
+`record_cycle_result_for`, which writes the project slot and the global slot in
+one load/save of the envelope.
+
+### The focused prompt
+
+`build_ambient_system_prompt_for(focus, ...)` renders the prompt for one
+project. `focus = None` is byte for byte the old prompt, so an unfocused cycle
+and a config with no projects are unchanged.
+
+With a focus, everything project-shaped narrows to that project: the priority
+walk, the "projects active recently" list, the PR targets, the per-project
+standing instructions, and the recent sessions. Naming another project at all
+is what let a cycle work outside its own turn, so the filter is on the data,
+not only on the instructions. The "work through the priority list" section is
+dropped entirely, since telling a one-project cycle to move on to the next
+project contradicts its own scope.
+
+Session filtering is path-boundary matching, not equality: a session started in
+a subdirectory of the focused project belongs to it.

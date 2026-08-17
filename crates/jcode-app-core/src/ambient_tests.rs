@@ -2097,3 +2097,185 @@ fn scheduling_stamps_the_project_onto_the_queued_item() {
     }
     crate::config::invalidate_config_cache();
 }
+
+/// Stage 4 of #126: a cycle belongs to one project, so the prompt names that
+/// project and stops handing the agent every other one to choose between.
+#[test]
+fn a_focused_cycle_names_its_project_and_hides_the_others() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nproactive_work = true\n\
+         project_priority = [\"/work/alpha\", \"/work/beta\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let sessions = vec![
+        RecentSessionInfo {
+            id: "s_alpha".into(),
+            status: "closed".into(),
+            topic: None,
+            duration_secs: 60,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/work/alpha".into()),
+        },
+        RecentSessionInfo {
+            id: "s_beta".into(),
+            status: "closed".into(),
+            topic: None,
+            duration_secs: 60,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/work/beta".into()),
+        },
+    ];
+    let render = |focus: Option<&str>| {
+        crate::ambient::build_ambient_system_prompt_for(
+            focus,
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &sessions,
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let unfocused = render(None);
+    assert!(
+        unfocused.contains("## Work Through The Priority List"),
+        "an unfocused cycle still picks its own project, so it keeps the walk \
+         instruction"
+    );
+    assert!(unfocused.contains("/work/beta"));
+    assert!(!unfocused.contains("## This Cycle Is For"));
+
+    let focused = render(Some("/work/alpha"));
+    assert!(
+        focused.contains("## This Cycle Is For /work/alpha"),
+        "a focused cycle must be told which project it is for"
+    );
+    assert!(
+        !focused.contains("/work/beta"),
+        "the other project must not appear at all: offering it is what let a \
+         cycle work outside its own turn"
+    );
+    assert!(
+        !focused.contains("## Work Through The Priority List"),
+        "telling a one-project cycle to move on to the next project \
+         contradicts its own scope"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// The focused prompt must still carry the focused project's own rules: the
+/// point of a per-project cycle is that its instructions and PR target are the
+/// ones in force.
+#[test]
+fn a_focused_cycle_keeps_its_own_project_instructions_and_pr_target() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/work/alpha\"\npr_repo = \"me/alpha\"\n\
+         instructions = \"Alpha rule: land one PR.\"\n\n\
+         [[ambient.projects]]\npath = \"/work/beta\"\npr_repo = \"me/beta\"\n\
+         instructions = \"Beta rule: never merge.\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let focused = crate::ambient::build_ambient_system_prompt_for(
+        Some("/work/alpha"),
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &[],
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    assert!(focused.contains("Alpha rule: land one PR."));
+    assert!(focused.contains("me/alpha"));
+    assert!(
+        !focused.contains("Beta rule: never merge."),
+        "another project's standing rules must not be in force this cycle"
+    );
+    assert!(
+        !focused.contains("me/beta"),
+        "another project's PR target is how work lands in the wrong repo"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// A session in a subdirectory of the focused project belongs to it, so its
+/// instructions must not be dropped by the focus filter.
+#[test]
+fn a_focused_cycle_keeps_sessions_from_its_own_subdirectories() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/work/alpha\"\n\
+         instructions = \"Alpha rule: land one PR.\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let sessions = vec![RecentSessionInfo {
+        id: "s_sub".into(),
+        status: "closed".into(),
+        topic: None,
+        duration_secs: 60,
+        extraction_status: "extracted".into(),
+        working_dir: Some("/work/alpha/crates/core".into()),
+    }];
+    let focused = crate::ambient::build_ambient_system_prompt_for(
+        Some("/work/alpha"),
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &sessions,
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    assert!(
+        focused.contains("s_sub"),
+        "a subdirectory session belongs to its project, so the focus filter \
+         must keep it: dropping it hides the very work this cycle is about"
+    );
+    assert!(
+        focused.contains("Alpha rule: land one PR."),
+        "the focused project's rules stay in force"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}

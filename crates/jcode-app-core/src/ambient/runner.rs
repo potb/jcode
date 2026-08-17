@@ -926,6 +926,11 @@ impl AmbientRunnerHandle {
         };
         let mut scheduler = AdaptiveScheduler::new(scheduler_config);
 
+        // Whose turn it is. Registered fresh on every pass, so a project the
+        // user adds to config while the daemon runs joins the rotation without
+        // a restart, due immediately. See `docs/AMBIENT_PER_PROJECT.md`.
+        let mut project_ledger = ambient::ProjectWakeLedger::new();
+
         // Initialize safety system for ambient tools
         ambient_tools::init_safety_system(Arc::clone(&self.inner.safety));
 
@@ -1130,11 +1135,31 @@ impl AmbientRunnerHandle {
                 continue;
             }
 
-            // Try to acquire lock
-            let lock = match AmbientLock::try_acquire() {
+            // Whose cycle this is. Registering every pass keeps a project added
+            // to config mid-run in the rotation; a due queue item overrides the
+            // rotation, since it is explicit work for a named project.
+            for path in ambient::workable_project_paths() {
+                project_ledger.register(Some(path), Utc::now());
+            }
+            project_ledger.register(None, Utc::now());
+            let due_item_projects = match AmbientManager::new() {
+                Ok(mgr) => mgr.due_ambient_item_projects(),
+                Err(_) => Vec::new(),
+            };
+            let cycle_project =
+                ambient::select_cycle_project(&project_ledger, &due_item_projects, Utc::now());
+            if let Some(ref project) = cycle_project {
+                logging::info(&format!("Ambient runner: this cycle is for {}", project));
+            }
+
+            // Per-project lock, so a long cycle in one project cannot exclude
+            // every other one. `None` keeps the historical global lock file.
+            let lock = match AmbientLock::try_acquire_for(cycle_project.as_deref()) {
                 Ok(Some(lock)) => lock,
                 Ok(None) => {
-                    logging::info("Ambient runner: another instance holds the lock, waiting");
+                    logging::info(
+                        "Ambient runner: another instance holds this project's lock, waiting",
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     continue;
                 }
@@ -1159,7 +1184,13 @@ impl AmbientRunnerHandle {
             logging::info("Ambient runner: starting ambient cycle");
             self.set_running_detail("starting cycle").await;
 
-            let cycle_result = self.run_cycle(&provider).await;
+            let cycle_result = self.run_cycle(&provider, cycle_project.as_deref()).await;
+
+            project_ledger.record_cycle(
+                cycle_project.clone(),
+                Utc::now(),
+                scheduler.calculate_interval(None),
+            );
 
             // Clear the soft interrupt queue — cycle is done
             {
@@ -1176,7 +1207,8 @@ impl AmbientRunnerHandle {
 
                     // Update state
                     if let Ok(mut mgr) = AmbientManager::new() {
-                        let _ = mgr.record_cycle_result(result.clone());
+                        let _ =
+                            mgr.record_cycle_result_for(cycle_project.as_deref(), result.clone());
                         // The cycle finished, so its claim is settled. Drop the
                         // crash-recovery record or the next startup would treat
                         // completed work as abandoned and run it again.
@@ -1367,6 +1399,7 @@ impl AmbientRunnerHandle {
     async fn build_cycle_context(
         &self,
         provider: &Arc<dyn Provider>,
+        project: Option<&str>,
     ) -> anyhow::Result<(String, String, Vec<ScheduledItem>)> {
         let state = self.inner.state.read().await.clone();
 
@@ -1397,7 +1430,8 @@ impl AmbientRunnerHandle {
 
         let active_sessions = *self.inner.active_user_sessions.read().await;
 
-        let system_prompt = ambient::build_ambient_system_prompt(
+        let system_prompt = ambient::build_ambient_system_prompt_for(
+            project,
             &state,
             &queue_items,
             &graph_health,
@@ -1495,12 +1529,17 @@ impl AmbientRunnerHandle {
     }
 
     /// Run a single ambient cycle. Returns the cycle result.
-    async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
+    async fn run_cycle(
+        &self,
+        provider: &Arc<dyn Provider>,
+        project: Option<&str>,
+    ) -> anyhow::Result<AmbientCycleResult> {
         let started_at = Utc::now();
         let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
-        let (system_prompt, initial_message, claimed) = self.build_cycle_context(provider).await?;
+        let (system_prompt, initial_message, claimed) =
+            self.build_cycle_context(provider, project).await?;
 
         // A claimed item is only safely consumed once the cycle has actually
         // had a chance to act on it. If the cycle cannot run at all, put the

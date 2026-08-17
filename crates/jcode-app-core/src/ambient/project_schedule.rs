@@ -52,3 +52,23 @@ impl ProjectWakeLedger {
         self.next_wake.is_empty()
     }
 }
+
+/// Which project the next cycle belongs to.
+///
+/// A due queue item is explicit work for its own project, so it outranks the
+/// ledger's turn-taking; several due items resolve in queue order, which is
+/// already priority-then-time. Otherwise the longest-waiting due project goes,
+/// and `None` — the unfocused, project-less cycle — participates like any
+/// other, since gardening is real work that must still get turns.
+pub fn select_cycle_project(
+    ledger: &ProjectWakeLedger,
+    due_item_projects: &[ProjectKey],
+    now: DateTime<Utc>,
+) -> ProjectKey {
+    for project in due_item_projects {
+        if project.is_some() {
+            return project.clone();
+        }
+    }
+    ledger.due_project(now).unwrap_or(None)
+}
