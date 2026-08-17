@@ -25,6 +25,16 @@ impl MemoryTool {
         }
     }
 
+    /// Report for an empty `search`, which names the substring rule rather than
+    /// implying the memory is absent. See issue #193.
+    fn no_substring_match_report(query: &str) -> String {
+        format!(
+            "no substring match for '{}' (search matches the whole query as one \
+             contiguous substring, not per-word); try fewer words",
+            query
+        )
+    }
+
     fn parse_scope(scope: Option<&str>, default: MemoryScope) -> Result<MemoryScope> {
         match scope.unwrap_or(match default {
             MemoryScope::Project => "project",
@@ -318,7 +328,7 @@ impl Tool for MemoryTool {
                 });
                 memory::set_state(MemoryState::Idle);
                 if results.is_empty() {
-                    Ok(ToolOutput::new(format!("No memories matching '{}'", query)))
+                    Ok(ToolOutput::new(Self::no_substring_match_report(&query)))
                 } else {
                     let mut out = format!("Found {} memories:\n\n", results.len());
                     for e in results {
@@ -878,6 +888,72 @@ mod tests {
             "test mode unexpectedly saw real project memory, so this test cannot \
              distinguish the two paths: {}",
             blind.output
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    /// An empty `search` must name the substring rule, not imply absence (#193).
+    #[tokio::test]
+    async fn an_empty_search_result_names_the_substring_rule_instead_of_reporting_absence() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        tool.execute(
+            json!({
+                "action": "remember",
+                "content": "fnm node lives under a versions directory used by every worktree",
+                "scope": "global",
+            }),
+            test_ctx(None),
+        )
+        .await
+        .expect("remember should succeed");
+
+        let scattered = tool
+            .execute(
+                json!({ "action": "search", "query": "node worktree fnm" }),
+                test_ctx(None),
+            )
+            .await
+            .expect("search should succeed");
+
+        let contiguous = tool
+            .execute(
+                json!({ "action": "search", "query": "fnm node" }),
+                test_ctx(None),
+            )
+            .await
+            .expect("search should succeed");
+
+        assert!(
+            contiguous.output.contains("Found 1 memories"),
+            "control failed: the store must answer a contiguous query, else this \
+             test proves nothing about the empty-result message. Got: {}",
+            contiguous.output
+        );
+        assert!(
+            scattered.output.contains("no substring match"),
+            "an empty result must name the substring rule rather than read as \
+             absence. Got: {}",
+            scattered.output
+        );
+        assert!(
+            scattered.output.contains("fewer words"),
+            "an empty result must suggest the recovery. Got: {}",
+            scattered.output
+        );
+        assert!(
+            !scattered.output.contains("No memories matching"),
+            "the old absence wording must be gone. Got: {}",
+            scattered.output
         );
 
         if let Some(prev_home) = prev_home {
