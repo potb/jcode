@@ -2,15 +2,17 @@
 
 Tracking issue: [#126](https://github.com/potb/jcode/issues/126).
 
-Ambient mode is currently global: one queue, one `state.json`, one scheduler,
-one lock, and one prompt that concatenates every configured project and lets
-the model choose where to work. The issue asks for those to become per-project
+Ambient mode used to be global: one queue, one `state.json`, one scheduler,
+one lock, and one prompt that concatenated every configured project and let
+the model choose where to work. The issue asked for those to become per-project
 so that a busy project cannot starve a quiet one and a cycle's history is
 attributable to the project it was about.
 
-The conversion is staged, because state, queue, scheduler and lock all have to
-agree on *which project an item belongs to* before any of them can be split.
-This document covers stage 1: project identity.
+All four stages have shipped, and this document describes the result. The
+conversion was staged because state, queue, scheduler and lock all have to
+agree on *which project an item belongs to* before any of them can be split,
+and the stage headings below are kept because they explain why each mechanism
+is shaped the way it is.
 
 ## Project identity
 
@@ -53,7 +55,8 @@ envelope, `AmbientStateFile`:
 - `global` — exactly the old shape. Cycles that belong to no project
   (gardening, memory work) are real, and the daemon's own scheduling status is
   a single process-wide fact, so both keep living here. `ambient status`, the
-  scheduler and the prompt still read this slot and are unchanged by stage 2.
+  scheduler and the prompt read this slot, and still do after stage 4: a
+  focused cycle writes its project slot *and* this one.
 - `projects` — a map keyed by the stage 1 project identity, so a project's
   cycle count, last run and last summary are attributable to it.
 
@@ -75,9 +78,9 @@ it.
 
 ## Per-project scheduler and lock
 
-Stage 3, and like stages 1 and 2 it adds the mechanism without changing
-observable behaviour: nothing constructs a `ProjectWakeLedger` in the runner
-yet, and the runner still takes the global lock. Stage 4 is what wires it.
+Stage 3. It added the mechanism without changing observable behaviour, which
+stage 4 then wired into the runner: the loop registers every workable project
+in a `ProjectWakeLedger` and takes the per-project lock described below.
 
 ### Lock
 
