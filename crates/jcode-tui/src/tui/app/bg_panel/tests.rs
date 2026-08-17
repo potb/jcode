@@ -50,6 +50,7 @@ fn status_maps_to_panel_states_including_orphans() {
         wake: false,
         progress: None,
         event_history: Vec::new(),
+        stall_wake_seconds: None,
     };
 
     let task = to_bg_task(&manager, &status, Some("session-a"));
@@ -124,6 +125,7 @@ fn elapsed_falls_back_to_wall_clock_for_running_tasks() {
         wake: false,
         progress: None,
         event_history: Vec::new(),
+        stall_wake_seconds: None,
     };
     let elapsed = elapsed_secs(&status).expect("running task should report elapsed time");
     assert!(
@@ -164,6 +166,7 @@ fn old_finished_tasks_are_dropped_from_the_panel() {
             wake: false,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         }
     };
 
@@ -220,6 +223,7 @@ fn tasks_are_ordered_by_start_time_not_by_id() {
         wake: false,
         progress: None,
         event_history: Vec::new(),
+        stall_wake_seconds: None,
     };
     let now = chrono::Utc::now();
     // Lexically "100000aaaa" < "999999bbbb", but the "100000" task is newer.
@@ -531,6 +535,7 @@ fn list_sync_reads_status_files_from_the_task_directory() {
             notify: true,
             wake: false,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         };
         std::fs::write(
             tmp.path().join(format!("{id}.status.json")),
@@ -644,6 +649,7 @@ fn list_sync_can_skip_status_files_older_than_a_cutoff() {
             notify: true,
             wake: false,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         };
         let path = tmp.path().join(format!("{id}.status.json"));
         std::fs::write(&path, serde_json::to_string(&status).expect("serialize"))

@@ -1,9 +1,9 @@
 {
-  "total": 3415,
+  "total": 3428,
   "totals_by_pattern": {
-    "dot_ok": 1293,
+    "dot_ok": 1300,
     "let_underscore": 1250,
-    "unwrap_or_default": 872
+    "unwrap_or_default": 878
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -643,7 +643,7 @@
     },
     "crates/jcode-base/src/auth/cursor.rs": {
       "dot_ok": 10,
-      "let_underscore": 3,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/env_facts.rs": {
@@ -667,9 +667,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/grok_build.rs": {
-      "dot_ok": 1,
+      "dot_ok": 5,
       "let_underscore": 0,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 4
     },
     "crates/jcode-base/src/auth/lifecycle.rs": {
       "dot_ok": 4,
@@ -707,9 +707,9 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-base/src/background.rs": {
-      "dot_ok": 33,
+      "dot_ok": 35,
       "let_underscore": 17,
-      "unwrap_or_default": 9
+      "unwrap_or_default": 11
     },
     "crates/jcode-base/src/battery.rs": {
       "dot_ok": 5,
@@ -1988,7 +1988,7 @@
     },
     "crates/jcode-tui/src/tui/app/auth.rs": {
       "dot_ok": 7,
-      "let_underscore": 3,
+      "let_underscore": 4,
       "unwrap_or_default": 13
     },
     "crates/jcode-tui/src/tui/app/auth_account_commands.rs": {
@@ -2118,7 +2118,7 @@
     },
     "crates/jcode-tui/src/tui/app/local.rs": {
       "dot_ok": 0,
-      "let_underscore": 5,
+      "let_underscore": 6,
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/model_context.rs": {
@@ -2452,9 +2452,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/ui_viewport.rs": {
-      "dot_ok": 2,
+      "dot_ok": 3,
       "let_underscore": 0,
-      "unwrap_or_default": 0
+      "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/workspace_client.rs": {
       "dot_ok": 0,
