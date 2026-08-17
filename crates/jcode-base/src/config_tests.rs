@@ -1334,3 +1334,214 @@ fn config_reload_generation_increments_on_cache_invalidation() {
         "invalidate_config_cache must bump the reload generation ({before} -> {after})"
     );
 }
+
+/// Temporary jcode home + env vars, mutated, then read back. See
+/// `docs/CONFIG_PERSISTENCE.md`.
+fn saved_file_after(
+    user_file: &str,
+    env: &[(&str, &str)],
+    mutate: impl FnOnce() -> anyhow::Result<()>,
+) -> String {
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    jcode_core::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(temp.path().join("config.toml"), user_file).expect("write config");
+
+    let restore: Vec<(String, Option<std::ffi::OsString>)> = env
+        .iter()
+        .map(|(key, value)| {
+            let previous = std::env::var_os(key);
+            jcode_core::env::set_var(key, value);
+            ((*key).to_string(), previous)
+        })
+        .collect();
+    crate::config::invalidate_config_cache();
+
+    let outcome = mutate();
+
+    let after = std::fs::read_to_string(temp.path().join("config.toml")).expect("read back");
+    for (key, previous) in restore {
+        match previous {
+            Some(value) => jcode_core::env::set_var(&key, value),
+            None => jcode_core::env::remove_var(&key),
+        }
+    }
+    match prev_home {
+        Some(value) => jcode_core::env::set_var("JCODE_HOME", value),
+        None => jcode_core::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+
+    outcome.expect("mutation must succeed");
+    after
+}
+
+/// A setter must not persist an environment override. See
+/// `docs/CONFIG_PERSISTENCE.md`.
+#[test]
+fn a_setter_does_not_persist_an_environment_override() {
+    let _lock = crate::storage::lock_test_env();
+
+    let after = saved_file_after(
+        "[display]\ntheme = \"light\"\n",
+        // Opposite of the shipped default, so a leak is visible in the file.
+        &[("JCODE_SHOW_AGENTGREP_OUTPUT", "1")],
+        || Config::set_default_model_only(Some("probe-model")),
+    );
+
+    assert!(
+        !after.contains("show_agentgrep_output"),
+        "an env-only override was burned into the user's config:\n{after}"
+    );
+    assert!(
+        after.contains("theme"),
+        "the setter dropped an unrelated user setting:\n{after}"
+    );
+}
+
+/// An override equal to a default is the destructive case: `save` prunes it and
+/// the user's opposite value disappears. See `docs/CONFIG_PERSISTENCE.md`.
+#[test]
+fn an_environment_override_equal_to_a_default_does_not_erase_the_user_setting() {
+    let _lock = crate::storage::lock_test_env();
+
+    let after = saved_file_after(
+        "[display]\nsession_facts = \"left\"\npin_usage = true\npin_todos = false\n",
+        &[
+            ("JCODE_SESSION_FACTS", "right"),
+            ("JCODE_PIN_USAGE", "false"),
+            ("JCODE_PIN_TODOS", "true"),
+        ],
+        || Config::set_default_model_only(Some("probe-model")),
+    );
+
+    for key in ["session_facts", "pin_usage", "pin_todos"] {
+        assert!(
+            after.contains(key),
+            "an env var equal to the default erased {key}:\n{after}"
+        );
+    }
+}
+
+/// Structured sections cannot be reconstructed from defaults, so losing them is
+/// the most expensive failure.
+#[test]
+fn a_setter_preserves_structured_user_sections() {
+    let _lock = crate::storage::lock_test_env();
+
+    let after = saved_file_after(
+        "[ambient]\nenabled = true\nauto_approve_permissions = true\n\n\
+         [[ambient.projects]]\npath = \"/work/alpha\"\npr_repo = \"me/alpha\"\n\n\
+         [[cron]]\nid = \"nightly\"\nevery = \"6h\"\nenabled = true\n",
+        // Equal to the shipped default, which is what triggers pruning: the
+        // user's explicit `true` would be dropped from the file.
+        &[
+            ("JCODE_AMBIENT_AUTO_APPROVE", "false"),
+            ("JCODE_SESSION_FACTS", "right"),
+        ],
+        || Config::set_default_model_only(Some("probe-model")),
+    );
+
+    for key in [
+        "auto_approve_permissions",
+        "ambient.projects",
+        "/work/alpha",
+        "cron",
+        "nightly",
+    ] {
+        assert!(after.contains(key), "the setter dropped {key}:\n{after}");
+    }
+}
+
+/// `load_for_edit` reads the file only; `load` still honours the environment.
+#[test]
+fn load_for_edit_ignores_the_environment_but_load_does_not() {
+    let _lock = crate::storage::lock_test_env();
+
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    jcode_core::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[display]\nsession_facts = \"left\"\n",
+    )
+    .expect("write config");
+
+    let prev_facts = std::env::var_os("JCODE_SESSION_FACTS");
+    jcode_core::env::set_var("JCODE_SESSION_FACTS", "right");
+    crate::config::invalidate_config_cache();
+
+    let for_edit = Config::load_for_edit().display.session_facts;
+    let with_env = Config::load().display.session_facts;
+
+    match prev_facts {
+        Some(value) => jcode_core::env::set_var("JCODE_SESSION_FACTS", value),
+        None => jcode_core::env::remove_var("JCODE_SESSION_FACTS"),
+    }
+    match prev_home {
+        Some(value) => jcode_core::env::set_var("JCODE_HOME", value),
+        None => jcode_core::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+
+    assert_eq!(
+        for_edit,
+        jcode_config_types::SessionFactsMode::Left,
+        "load_for_edit must report the file, not the environment"
+    );
+    assert_eq!(
+        with_env,
+        jcode_config_types::SessionFactsMode::Right,
+        "load must still apply environment overrides"
+    );
+}
+
+/// Rejects a setter that loads env overrides and then saves. See
+/// `docs/CONFIG_PERSISTENCE.md`.
+#[test]
+fn no_config_setter_loads_with_environment_overrides_applied() {
+    let source = include_str!("config/config_file.rs");
+
+    // A binding is a write path when the same function later saves. Scan each
+    // `fn` body rather than the file, so read-only lookups that legitimately
+    // want env overrides are not flagged.
+    let mut offenders: Vec<String> = Vec::new();
+    let mut current_fn: Option<String> = None;
+    let mut body: Vec<&str> = Vec::new();
+
+    let flush = |name: &Option<String>, body: &[&str], offenders: &mut Vec<String>| {
+        let Some(name) = name else { return };
+        let loads_with_env = body
+            .iter()
+            .any(|line| line.contains("= Self::load();") || line.trim() == "Self::load()");
+        let saves = body.iter().any(|line| line.contains(".save()"));
+        if loads_with_env && saves {
+            offenders.push(name.clone());
+        }
+    };
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("pub fn ").or(trimmed
+            .strip_prefix("fn ")
+            .or(trimmed.strip_prefix("pub(crate) fn ")))
+        {
+            flush(&current_fn, &body, &mut offenders);
+            let name = rest.split('(').next().unwrap_or(rest).to_string();
+            current_fn = Some(name);
+            body.clear();
+            continue;
+        }
+        body.push(trimmed);
+    }
+    flush(&current_fn, &body, &mut offenders);
+
+    assert!(
+        offenders.is_empty(),
+        "these functions load env overrides and then save; use \
+         Config::load_for_edit instead: {offenders:?}"
+    );
+}

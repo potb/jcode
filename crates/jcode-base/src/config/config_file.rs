@@ -15,6 +15,12 @@ impl Config {
         config
     }
 
+    /// Load the on-disk config for a read-modify-write cycle, without applying
+    /// environment overrides. See `docs/CONFIG_PERSISTENCE.md`.
+    pub fn load_for_edit() -> Self {
+        Self::load_from_file().unwrap_or_default()
+    }
+
     /// Load config from file, with environment variable overrides.
     ///
     /// Unlike [`Self::load`], this returns TOML/read errors to callers that need
@@ -134,7 +140,7 @@ impl Config {
     /// Update the copilot premium mode in the config file.
     /// Reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.copilot_premium = mode.map(|s| s.to_string());
         cfg.save()?;
         crate::logging::info(&format!(
@@ -147,7 +153,7 @@ impl Config {
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
         cfg.save()?;
@@ -161,19 +167,19 @@ impl Config {
 
     /// Update just the default provider in the config file.
     pub fn set_default_provider(provider: Option<&str>) -> anyhow::Result<()> {
-        let cfg = Self::load();
+        let cfg = Self::load_for_edit();
         Self::set_default_model(cfg.provider.default_model.as_deref(), provider)
     }
 
     /// Update just the default model in the config file.
     pub fn set_default_model_only(model: Option<&str>) -> anyhow::Result<()> {
-        let cfg = Self::load();
+        let cfg = Self::load_for_edit();
         Self::set_default_model(model, cfg.provider.default_provider.as_deref())
     }
 
     /// Update the persisted OpenAI reasoning effort preference.
     pub fn set_openai_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.openai_reasoning_effort = value.map(|s| s.to_string());
         cfg.save()?;
         crate::logging::info(&format!(
@@ -185,7 +191,7 @@ impl Config {
 
     /// Update the persisted Anthropic reasoning effort preference.
     pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
         cfg.save()?;
         crate::logging::info(&format!(
@@ -197,7 +203,7 @@ impl Config {
 
     /// Update the persisted OpenAI transport preference.
     pub fn set_openai_transport(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.openai_transport = value.map(|s| s.to_string());
         cfg.save()?;
         crate::logging::info(&format!(
@@ -209,7 +215,7 @@ impl Config {
 
     /// Update the persisted OpenAI service tier preference.
     pub fn set_openai_service_tier(value: Option<&str>) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.provider.openai_service_tier = value.map(|s| s.to_string());
         cfg.save()?;
         crate::logging::info(&format!(
@@ -221,7 +227,7 @@ impl Config {
 
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.centered = centered;
         cfg.save()?;
         crate::logging::info(&format!("Saved display.centered to config: {}", centered));
@@ -230,7 +236,7 @@ impl Config {
 
     /// Update the persisted reasoning display mode preference.
     pub fn set_reasoning_display(mode: ReasoningDisplayMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.set_reasoning_display(mode);
         cfg.save()?;
         crate::logging::info(&format!(
@@ -242,7 +248,7 @@ impl Config {
 
     /// Update the persisted compact-notifications preference.
     pub fn set_compact_notifications(compact: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.compact_notifications = compact;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -254,7 +260,7 @@ impl Config {
 
     /// Update the persisted pinned-todos preference.
     pub fn set_pin_todos(pin: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.pin_todos = pin;
         cfg.save()?;
         crate::logging::info(&format!("Saved display.pin_todos to config: {}", pin));
@@ -263,7 +269,7 @@ impl Config {
 
     /// Update the persisted side todo-widget visibility preference.
     pub fn set_todo_widget(mode: jcode_config_types::TodoWidgetMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.todo_widget = mode;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -275,7 +281,7 @@ impl Config {
 
     /// Update the persisted session-fact stack placement.
     pub fn set_session_facts(mode: jcode_config_types::SessionFactsMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.session_facts = mode;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -287,7 +293,7 @@ impl Config {
 
     /// Update the persisted side context-card visibility preference.
     pub fn set_context_widget(mode: jcode_config_types::ContextWidgetMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.context_widget = mode;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -299,7 +305,7 @@ impl Config {
 
     /// Update the persisted model-card identity visibility preference.
     pub fn set_model_widget(mode: jcode_config_types::ContextWidgetMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.model_widget = mode;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -311,7 +317,7 @@ impl Config {
 
     /// Update the persisted pinned-usage preference.
     pub fn set_pin_usage(pin: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.pin_usage = pin;
         cfg.save()?;
         crate::logging::info(&format!("Saved display.pin_usage to config: {}", pin));
@@ -320,7 +326,7 @@ impl Config {
 
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.show_agentgrep_output = show;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -332,7 +338,7 @@ impl Config {
 
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.tool_call_details = show;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -344,7 +350,7 @@ impl Config {
 
     /// Update the persisted tool-call-timings preference.
     pub fn set_tool_call_timings(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.display.tool_call_timings = show;
         cfg.save()?;
         crate::logging::info(&format!(
@@ -363,7 +369,7 @@ impl Config {
         entries: Vec<jcode_config_types::LaunchHotkeyEntry>,
         enabled: bool,
     ) -> anyhow::Result<()> {
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         cfg.launch_hotkeys.entries = entries;
         cfg.launch_hotkeys.enabled = Some(enabled);
         cfg.launch_hotkeys.imported = true;
@@ -398,7 +404,7 @@ impl Config {
     pub fn bake_launch_hotkeys_once() -> bool {
         use jcode_import_core::repo_ranking;
 
-        let cfg = Self::load();
+        let cfg = Self::load_for_edit();
         if cfg.launch_hotkeys.imported {
             return false;
         }
@@ -685,7 +691,7 @@ impl Config {
             return false;
         }
 
-        let cfg = Self::load();
+        let cfg = Self::load_for_edit();
         cfg.auth
             .trusted_external_sources
             .iter()
@@ -697,7 +703,7 @@ impl Config {
             return false;
         };
 
-        let cfg = Self::load();
+        let cfg = Self::load_for_edit();
         cfg.auth
             .trusted_external_source_paths
             .iter()
@@ -741,7 +747,7 @@ impl Config {
             anyhow::bail!("External auth source id cannot be empty");
         }
 
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         if !cfg
             .auth
             .trusted_external_sources
@@ -766,7 +772,7 @@ impl Config {
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         if !cfg
             .auth
             .trusted_external_source_paths
@@ -790,7 +796,7 @@ impl Config {
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         let before = cfg.auth.trusted_external_source_paths.len();
         cfg.auth
             .trusted_external_source_paths
@@ -812,7 +818,7 @@ impl Config {
         if source_id.is_empty() {
             return Ok(());
         }
-        let mut cfg = Self::load();
+        let mut cfg = Self::load_for_edit();
         let before = cfg.auth.trusted_external_sources.len();
         cfg.auth
             .trusted_external_sources
