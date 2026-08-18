@@ -578,8 +578,6 @@ fn todos_status_reports_side_widget_mode() {
 /// and twice when the widget is forced `on`.
 #[test]
 fn pinned_band_and_side_widget_do_not_duplicate_todo_text_under_auto() {
-    use crate::tui::TuiState;
-
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
