@@ -54,6 +54,31 @@ derived target height and its `MermaidDebugStats::last_target_height` mirror are
 gone, and the pane's preferred aspect ratio no longer bends the requested size
 (it still selects a render profile, so it still takes part in the cache key).
 
+### Zoom ceilings: two different 100%-relative numbers
+
+Two unrelated caps look alike and are easy to confuse.
+
+`KITTY_VIEWPORT_MAX_ZOOM_PERCENT` (200, in
+`crates/jcode-tui-mermaid/src/mermaid_viewport.rs`) is the top of the range the
+Kitty *virtual viewport* fast path supports. Inside it the terminal holds one
+placement and scrolling only moves the visible window; above it the pane falls
+back to crop-and-resize, which re-transmits pixels every frame. The same
+constant bounds the two pre-scaling clamps that build the state that path
+consumes, so all three uses move together.
+
+`SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT` and
+`PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT` (both 1000, in `jcode-tui`) cap
+something else: how far a *layout* may upscale to fill an under-used pane. They
+are deliberately much higher, because a plan above 200% is legal — it just
+costs a re-transmission per frame instead of a scroll.
+
+So the two numbers are not a mismatch to be reconciled. What ties them together
+is a rendering-cost expectation, not a shared bound, and it is enforced by
+tests rather than by the constants: `ui_pinned_tests` asserts that the diagrams
+we actually ship plan at or below the fast-path ceiling. Raising the auto-fill
+cap is safe; letting a shipped diagram plan past 200% is the regression those
+tests exist to catch.
+
 ## Target design
 
 Use an explicit, staged pipeline with pure data between stages:

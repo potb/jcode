@@ -1026,8 +1026,8 @@ fn side_panel_plans_the_kitty_fast_path_for_the_png_direction_3_would_render() {
     );
 
     assert!(
-        direction_3_zoom <= 200,
-        "the larger PNG direction (3) renders must still plan inside the <=200% Kitty fast path, \
+        direction_3_zoom <= jcode_tui_mermaid::KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
+        "the larger PNG direction (3) renders must still plan inside the Kitty fast path, \
          got {direction_3_zoom}%"
     );
     assert!(
@@ -1132,7 +1132,7 @@ fn side_panel_renders_a_sharper_mermaid_png_when_zoomed_in() {
             SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => zoom_percent,
         };
         assert!(
-            planned_zoom <= 200,
+            planned_zoom <= jcode_tui_mermaid::KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
             "the PNG the side panel really produced must stay inside the Kitty \
              fast path, got {planned_zoom}%"
         );

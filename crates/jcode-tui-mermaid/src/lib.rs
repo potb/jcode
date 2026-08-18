@@ -290,9 +290,10 @@ pub use runtime::{
     set_video_export_mode, uses_text_image_fallback, with_image_protocol_override,
 };
 pub use viewport_render::{
-    InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,
-    render_image_widget_fit_stable, render_image_widget_viewport,
-    render_image_widget_viewport_precise,
+    InlineFitReadiness, KITTY_VIEWPORT_MAX_ZOOM_PERCENT, inline_fit_readiness,
+    invalidate_render_state, prewarm_inline_fit_state, render_image_widget_fit_stable,
+    render_image_widget_viewport, render_image_widget_viewport_precise,
+    zoom_uses_kitty_viewport_fast_path,
 };
 pub use widget_render::{render_image_widget, render_image_widget_fit, render_image_widget_scale};
 
