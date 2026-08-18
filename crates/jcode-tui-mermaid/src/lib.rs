@@ -324,7 +324,7 @@ struct MeasuredSvgDimensions {
 ))]
 fn measure_svg_dimensions_from_svg(
     svg_source: &str,
-    output_dimensions: Option<(f32, f32)>,
+    output_width: Option<f32>,
 ) -> MeasuredSvgDimensions {
     let root_tag = svg_source
         .find("<svg")
@@ -338,7 +338,7 @@ fn measure_svg_dimensions_from_svg(
         .or_else(|| svg::parse_svg_explicit_size(root_tag))
         .unwrap_or((DEFAULT_RENDER_WIDTH as f32, DEFAULT_RENDER_HEIGHT as f32));
 
-    let (width, height) = if let Some((target_width, _target_height)) = output_dimensions {
+    let (width, height) = if let Some(target_width) = output_width {
         // Same width-driven fit `retarget_svg_for_png` applies, so the
         // dimensions reported here describe the SVG that is actually rendered.
         let (width, height) = svg::fit_natural_to_target_width(
@@ -367,11 +367,11 @@ fn render_svg_for_png(
     layout: &Layout,
     theme: &Theme,
     layout_config: &LayoutConfig,
-    output_dimensions: Option<(f32, f32)>,
+    output_width: Option<f32>,
 ) -> (String, MeasuredSvgDimensions) {
     let svg_source = render_svg(layout, theme, layout_config);
-    let dimensions = measure_svg_dimensions_from_svg(&svg_source, output_dimensions);
-    let svg = if let Some((target_width, _target_height)) = output_dimensions {
+    let dimensions = measure_svg_dimensions_from_svg(&svg_source, output_width);
+    let svg = if let Some(target_width) = output_width {
         svg::retarget_svg_for_png(&svg_source, target_width as f64)
     } else {
         svg_source
@@ -388,10 +388,10 @@ fn render_svg_for_png(
     layout: &Layout,
     theme: &Theme,
     layout_config: &LayoutConfig,
-    output_dimensions: Option<(f32, f32)>,
+    output_width: Option<f32>,
 ) -> (String, MeasuredSvgDimensions) {
     let natural = mmdr_measure_svg_dimensions(layout, layout_config, None);
-    let fitted = output_dimensions.map(|(target_width, _target_height)| {
+    let fitted = output_width.map(|target_width| {
         let (width, height) = svg::fit_natural_to_target_width(
             natural.width as f64,
             natural.height as f64,
@@ -1178,7 +1178,6 @@ pub struct MermaidDebugStats {
     pub last_viewbox_width: Option<u32>,
     pub last_viewbox_height: Option<u32>,
     pub last_target_width: Option<u32>,
-    pub last_target_height: Option<u32>,
     pub deferred_pending: usize,
     pub deferred_epoch: u64,
     /// Layout-tier cache resident entries (see `layout_cache_hits`).
