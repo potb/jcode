@@ -1935,7 +1935,7 @@ fn scheduled_item_project_key_is_canonical_and_boundary_safe() {
         temp.path().join("config.toml"),
         "[ambient]\nenabled = true\n\n\
          [[ambient.projects]]\npath = \"~/jcode\"\n\n\
-         [[ambient.projects]]\npath = \"/home/potb/projects/costo/beakon\"\n",
+         [[ambient.projects]]\npath = \"/home/potb/projects/acme/web\"\n",
     )
     .expect("write config");
     crate::config::invalidate_config_cache();
@@ -1966,8 +1966,8 @@ fn scheduled_item_project_key_is_canonical_and_boundary_safe() {
     assert_eq!(key(None), None);
     assert_eq!(key(Some("   ")), None, "a blank working dir owns nothing");
     assert_eq!(
-        key(Some("/home/potb/projects/costo/beakon")).as_deref(),
-        Some("/home/potb/projects/costo/beakon"),
+        key(Some("/home/potb/projects/acme/web")).as_deref(),
+        Some("/home/potb/projects/acme/web"),
         "each configured project resolves to itself"
     );
 
