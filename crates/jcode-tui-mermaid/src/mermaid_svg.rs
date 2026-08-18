@@ -80,7 +80,7 @@ pub(super) fn calculate_render_size(
     node_count: usize,
     edge_count: usize,
     terminal_width: Option<u16>,
-) -> (f64, f64) {
+) -> f64 {
     let base_width = if let Some(term_width) = terminal_width {
         let font_width = get_font_size().map(|(w, _)| w).unwrap_or(8) as f64;
         let pixel_width = term_width as f64 * font_width;
@@ -99,10 +99,7 @@ pub(super) fn calculate_render_size(
 
     let raw_width = (base_width * complexity_factor * RENDER_SUPERSAMPLE)
         .clamp(400.0, DEFAULT_RENDER_WIDTH as f64);
-    let width = normalize_render_target_width(raw_width) as f64;
-    let height = (width * 0.75).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
-
-    (width, height)
+    normalize_render_target_width(raw_width) as f64
 }
 
 pub(super) fn normalize_render_target_width(width: f64) -> u32 {
