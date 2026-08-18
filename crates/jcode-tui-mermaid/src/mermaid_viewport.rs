@@ -1,6 +1,18 @@
 use super::widget_render::set_cell_if_visible;
 use super::*;
 
+/// Zoom range the Kitty virtual-viewport fast path supports; outside it the
+/// pane re-transmits pixels every frame. See the "Zoom ceilings" section of
+/// `docs/MERMAID_RENDERING_REDESIGN.md`.
+pub const KITTY_VIEWPORT_MAX_ZOOM_PERCENT: u16 = 200;
+pub(super) const KITTY_VIEWPORT_MIN_ZOOM_PERCENT: u16 = 50;
+
+/// Whether a planned zoom can use the scroll-a-placement fast path rather than
+/// re-transmitting the crop each frame.
+pub fn zoom_uses_kitty_viewport_fast_path(zoom_percent: u16) -> bool {
+    zoom_percent <= KITTY_VIEWPORT_MAX_ZOOM_PERCENT
+}
+
 fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     if let Ok(mut cache) = SOURCE_CACHE.lock()
         && let Some(img) = cache.get(hash, path)
@@ -228,7 +240,10 @@ fn kitty_transmit_png_path(path: &Path, id: u32) -> Option<String> {
 fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> Cow<'_, DynamicImage> {
     use image::imageops::FilterType;
 
-    let zoom = zoom_percent.clamp(50, 200) as u32;
+    let zoom = zoom_percent.clamp(
+        KITTY_VIEWPORT_MIN_ZOOM_PERCENT as u8,
+        KITTY_VIEWPORT_MAX_ZOOM_PERCENT as u8,
+    ) as u32;
     if zoom == 100 {
         return Cow::Borrowed(source);
     }
@@ -265,7 +280,10 @@ pub(super) fn ensure_kitty_viewport_state(
     zoom_percent: u8,
     font_size: (u16, u16),
 ) -> Option<(u32, u16, u16)> {
-    let zoom_percent = zoom_percent.clamp(50, 200);
+    let zoom_percent = zoom_percent.clamp(
+        KITTY_VIEWPORT_MIN_ZOOM_PERCENT as u8,
+        KITTY_VIEWPORT_MAX_ZOOM_PERCENT as u8,
+    );
     let mut cache = KITTY_VIEWPORT_STATE.lock().ok()?;
     if let Some(state) = cache.get_mut(hash)
         && state.source_path == source_path
@@ -1418,7 +1436,7 @@ pub fn render_image_widget_viewport_precise(
         view_h_px,
     };
 
-    if zoom_percent <= 200
+    if zoom_uses_kitty_viewport_fast_path(zoom_percent)
         && picker.protocol_type() == ProtocolType::Kitty
         && let Some((_, full_cols, full_rows)) = ensure_kitty_viewport_state(
             hash,

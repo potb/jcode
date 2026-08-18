@@ -1026,8 +1026,8 @@ fn side_panel_plans_the_kitty_fast_path_for_the_png_direction_3_would_render() {
     );
 
     assert!(
-        direction_3_zoom <= 200,
-        "the larger PNG direction (3) renders must still plan inside the <=200% Kitty fast path, \
+        direction_3_zoom <= jcode_tui_mermaid::KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
+        "the larger PNG direction (3) renders must still plan inside the Kitty fast path, \
          got {direction_3_zoom}%"
     );
     assert!(
@@ -1132,9 +1132,32 @@ fn side_panel_renders_a_sharper_mermaid_png_when_zoomed_in() {
             SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => zoom_percent,
         };
         assert!(
-            planned_zoom <= 200,
+            planned_zoom <= jcode_tui_mermaid::KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
             "the PNG the side panel really produced must stay inside the Kitty \
              fast path, got {planned_zoom}%"
         );
     });
+}
+
+#[test]
+fn the_auto_fill_cap_is_deliberately_above_the_kitty_fast_path_ceiling() {
+    // The two numbers look alike and are easy to "reconcile" into one. They
+    // must not be: the auto-fill cap bounds what a layout may *request* when
+    // filling an under-used pane, while the Kitty ceiling bounds what stays on
+    // the scroll-a-placement path. This crate owns one and imports the other,
+    // so it is the only place the relation can actually be asserted rather
+    // than restated. See the "Zoom ceilings" section of
+    // docs/MERMAID_RENDERING_REDESIGN.md.
+    assert!(
+        super::layout_support::SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT
+            > jcode_tui_mermaid::KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
+        "auto-fill is allowed past the fast-path ceiling on purpose"
+    );
+    assert!(
+        !jcode_tui_mermaid::zoom_uses_kitty_viewport_fast_path(
+            super::layout_support::SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT
+        ),
+        "a plan at the auto-fill cap leaves the fast path, which is what the \
+         shipped-diagram assertions above guard against"
+    );
 }

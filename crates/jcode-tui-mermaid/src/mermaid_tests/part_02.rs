@@ -1053,3 +1053,37 @@ fn fallback_measured_dimensions_match_the_retargeted_svg() {
     assert!(out.contains(r#"width="600""#), "{out}");
     assert!(out.contains(r#"height="1800""#), "{out}");
 }
+
+#[test]
+fn kitty_fast_path_boundary_is_pinned_at_the_documented_zoom() {
+    use super::{KITTY_VIEWPORT_MAX_ZOOM_PERCENT, zoom_uses_kitty_viewport_fast_path};
+
+    assert_eq!(
+        KITTY_VIEWPORT_MAX_ZOOM_PERCENT, 200,
+        "the fast-path ceiling is a documented contract (see the \"Zoom ceilings\" \
+         section of docs/MERMAID_RENDERING_REDESIGN.md); moving it changes the \
+         per-frame cost of every side-panel diagram"
+    );
+    assert!(
+        zoom_uses_kitty_viewport_fast_path(KITTY_VIEWPORT_MAX_ZOOM_PERCENT),
+        "the ceiling itself is inside the fast path, not past it"
+    );
+    assert!(
+        !zoom_uses_kitty_viewport_fast_path(KITTY_VIEWPORT_MAX_ZOOM_PERCENT + 1),
+        "one percent above the ceiling must fall back to crop-and-resize"
+    );
+    assert!(zoom_uses_kitty_viewport_fast_path(100));
+}
+
+#[test]
+fn a_zoom_past_the_ceiling_leaves_the_fast_path() {
+    use super::zoom_uses_kitty_viewport_fast_path;
+
+    // Auto-fill planners in `jcode-tui` cap at 1000%, deliberately above this
+    // ceiling: a plan past it is legal and merely costs a re-transmission per
+    // frame instead of a scroll. The assertion that the two constants really
+    // stand in that relation lives in `jcode-tui`, which owns both; here we
+    // only pin that a zoom of that magnitude does leave the fast path.
+    assert!(!zoom_uses_kitty_viewport_fast_path(1000));
+    assert!(!zoom_uses_kitty_viewport_fast_path(201));
+}
