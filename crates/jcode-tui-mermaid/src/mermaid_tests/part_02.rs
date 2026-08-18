@@ -1076,21 +1076,14 @@ fn kitty_fast_path_boundary_is_pinned_at_the_documented_zoom() {
 }
 
 #[test]
-fn auto_fill_planners_may_exceed_the_kitty_fast_path_ceiling() {
-    use super::{KITTY_VIEWPORT_MAX_ZOOM_PERCENT, zoom_uses_kitty_viewport_fast_path};
+fn a_zoom_past_the_ceiling_leaves_the_fast_path() {
+    use super::zoom_uses_kitty_viewport_fast_path;
 
-    // The side panel and pinned pane both cap auto-fill at 1000%. That is not a
-    // bug to be reconciled with the 200% ceiling: a plan above it is legal and
-    // merely costs a re-transmission per frame. Pin the relationship so nobody
-    // "fixes" one number into the other.
-    const AUTO_FILL_CAP: u16 = 1000;
-    assert!(
-        AUTO_FILL_CAP > KITTY_VIEWPORT_MAX_ZOOM_PERCENT,
-        "auto-fill is deliberately allowed past the fast-path ceiling"
-    );
-    assert!(
-        !zoom_uses_kitty_viewport_fast_path(AUTO_FILL_CAP),
-        "a plan at the auto-fill cap leaves the fast path, which is what the \
-         ui_pinned_tests assertions guard against for shipped diagrams"
-    );
+    // Auto-fill planners in `jcode-tui` cap at 1000%, deliberately above this
+    // ceiling: a plan past it is legal and merely costs a re-transmission per
+    // frame instead of a scroll. The assertion that the two constants really
+    // stand in that relation lives in `jcode-tui`, which owns both; here we
+    // only pin that a zoom of that magnitude does leave the fast path.
+    assert!(!zoom_uses_kitty_viewport_fast_path(1000));
+    assert!(!zoom_uses_kitty_viewport_fast_path(201));
 }
