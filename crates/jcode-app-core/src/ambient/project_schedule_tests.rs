@@ -108,7 +108,7 @@ fn two_projects_take_different_lock_files_but_share_the_global_one() {
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let a = project_lock_path(Some("/home/potb/jcode")).expect("path");
-    let b = project_lock_path(Some("/home/potb/projects/costo/beakon")).expect("path");
+    let b = project_lock_path(Some("/home/potb/projects/acme/web")).expect("path");
     let global = project_lock_path(None).expect("path");
 
     assert_ne!(a, b, "distinct projects must not contend on one lock");
@@ -156,10 +156,10 @@ fn a_cycle_in_one_project_does_not_exclude_a_cycle_in_another() {
         .expect("try_acquire")
         .expect("first project acquires");
     let first_path = project_lock_path(Some("/home/potb/jcode")).expect("path");
-    let second = AmbientLock::try_acquire_for(Some("/home/potb/projects/costo/beakon"))
+    let second = AmbientLock::try_acquire_for(Some("/home/potb/projects/acme/web"))
         .expect("try_acquire")
         .expect("a second project must acquire while the first is held");
-    let second_path = project_lock_path(Some("/home/potb/projects/costo/beakon")).expect("path");
+    let second_path = project_lock_path(Some("/home/potb/projects/acme/web")).expect("path");
 
     assert!(
         first_path.exists() && second_path.exists(),

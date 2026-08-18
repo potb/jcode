@@ -95,8 +95,7 @@ fn an_envelope_state_file_round_trips_project_state() {
     assert_eq!(file.global.total_cycles, 10);
     assert_eq!(file.project("/home/potb/jcode").total_cycles, 3);
     assert_eq!(
-        file.project("/home/potb/projects/costo/beakon")
-            .total_cycles,
+        file.project("/home/potb/projects/acme/web").total_cycles,
         0,
         "a project with no history reads as default, not as an error"
     );
@@ -111,8 +110,8 @@ fn recording_a_cycle_updates_its_project_and_the_global_slot() {
 
     file.record_cycle(Some("/home/potb/jcode"), &cycle_result("jcode work"));
     file.record_cycle(
-        Some("/home/potb/projects/costo/beakon"),
-        &cycle_result("beakon work"),
+        Some("/home/potb/projects/acme/web"),
+        &cycle_result("web work"),
     );
     file.record_cycle(Some("/home/potb/jcode"), &cycle_result("more jcode work"));
 
@@ -122,8 +121,7 @@ fn recording_a_cycle_updates_its_project_and_the_global_slot() {
         Some("more jcode work")
     );
     assert_eq!(
-        file.project("/home/potb/projects/costo/beakon")
-            .total_cycles,
+        file.project("/home/potb/projects/acme/web").total_cycles,
         1,
         "another project's cycles must not be counted here"
     );
