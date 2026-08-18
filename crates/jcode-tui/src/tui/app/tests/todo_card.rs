@@ -432,6 +432,21 @@ impl Drop for TodoWidgetEnvGuard {
     }
 }
 
+/// Populates the async todo cache; `auto` + pinned band never reads it, hence
+/// the forced `on`.
+fn warm_todo_cache_with_widget_forced_on(app: &App) {
+    use crate::tui::TuiState;
+
+    let _widget_on = TodoWidgetEnvGuard::set("on");
+    for _ in 0..200 {
+        if !app.info_widget_data().todos.is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("todo cache never warmed; assertions on the side widget would measure a cold cache");
+}
+
 /// `display.todo_widget = auto` (the default) must not repeat the todo list on
 /// the side while `display.pin_todos` keeps it pinned above the transcript.
 #[test]
@@ -600,14 +615,7 @@ fn pinned_band_and_side_widget_do_not_duplicate_todo_text_under_auto() {
             .count()
     }
 
-    // Warm the async todo cache the info widget reads from, so a miss can't
-    // masquerade as the feature working.
-    for _ in 0..200 {
-        if !app.info_widget_data().todos.is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    warm_todo_cache_with_widget_forced_on(&app);
 
     let backend = ratatui::backend::TestBackend::new(160, 30);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
