@@ -62,6 +62,13 @@ PR_BRANCH="${JCODE_UPSTREAM_PR_BRANCH:-auto/upstream-merge-pr}"
 # conflict with upstream on every single future merge, forever.
 ENFORCE_ACTIONS_OFF="${JCODE_UPSTREAM_DISABLE_ACTIONS:-1}"
 LOG_DIR="${JCODE_UPSTREAM_LOG_DIR:-$STATE_DIR/logs}"
+# How long the same notification stays suppressed, in hours. The job runs on a
+# short schedule, so a condition the user has to fix by hand would otherwise be
+# reported on every single run, which trains them to ignore it.
+NOTIFY_REPEAT_HOURS="${JCODE_UPSTREAM_NOTIFY_REPEAT_HOURS:-24}"
+# Paths that must never reach the fork. A build directory committed by accident
+# is gigabytes of objects, and pushing it is not undoable on the remote.
+FORBIDDEN_PUBLISH_PATHS="${JCODE_UPSTREAM_FORBIDDEN_PATHS:-target target-base node_modules .direnv}"
 # Verification for a merge, mechanical or agent-produced.
 #
 # `cargo check --workspace` alone is not enough: the ratchet gates
@@ -82,7 +89,9 @@ mkdir -p "$LOG_DIR" "$STATE_DIR"
 LOG="$LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$LOG") 2>&1
 
-log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+# Stderr, not stdout: both are teed into the same log file, and functions here
+# return values through stdout, which log lines would otherwise corrupt.
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
 # --- locate jcode ------------------------------------------------------------
 JCODE_BIN="${JCODE_BIN:-}"
@@ -166,8 +175,18 @@ ensure_fork_actions_disabled() {
 # --- notify through jcode's own channels -------------------------------------
 # `jcode notify` fans out to ntfy/email/desktop/chat exactly as ambient does, so
 # this script never needs to know how the user is reachable.
+#
+# Repeats of an identical title are suppressed for NOTIFY_REPEAT_HOURS. Every
+# condition that reaches a notification here needs a human, and the schedule
+# fires far more often than a human answers, so without this the same message
+# arrives dozens of times and becomes noise to swipe away.
 notify() {
   local title="$1" body="$2" priority="$3"
+  if notify_is_muted "$title"; then
+    log "notification suppressed (sent within ${NOTIFY_REPEAT_HOURS}h): $title"
+    return 0
+  fi
+  notify_record "$title"
   if ! "$JCODE_BIN" notify --no-update "$title" "$body" --priority "$priority" 2>/dev/null; then
     # Older binaries lack `notify`. Falling back keeps the escalation path
     # working, since an unreported "needs_user" merge is the whole failure mode
@@ -177,6 +196,111 @@ notify() {
   fi
 }
 
+# Where the last send time of one notification title is remembered. The title is
+# reduced to a filename-safe key rather than hashed, so the state directory
+# stays readable when someone wonders why a message stopped arriving.
+notify_stamp_file() {
+  local key
+  key=$(printf '%s' "$1" | tr -cs 'A-Za-z0-9' '-' | cut -c1-80)
+  printf '%s/notified/%s' "$STATE_DIR" "$key"
+}
+
+notify_is_muted() {
+  local stamp now last
+  [ "$NOTIFY_REPEAT_HOURS" != "0" ] || return 1
+  stamp=$(notify_stamp_file "$1")
+  [ -f "$stamp" ] || return 1
+  last=$(cat "$stamp" 2>/dev/null)
+  case "$last" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date -u +%s)
+  [ $((now - last)) -lt $((NOTIFY_REPEAT_HOURS * 3600)) ]
+}
+
+notify_record() {
+  local stamp
+  stamp=$(notify_stamp_file "$1")
+  mkdir -p "$(dirname "$stamp")"
+  date -u +%s > "$stamp"
+}
+
+# The one worktree that has a branch checked out, empty when no worktree does.
+# A branch nobody has checked out can be moved with update-ref alone, which is
+# what lets this job keep working while the user is mid-edit elsewhere.
+worktree_holding_branch() {
+  git -C "$REPO" worktree list --porcelain \
+    | awk -v b="refs/heads/$1" '/^worktree /{w=$2} /^branch /{if ($2==b) print w}' \
+    | head -1
+}
+
+# Move the real repo's base branch to a commit this job produced or published.
+#
+# Never over uncommitted work, and never onto a commit that lacks anything the
+# branch already has: the user is often mid-edit here, and dropping their work
+# is the one regret this job must never cause. The target is usually a
+# descendant; it is a rewrite of the same content when the fork squashes.
+# When the branch is not checked out anywhere the ref moves directly, so working
+# on a feature branch no longer stalls the job.
+#
+# Failure is normal and not an error: the fork is already published by the time
+# this runs, and the next run adopts the same commit once the tree settles.
+adopt_base_ref() {
+  local target="$1" local_sha holder
+  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 1
+  [ "$local_sha" != "$target" ] || return 0
+  if ! git -C "$REPO" merge-base --is-ancestor "$local_sha" "$target" \
+    && ! work_is_contained_in "$local_sha" "$target"; then
+    log "$target does not contain everything on local $BASE; leaving the branch alone"
+    return 1
+  fi
+
+  holder=$(worktree_holding_branch "$BASE")
+  if [ -z "$holder" ]; then
+    if git -C "$REPO" update-ref "refs/heads/$BASE" "$target" "$local_sha"; then
+      log "moved $BASE to $target (not checked out anywhere)"
+      return 0
+    fi
+    log "WARNING: could not move $BASE to $target"
+    return 1
+  fi
+
+  if [ -n "$(git -C "$holder" status --porcelain)" ]; then
+    log "$holder has uncommitted changes; leaving $BASE at $local_sha for now"
+    return 1
+  fi
+  if git -C "$holder" reset --hard "$target" >/dev/null 2>&1; then
+    log "moved $BASE to $target in $holder"
+    return 0
+  fi
+  log "WARNING: could not move $BASE to $target in $holder"
+  return 1
+}
+
+# Refuse to publish a commit that carries a build directory.
+#
+# One accidental `git add` of a target directory is gigabytes of objects, and a
+# push cannot be taken back from the remote's history. Checked here rather than
+# trusted to .gitignore, because the commit that did this locally had already
+# slipped past it.
+publish_tree_is_safe() {
+  local sha="$1" path bad=""
+  for path in $FORBIDDEN_PUBLISH_PATHS; do
+    if git -C "$REPO" cat-file -e "$sha:$path" 2>/dev/null; then
+      bad="$bad $path"
+    fi
+  done
+  [ -n "$bad" ] || return 0
+  log "WARNING: refusing to publish $sha; it contains build output:$bad"
+  notify "Upstream merge would publish build output" \
+"The commit to publish contains:$bad
+
+That is build output, not source, so nothing was pushed. Remove those paths from
+the history of $BASE (they are usually one bad 'git add' in a merge commit),
+then this job resumes on its own.
+
+Inspect: git -C $REPO log --oneline --all --$(printf '%s' "$bad" | awk '{print $1}')" "high"
+  return 1
+}
+
 # The fork's owner/repo slug, derived from the fork remote URL.
 fork_slug() {
   local url
@@ -184,82 +308,94 @@ fork_slug() {
   printf '%s' "$url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##'
 }
 
-# Recover when the fork's base branch was rewritten on GitHub.
+# Merge two commits into a new commit without a working tree.
 #
-# The usual cause is deliberate history editing by the repo owner: commits
-# squashed, reordered, or dropped while the resulting code stays the same. That
-# leaves the remote branch with no ancestry relationship to the local one, which
-# is indistinguishable by SHA from "somebody pushed work that only exists on the
-# remote". Refusing outright was the old behavior and it wedged this job
-# permanently: every later run saw the same divergence and skipped publishing
-# forever, reporting nothing but a log line.
+# Printed on success, empty on conflict. Index-free so it is safe while the user
+# is mid-edit: no checkout, no stash, no dirty-tree dance, and a user config of
+# `merge.ff = only` cannot abort it the way `git merge` is aborted.
+merge_commit_of() {
+  local first="$1" second="$2" message="$3" tree
+  tree=$(merged_tree_of "$first" "$second") || return 1
+  git -C "$REPO" commit-tree "$tree" -p "$first" -p "$second" -m "$message" 2>/dev/null
+}
+
+# The tree two commits merge to, empty and nonzero when they conflict.
 #
-# So compare content, not ancestry. If the rewrite kept every local commit's
-# work (identical trees, or every local-only commit already present upstream by
-# patch id), the local branch is simply an outdated encoding of the same code
-# and is reset onto the remote. If local commits carry work the rewrite dropped,
-# that is real potential data loss: stop and tell the user, never reset over it.
+# `git merge-tree` still prints a tree for a conflicting merge, with the
+# conflict markers written into the files, so its exit status is the only honest
+# signal and is captured separately rather than through a pipeline.
+merged_tree_of() {
+  local out status
+  out=$(git -C "$REPO" merge-tree --write-tree "$1" "$2" 2>/dev/null)
+  status=$?
+  [ "$status" -eq 0 ] || return 1
+  printf '%s' "$out" | head -1
+}
+
+# Whether every change on `side` is already contained in `into`.
 #
-# Only ever resets the local base branch, and only when the working tree is
-# clean and actually on that branch, because the user is often mid-edit here.
-reconcile_rewritten_base() {
-  local remote_sha="$1" local_sha="$2"
-  log "$FORK_REMOTE/$BASE ($remote_sha) is not a descendant of local $BASE ($local_sha); checking for a history rewrite"
+# Compares content, not ancestry, because a rewritten branch (commits squashed,
+# reordered, or dropped while the code stays the same) has no ancestry relation
+# left to compare. Patch ids are not enough: squashing several commits produces
+# a combined patch matching none of the originals, so the most common rewrite of
+# all would read as lost work.
+work_is_contained_in() {
+  local side="$1" into="$2" into_tree merged_tree
+  git -C "$REPO" diff --quiet "$side" "$into" 2>/dev/null && return 0
+  into_tree=$(git -C "$REPO" rev-parse "$into^{tree}" 2>/dev/null) || return 1
+  merged_tree=$(merged_tree_of "$into" "$side") || return 1
+  [ "$merged_tree" = "$into_tree" ]
+}
 
-  local lost="" merged_tree remote_tree
-  if git -C "$REPO" diff --quiet "$local_sha" "$remote_sha" 2>/dev/null; then
-    log "the rewrite preserved the tree exactly; adopting $FORK_REMOTE/$BASE"
-  else
-    # Ask the only question that matters: does the local branch carry any
-    # content the rewrite does not already have? Merge the two in memory and
-    # compare the result against the remote. Same tree means local contributes
-    # nothing, so the rewrite kept all the work and only re-encoded it.
-    #
-    # Patch-id comparison (`git cherry`) is not enough here: squashing several
-    # commits into one produces a combined patch that matches none of the
-    # originals, so the most common rewrite of all would look like data loss.
-    remote_tree=$(git -C "$REPO" rev-parse "$remote_sha^{tree}" 2>/dev/null)
-    merged_tree=$(git -C "$REPO" merge-tree --write-tree "$remote_sha" "$local_sha" 2>/dev/null | head -1)
-    if [ -z "$merged_tree" ] || [ -z "$remote_tree" ]; then
-      # A conflicting merge means the two histories genuinely disagree about
-      # content, which is never a mechanical rewrite.
-      log "WARNING: local $BASE and $FORK_REMOTE/$BASE conflict; refusing to publish"
-      lost="  the two branches cannot be merged cleanly"
-    elif [ "$merged_tree" != "$remote_tree" ]; then
-      lost=$(git -C "$REPO" diff --stat "$remote_tree" "$merged_tree" 2>/dev/null | head -20 | sed 's/^/  /')
-    fi
-    if [ -n "$lost" ]; then
-      log "WARNING: local $BASE has work missing from $FORK_REMOTE/$BASE; refusing to publish"
-      log "$lost"
-      notify "Fork master was rewritten, local work would be lost" \
-"$FORK_REMOTE/$BASE was rewritten and no longer contains some commits on your local $BASE.
+# Reconcile a local base branch that has no ancestry relation to the fork's.
+#
+# Two very different situations produce the same SHA-level symptom, and treating
+# them alike is what wedged this job before:
+#
+#   1. A history rewrite on GitHub re-encoded the same code. Local is then an
+#      outdated encoding and is reset onto the remote.
+#   2. Both sides genuinely gained commits, which is the normal outcome of the
+#      user committing locally while a pull request merged on the fork. The
+#      honest resolution is a merge commit, published like any other.
+#
+# Only conflicting content is left to the user, since nothing here can decide
+# which side of a conflicting hunk is meant to win.
+#
+# Prints the commit the base branch should become, empty when it must not move.
+reconcile_diverged_base() {
+  local remote_sha="$1" local_sha="$2" merged
+  log "$FORK_REMOTE/$BASE ($remote_sha) and local $BASE ($local_sha) have diverged; reconciling"
 
-Nothing was published or reset. Resolve it by hand, then this job resumes on its own.
-
-Inspect: git -C $REPO log --oneline $FORK_REMOTE/$BASE..$BASE
-Keep the remote's history and replay your work: git -C $REPO rebase --onto $FORK_REMOTE/$BASE $remote_sha $BASE" "high"
-      return 1
-    fi
-    log "every local change is already in $FORK_REMOTE/$BASE (squashed, reordered, or dropped as redundant); adopting it"
-  fi
-
-  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
-    log "repo has uncommitted changes; not resetting $BASE onto $FORK_REMOTE/$BASE"
-    return 1
-  fi
-  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
-    log "repo is not on $BASE; not resetting onto $FORK_REMOTE/$BASE"
-    return 1
-  fi
-  if git -C "$REPO" reset --hard "$remote_sha" >/dev/null 2>&1; then
-    log "reset local $BASE onto the rewritten $FORK_REMOTE/$BASE ($remote_sha)"
+  if work_is_contained_in "$local_sha" "$remote_sha"; then
+    log "every local change is already in $FORK_REMOTE/$BASE; adopting the remote"
+    printf '%s' "$remote_sha"
     return 0
   fi
-  log "WARNING: could not reset $BASE onto $FORK_REMOTE/$BASE"
+
+  merged=$(merge_commit_of "$local_sha" "$remote_sha" \
+"Merge $FORK_REMOTE/$BASE into $BASE
+
+Both sides gained commits: the fork's base branch moved on GitHub while this
+clone committed work of its own. Merged by scripts/upstream_merge_agent.sh.")
+  if [ -n "$merged" ]; then
+    log "merged $FORK_REMOTE/$BASE into local $BASE as $merged"
+    printf '%s' "$merged"
+    return 0
+  fi
+
+  log "WARNING: local $BASE and $FORK_REMOTE/$BASE conflict; refusing to publish"
+  notify "Fork $BASE conflicts with your local $BASE" \
+"$FORK_REMOTE/$BASE and your local $BASE both changed the same lines, so they cannot be merged automatically.
+
+Nothing was published, reset, or lost. Resolve it once and this job resumes on its own.
+
+Inspect: git -C $REPO log --oneline $FORK_REMOTE/$BASE..$BASE
+Resolve:  git -C $REPO merge --no-ff $FORK_REMOTE/$BASE" "high"
   return 1
 }
 
-# Publish the fork's base branch when it is ahead of the fork remote.
+# Publish a commit to the fork when it is ahead of the fork remote. Defaults to
+# whatever local $BASE points at.
 #
 # The base branch is protected by a repository ruleset requiring a pull
 # request, so this pushes the commits to a PR branch, opens a pull request, and
@@ -275,32 +411,36 @@ publish_fork_if_ahead() {
     return 0
   }
 
-  local remote_sha local_sha
-  local_sha=$(git rev-parse "$BASE" 2>/dev/null) || return 0
-  remote_sha=$(git rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+  # What gets published is a commit, not a branch. The user's base branch may be
+  # checked out, dirty, or behind, and none of that should stop the fork from
+  # being updated; the branch is moved to match afterwards, if and when it can.
+  local remote_sha local_sha publish_sha
+  local_sha="${1:-}"
+  [ -n "$local_sha" ] || local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
+  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+  publish_sha="$local_sha"
 
-  if [ -n "$remote_sha" ] && [ "$remote_sha" = "$local_sha" ]; then
-    log "fork $FORK_REMOTE/$BASE already matches local $BASE"
-    return 0
-  fi
-  # The fork is AHEAD of local: the pull request from an earlier run was merged
-  # on GitHub, so its merge commit exists only on the remote. That is not a
-  # history rewrite and there is nothing new to publish, so adopt it and stop.
-  # Without this the check below would send an ordinary merged pull request
-  # through reconcile_rewritten_base.
-  if [ -n "$remote_sha" ] && git merge-base --is-ancestor "$local_sha" "$remote_sha"; then
-    log "$FORK_REMOTE/$BASE is ahead of local $BASE (a pull request was merged); adopting it"
-    sync_local_base_to_fork
-    return 0
-  fi
-  if [ -n "$remote_sha" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    reconcile_rewritten_base "$remote_sha" "$local_sha" || return 1
-    local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
-    [ "$local_sha" != "$remote_sha" ] || {
+  if [ -n "$remote_sha" ]; then
+    if [ "$remote_sha" = "$local_sha" ]; then
       log "fork $FORK_REMOTE/$BASE already matches local $BASE"
       return 0
-    }
+    fi
+    if git -C "$REPO" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+      log "$FORK_REMOTE/$BASE is ahead of local $BASE (a pull request was merged); adopting it"
+      adopt_base_ref "$remote_sha"
+      return 0
+    fi
+    if ! git -C "$REPO" merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+      publish_sha=$(reconcile_diverged_base "$remote_sha" "$local_sha") || return 1
+      if [ "$publish_sha" = "$remote_sha" ]; then
+        log "nothing local to publish; adopting $FORK_REMOTE/$BASE"
+        adopt_base_ref "$remote_sha"
+        return 0
+      fi
+    fi
   fi
+
+  publish_tree_is_safe "$publish_sha" || return 1
 
   ensure_fork_actions_disabled
 
@@ -343,11 +483,11 @@ Log: $LOG" "high"
     # The branch does not exist yet, so there is nothing to clobber.
     lease="--force"
   fi
-  if ! git push "$lease" "$FORK_REMOTE" "$BASE:refs/heads/$PR_BRANCH"; then
+  if ! git -C "$REPO" push "$lease" "$FORK_REMOTE" "$publish_sha:refs/heads/$PR_BRANCH"; then
     log "WARNING: push of $PR_BRANCH to $FORK_REMOTE failed"
     return 1
   fi
-  log "pushed $local_sha to $FORK_REMOTE/$PR_BRANCH"
+  log "pushed $publish_sha to $FORK_REMOTE/$PR_BRANCH"
 
   # The pull request branch is rebuilt from the current base on every run, so an
   # open pull request nobody merged yet gains the newer upstream commits instead
@@ -433,92 +573,50 @@ https://github.com/$slug/pull/$pr" "high"
     return 1
   fi
 
-  # The merge commit GitHub created is not in the local repo yet, and local
-  # $BASE is now behind by exactly that commit. Adopt it, so the next run's
-  # "is the fork ahead" check is honest instead of re-publishing forever.
-  #
-  # With the default merge method this is a plain fast-forward. The rewrite path
-  # is the fallback for a squash (JCODE_UPSTREAM_MERGE_METHOD=squash), which
-  # shares no ancestry with what was pushed.
-  git fetch --prune "$FORK_REMOTE" >/dev/null 2>&1 || true
+  # The merge commit GitHub created is not in the local repo yet, so local $BASE
+  # is behind by exactly that commit. Adopting it keeps the next run's "is the
+  # fork ahead" question honest instead of re-publishing forever.
+  git -C "$REPO" fetch --prune "$FORK_REMOTE" >/dev/null 2>&1 || true
   local new_remote_sha
   new_remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
-  if [ -n "$new_remote_sha" ] \
-    && ! git -C "$REPO" merge-base --is-ancestor "$local_sha" "$new_remote_sha"; then
-    reconcile_rewritten_base "$new_remote_sha" "$local_sha"
-  else
-    sync_local_base_to_fork
-  fi
+  [ -n "$new_remote_sha" ] && adopt_base_ref "$new_remote_sha"
+  return 0
 }
 
-# Fast-forward the real repo's base branch onto the fork remote after a pull
-# request merge. Guarded hard: the user may be mid-edit, and moving their branch
-# under them is exactly the regret this job must avoid.
-sync_local_base_to_fork() {
-  local remote_sha local_sha
-  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null) || return 0
-  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
-  [ "$local_sha" != "$remote_sha" ] || return 0
-
-  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
-    log "repo has uncommitted changes; not fast-forwarding $BASE to $FORK_REMOTE/$BASE"
-    return 0
-  fi
-  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
-    log "repo is not on $BASE; not fast-forwarding to $FORK_REMOTE/$BASE"
-    return 0
-  fi
-  if git -C "$REPO" merge --ff-only "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
-    log "fast-forwarded local $BASE to $FORK_REMOTE/$BASE ($remote_sha)"
-  else
-    log "WARNING: local $BASE could not fast-forward to $FORK_REMOTE/$BASE"
-  fi
-}
-
-# Pull whatever the fork's base branch gained on GitHub into the local base
-# before anything else happens.
+# The commit the upstream merge should be built on: local $BASE plus whatever
+# the fork's base branch gained on GitHub.
 #
-# The normal source of that is the user merging this job's own pull request:
-# the merge commit exists only on the remote. Merging upstream on top of a stale
-# local base would then produce a branch that diverges from the fork for no
-# reason, and the publish step would read the missing merge commit as data loss
-# and refuse to push. Runs before the upstream merge so the merge is built on
-# the base the fork actually has.
-integrate_fork_base() {
-  git remote get-url "$FORK_REMOTE" >/dev/null 2>&1 || return 0
-  [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ] || return 0
-
+# That remote-only work is normally this job's own pull request being merged.
+# Building the upstream merge on a stale local base instead would diverge from
+# the fork for no reason and make the publish step re-reconcile every run.
+#
+# Printed rather than checked out. Nothing here touches the branch or any
+# working tree, so an active edit session cannot stall the job, and a user
+# config of `merge.ff = only` cannot abort the merge.
+starting_commit() {
   local remote_sha local_sha
-  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null) || return 0
-  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 0
-  [ "$remote_sha" != "$local_sha" ] || return 0
-  # Nothing on the remote that the local base lacks. Publishing what is only
-  # local is publish_fork_if_ahead's job, not this one's.
-  git -C "$REPO" merge-base --is-ancestor "$remote_sha" "$local_sha" && return 0
-
-  if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
-    log "repo has uncommitted changes; not integrating $FORK_REMOTE/$BASE"
-    return 0
-  fi
-  if [ "$(git -C "$REPO" symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
-    log "repo is not on $BASE; not integrating $FORK_REMOTE/$BASE"
+  local_sha=$(git -C "$REPO" rev-parse "$BASE" 2>/dev/null) || return 1
+  if ! git -C "$REPO" remote get-url "$FORK_REMOTE" >/dev/null 2>&1 \
+    || [ "$FORK_REMOTE" = "$UPSTREAM_REMOTE" ]; then
+    printf '%s' "$local_sha"
     return 0
   fi
 
-  if git -C "$REPO" merge --ff-only "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
-    log "fast-forwarded local $BASE onto $FORK_REMOTE/$BASE ($remote_sha)"
+  remote_sha=$(git -C "$REPO" rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+  if [ -z "$remote_sha" ] || [ "$remote_sha" = "$local_sha" ] \
+    || git -C "$REPO" merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    printf '%s' "$local_sha"
     return 0
   fi
-  # Diverged: the remote gained the pull request merge while the local base
-  # gained commits of its own. A real merge is the honest resolution, and it is
-  # the same merge GitHub would show. Conflicts here are the user's to settle.
-  if git -C "$REPO" merge --no-edit "$FORK_REMOTE/$BASE" >/dev/null 2>&1; then
-    log "merged $FORK_REMOTE/$BASE into local $BASE"
+
+  if git -C "$REPO" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+    log "local $BASE is behind $FORK_REMOTE/$BASE ($remote_sha); building on the remote"
+    adopt_base_ref "$remote_sha"
+    printf '%s' "$remote_sha"
     return 0
   fi
-  git -C "$REPO" merge --abort >/dev/null 2>&1
-  log "WARNING: local $BASE and $FORK_REMOTE/$BASE diverged and do not merge cleanly"
-  return 1
+
+  reconcile_diverged_base "$remote_sha" "$local_sha"
 }
 
 cd "$REPO" || { log "repo missing: $REPO"; exit 1; }
@@ -543,11 +641,11 @@ if [ "$FORK_REMOTE" != "$UPSTREAM_REMOTE" ]; then
   git fetch --prune "$FORK_REMOTE" || log "WARNING: fetch $FORK_REMOTE failed"
 fi
 
-# Adopt anything the fork gained on GitHub (typically a merged pull request from
-# an earlier run) before deciding what upstream still owes this branch.
-integrate_fork_base
-
-BASE_SHA=$(git rev-parse "$BASE") || exit 1
+BASE_SHA=$(starting_commit)
+if [ -z "$BASE_SHA" ]; then
+  log "cannot determine a base to merge onto; stopping"
+  exit 1
+fi
 UP_SHA=$(git rev-parse "$UPSTREAM_REF") || exit 1
 
 if git merge-base --is-ancestor "$UP_SHA" "$BASE_SHA"; then
@@ -569,9 +667,7 @@ git worktree prune
 # The branch may be checked out in a DIFFERENT worktree (a leftover run with
 # another state dir, or one the user made). git's own error for this names a
 # path with no explanation, so say what to do about it.
-EXISTING=$(git worktree list --porcelain \
-  | awk -v b="refs/heads/$BRANCH" '/^worktree /{w=$2} /^branch /{if ($2==b) print w}' \
-  | head -1)
+EXISTING=$(worktree_holding_branch "$BRANCH")
 if [ -n "$EXISTING" ] && [ "$EXISTING" != "$WORKTREE" ]; then
   log "ERROR: branch $BRANCH is checked out in another worktree: $EXISTING"
   log "either remove it (git worktree remove '$EXISTING') or set JCODE_UPSTREAM_BRANCH"
@@ -776,37 +872,30 @@ Adopt:  git -C $REPO merge --ff-only $BRANCH"
 case "$STATUS" in
   merged)
     log "verdict: merged"
-    # Adopt into the real repo, then publish to the fork. Without this the merge
-    # would sit in a worktree forever and the fork would never actually be
-    # "kept updated", which is the whole point.
-    #
-    # Guarded hard: a fast-forward only, and only onto a clean tree at the
-    # expected commit. The user may well be mid-edit on this branch, and
-    # yanking master out from under them is exactly the regret this must avoid.
-    ADOPTED=""
+    # Publish the merge commit itself, then move $BASE to it if that is safe.
+    # The fork is what this job exists to keep updated, and holding the merge
+    # back because the user happens to be mid-edit is what left it sitting in a
+    # worktree while the fork fell further behind.
     cd "$REPO" || exit 1
-    if [ -n "$(git status --porcelain)" ]; then
-      log "repo has uncommitted changes; not adopting automatically"
-    elif [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
-      log "repo moved since the merge started; not adopting automatically"
-    elif [ "$(git symbolic-ref --quiet --short HEAD)" != "$BASE" ]; then
-      log "repo is not on $BASE; not adopting automatically"
-    elif git merge --ff-only "$BRANCH" >/dev/null 2>&1; then
-      ADOPTED="yes"
-      log "fast-forwarded $BASE to $BRANCH"
-      publish_fork_if_ahead
-    else
-      log "fast-forward of $BASE to $BRANCH failed; leaving it for review"
-    fi
+    MERGE_SHA=$(git rev-parse "$BRANCH") || exit 1
+    PUBLISHED=""
+    publish_fork_if_ahead "$MERGE_SHA" && PUBLISHED="yes"
+    ADOPTED=""
+    adopt_base_ref "$(git rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null || echo "$MERGE_SHA")" \
+      && ADOPTED="yes"
 
-    if [ -n "$ADOPTED" ]; then
+    if [ -n "$PUBLISHED" ] && [ -n "$ADOPTED" ]; then
       notify "Fork updated with upstream" "$DETAIL
 
 Adopted onto $BASE and pushed to $FORK_REMOTE." "default"
-    else
-      notify "Upstream merged, needs adopting" "$DETAIL
+    elif [ -n "$PUBLISHED" ]; then
+      notify "Fork updated with upstream" "$DETAIL
 
-The merge is committed on $BRANCH but was not applied automatically (see log).
+Pushed to $FORK_REMOTE. Your local $BASE was left where it is (uncommitted work or a conflicting edit), and a later run adopts it once the tree settles." "default"
+    else
+      notify "Upstream merged, needs publishing" "$DETAIL
+
+The merge is committed on $BRANCH but could not be published (see log).
 $REVIEW" "default"
     fi
     EXIT=0
