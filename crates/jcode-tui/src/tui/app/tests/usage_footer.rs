@@ -488,3 +488,62 @@ fn a_later_frame_gathers_the_info_widget_snapshot_again() {
         "off-frame readers must each gather fresh data, never share a memo"
     );
 }
+
+/// `display.background_widget = false` must hide the floating background-task
+/// card and keep the ambient inline strip stood down.
+///
+/// Without tasks running the data is absent either way, so this asserts on the
+/// two gates that decide whether the chrome can appear at all: the dock
+/// widget's `has_data_for` and the strip's stand-down rule.
+#[test]
+fn background_widget_config_hides_the_floating_card_and_strip() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_path = temp.path().join("config.toml");
+
+    let mut data = crate::tui::info_widget::InfoWidgetData::default();
+    data.background_info = Some(crate::tui::info_widget::BackgroundInfo {
+        running_count: 2,
+        running_tasks: vec!["cargo test".to_string(), "npm build".to_string()],
+        running_task_ids: vec!["a".to_string(), "b".to_string()],
+        progress_summary: None,
+        progress_detail: None,
+        memory_agent_active: false,
+        memory_agent_turns: 0,
+    });
+
+    std::fs::write(&config_path, "[display]\nbackground_widget = false\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(!crate::tui::info_widget::background_widget_visible());
+    assert!(
+        !data.has_data_for(crate::tui::info_widget::WidgetKind::BackgroundTasks),
+        "the floating card must not claim a placement while it is switched off"
+    );
+    assert!(
+        crate::tui::info_widget::bg_strip_stands_down_for_dock(),
+        "the ambient strip must stand down while the card is switched off"
+    );
+
+    std::fs::write(&config_path, "[display]\nbackground_widget = true\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(crate::tui::info_widget::background_widget_visible());
+    assert!(
+        data.has_data_for(crate::tui::info_widget::WidgetKind::BackgroundTasks),
+        "running tasks must place the card again once it is switched back on"
+    );
+}
