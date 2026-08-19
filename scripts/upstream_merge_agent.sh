@@ -880,9 +880,18 @@ case "$STATUS" in
     MERGE_SHA=$(git rev-parse "$BRANCH") || exit 1
     PUBLISHED=""
     publish_fork_if_ahead "$MERGE_SHA" && PUBLISHED="yes"
+
+    # Prefer the fork's own commit, so local $BASE ends up on exactly what
+    # GitHub has and the next run sees nothing left to publish. It is behind
+    # when publishing is off or a pull request is still open, and then the merge
+    # itself is what to adopt.
+    ADOPT_SHA=$(git rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null)
+    if [ -z "$ADOPT_SHA" ] \
+      || ! git merge-base --is-ancestor "$MERGE_SHA" "$ADOPT_SHA" 2>/dev/null; then
+      ADOPT_SHA="$MERGE_SHA"
+    fi
     ADOPTED=""
-    adopt_base_ref "$(git rev-parse "$FORK_REMOTE/$BASE" 2>/dev/null || echo "$MERGE_SHA")" \
-      && ADOPTED="yes"
+    adopt_base_ref "$ADOPT_SHA" && ADOPTED="yes"
 
     if [ -n "$PUBLISHED" ] && [ -n "$ADOPTED" ]; then
       notify "Fork updated with upstream" "$DETAIL

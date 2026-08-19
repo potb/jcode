@@ -148,4 +148,24 @@ JCODE_UPSTREAM_DISABLE_ACTIONS=0 \
 [ $? -eq 0 ] || { sed -n '1,60p' "$TMP/run3.log"; fail "the idempotent run failed"; }
 grep -q "pr create" "$GH_CALLS" && fail "an up-to-date fork must not open a pull request"
 
+# --- with publishing off, the merge is still adopted locally ----------------
+# JCODE_UPSTREAM_PUSH=0 is the dry-run switch, and a merge that lands nowhere is
+# the same stall in a different disguise.
+( cd "$SEED" && echo more > upstream_more.txt && git add . \
+  && git commit -qm "upstream: another change" && git push -q "$UPSTREAM" master )
+BEFORE=$(git -C "$REPO" rev-parse master)
+JCODE_BIN="$HOME/bin/jcode" \
+JCODE_UPSTREAM_REPO="$REPO" \
+JCODE_UPSTREAM_STATE_DIR="$TMP/state" \
+JCODE_UPSTREAM_WORKTREE="$TMP/state/worktree" \
+JCODE_UPSTREAM_CHECK_CMD="true" \
+JCODE_UPSTREAM_DISABLE_ACTIONS=0 \
+JCODE_UPSTREAM_PUSH=0 \
+  bash "$SCRIPT" > "$TMP/run4.log" 2>&1
+[ $? -eq 0 ] || { sed -n '1,60p' "$TMP/run4.log"; fail "the unpublished run failed"; }
+[ "$(git -C "$REPO" rev-parse master)" != "$BEFORE" ] \
+  || fail "an unpublished merge was never adopted locally"
+git -C "$REPO" cat-file -e "master:upstream_more.txt" 2>/dev/null \
+  || fail "the unpublished merge does not carry upstream's change"
+
 echo "PASS"
