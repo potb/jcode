@@ -100,6 +100,10 @@ pub struct DisplayConfig {
     /// just the one-line summary (default: false)
     #[serde(default)]
     pub show_agentgrep_output: bool,
+    /// Show up to the last three non-empty bash output lines beneath the tool
+    /// summary (default: false).
+    #[serde(default)]
+    pub show_bash_output: bool,
     /// Show the dimmed technical detail (command, path, args) after the
     /// model-provided intent on tool rows (default: false). When off, rows
     /// that have an intent show only the intent; rows without an intent
@@ -140,6 +144,8 @@ pub struct DisplayConfig {
     /// sessions (issue #674).
     #[serde(default = "default_true")]
     pub external_sessions: bool,
+    /// Usage percentage wording: "left" (default) or "used".
+    pub usage_display: String,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
@@ -198,6 +204,7 @@ impl Default for DisplayConfig {
             compact_notifications: false,
             copy_badge_alt_label: String::new(),
             show_agentgrep_output: false,
+            show_bash_output: false,
             tool_call_details: false,
             tool_call_timings: false,
             native_scrollbars: NativeScrollbarConfig::default(),
@@ -206,6 +213,7 @@ impl Default for DisplayConfig {
             colors: std::collections::BTreeMap::new(),
             active_sessions_manager: false,
             external_sessions: true,
+            usage_display: "left".to_string(),
             overscroll_status: OverscrollStatusMode::default(),
             session_facts: SessionFactsMode::default(),
             context_widget: ContextWidgetMode::default(),
@@ -253,6 +261,10 @@ impl DisplayConfig {
     /// Whether reasoning content should be generated/requested at all.
     pub fn reasoning_enabled(&self) -> bool {
         !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
+    }
+
+    pub fn usage_display_used(&self) -> bool {
+        self.usage_display.eq_ignore_ascii_case("used")
     }
 }
 
@@ -463,5 +475,14 @@ mod tests {
         let disabled: DisplayConfig =
             serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
         assert!(!disabled.pin_todos);
+    }
+
+    #[test]
+    fn usage_percentage_wording_defaults_to_left_and_accepts_used() {
+        assert_eq!(DisplayConfig::default().usage_display, "left");
+
+        let used: DisplayConfig =
+            serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
+        assert!(used.usage_display_used());
     }
 }

@@ -56,6 +56,9 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Auto-poke toggle. Set "" to disable.
+auto_poke_toggle = "ctrl+p"
+
 # Optional fallback scroll bindings (useful on macOS terminals that forward Command)
 # Leave unset by default; on macOS Cmd+K / Cmd+J move up / down by prompt instead.
 scroll_up_fallback = ""
@@ -194,6 +197,9 @@ debug_socket = false
 # Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
 emoji = true
 
+# Usage percentage wording: "left" (default) or "used".
+usage_display = "left"
+
 # Show thinking/reasoning content (default: false)
 show_thinking = false
 
@@ -227,6 +233,10 @@ prompt_entry_animation = true
 # the one-line summary (default: false). Useful when you want to read search
 # results directly in the chat.
 # show_agentgrep_output = false
+
+# Show up to the last three non-empty lines of bash output beneath the tool
+# summary (default: false).
+# show_bash_output = false
 
 # Show the dimmed technical detail (command, file path, args) next to the
 # model-provided intent on tool rows (default: false). When false, tool rows

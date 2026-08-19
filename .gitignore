@@ -1,4 +1,5 @@
 /target
+/target-base
 /.direnv/
 /result
 /result-*

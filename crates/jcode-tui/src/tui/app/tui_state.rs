@@ -445,6 +445,7 @@ impl App {
             todo_widget_yields_to_band: !crate::tui::info_widget::todo_widget_visible(),
             todo_widget_mode_off: crate::config::config().display.todo_widget
                 == jcode_config_types::TodoWidgetMode::Off,
+            usage_display_used: crate::config::config().display.usage_display_used(),
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name
@@ -1014,6 +1015,14 @@ impl crate::tui::TuiState for App {
 
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload_ref()
+    }
+
+    fn pinned_todos_expanded(&self) -> bool {
+        self.pinned_todos_expanded
+    }
+
+    fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
+        self.background_task_rows_ref()
     }
 
     fn input(&self) -> &str {
@@ -2289,6 +2298,11 @@ pub(crate) fn swarm_panel_action_for_key(
     // macOS Option+letter often arrives as a transformed glyph with no ALT
     // modifier; normalize through the shared shortcut helper.
     let macos_letter = crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    let macos_shift_letter =
+        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers);
+    if macos_shift_letter == Some('p') {
+        return Some(SwarmPanelAction::OpenPrompt);
+    }
     match code {
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),

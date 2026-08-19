@@ -2540,7 +2540,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         assert_eq!(app.queued_messages.len(), 1);
 
         // Once the model records sufficient completion confidence through the
-        // todo tool, the next completion check passes and disarms auto-poke.
+        // todo tool, the next completion check requests one clean final answer.
         let mut validated = crate::todo::load_todos(&app.session.id).expect("load todos");
         for todo in &mut validated {
             todo.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(100));
@@ -2565,13 +2565,25 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         // Auto-poke is default-on, so a completed cycle re-arms for the next
         // batch of work rather than silently switching the feature off.
         assert_eq!(app.auto_poke_incomplete_todos, app.auto_poke_default_on);
-        assert!(!app.pending_queued_dispatch);
-        assert!(app.queued_messages.is_empty());
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
         assert!(app.hidden_queued_system_messages.is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
                 .contains("All todos done. Completion confidence: verified.")
         }));
+
+        // The final-answer turn itself must not enqueue another final-answer
+        // turn, otherwise a successfully completed cycle loops forever.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        app.is_processing = true;
+        super::local::finish_turn(&mut app);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
     });
 }
 
@@ -2677,6 +2689,9 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         // Pin the default so the clean second cycle disarms; this test is
         // about challenging the spike exactly once.
         app.auto_poke_default_on = false;
+        // The clean-cycle finish first requests one user-facing final
+        // response; this test is about what happens after that handoff.
+        app.todo_final_response_requested = true;
         super::local::finish_turn(&mut app);
 
         assert!(!app.auto_poke_incomplete_todos);

@@ -62,6 +62,9 @@ REPO="$TMP/repo"
 git clone -q "$REMOTE" "$REPO" 2>/dev/null
 cd "$REPO"
 git config user.email t@t; git config user.name t
+# The whole job used to break under this: `git merge` refuses a diverged branch
+# outright, so no publish path may depend on one.
+git config merge.ff only
 echo one > f; git add f; git commit -qm one
 git push -q origin master
 git remote add upstream "$TMP/upstream-placeholder"
@@ -72,13 +75,21 @@ AHEAD=$(git rev-parse master)
 FORK_REMOTE=origin UPSTREAM_REMOTE=upstream BASE=master
 PUSH_FORK=1 PR_MERGE_METHOD="${METHOD:-merge}" PR_BRANCH=auto/upstream-merge-pr
 REPO="$REPO"
-UPSTREAM_REF=upstream/master UP_SHA=deadbeef ENFORCE_ACTIONS_OFF=0
-log() { echo "[log] $*"; }
+UPSTREAM_REF=upstream/master UP_SHA=deadbeef ENFORCE_ACTIONS_OFF=0 AUTO_MERGE_PR=1
+FORBIDDEN_PUBLISH_PATHS="target target-base"
+NOTIFIED=""
+log() { echo "[log] $*" >&2; }
+notify() { NOTIFIED="$1"; echo "[notify] $1" >&2; }
 ensure_fork_actions_disabled() { :; }
 eval "$(awk '/^fork_slug\(\) \{/,/^}/' "$SCRIPT")"
 eval "$(awk '/^publish_fork_if_ahead\(\) \{/,/^}/' "$SCRIPT")"
-eval "$(awk '/^sync_local_base_to_fork\(\) \{/,/^}/' "$SCRIPT")"
-eval "$(awk '/^reconcile_rewritten_base\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^worktree_holding_branch\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^adopt_base_ref\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^publish_tree_is_safe\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^merged_tree_of\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^merge_commit_of\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^work_is_contained_in\(\) \{/,/^}/' "$SCRIPT")"
+eval "$(awk '/^reconcile_diverged_base\(\) \{/,/^}/' "$SCRIPT")"
 
 fail() { echo "FAIL: $*"; exit 1; }
 
@@ -123,5 +134,65 @@ git --git-dir="$REMOTE" merge-base --is-ancestor "$SQUASH_AHEAD" master \
   && fail "a squash cannot keep the pushed commits as ancestors"
 [ "$(git -C "$REPO" rev-parse master)" = "$(git --git-dir="$REMOTE" rev-parse master)" ] \
   || fail "local base was not adopted onto the squash commit"
+
+# --- the fork is updated even while the user is mid-edit --------------------
+# The job runs on a schedule and the user is editing whenever they are editing.
+# Publishing has to happen anyway; only the local branch waits.
+: > "$GH_CALLS"
+PR_MERGE_METHOD=merge
+echo four >> f; git -C "$REPO" commit -qam four
+DIRTY_AHEAD=$(git -C "$REPO" rev-parse master)
+echo scratch > "$REPO/uncommitted.txt"
+publish_fork_if_ahead || fail "an edit session must not block publishing"
+grep -q "pr create" "$GH_CALLS" || fail "no pull request while the tree was dirty"
+git --git-dir="$REMOTE" merge-base --is-ancestor "$DIRTY_AHEAD" master \
+  || fail "the work was not published while the tree was dirty"
+[ "$(git -C "$REPO" rev-parse master)" = "$DIRTY_AHEAD" ] \
+  || fail "the base branch moved under an active edit session"
+[ "$(cat "$REPO/uncommitted.txt")" = scratch ] || fail "uncommitted work was touched"
+rm -f "$REPO/uncommitted.txt"
+
+# The next clean run adopts what was published, so nothing is left dangling.
+publish_fork_if_ahead || fail "adopting after the edit session returned nonzero"
+[ "$(git -C "$REPO" rev-parse master)" = "$(git --git-dir="$REMOTE" rev-parse master)" ] \
+  || fail "the published merge was never adopted once the tree was clean"
+
+# --- both sides gained commits: merge and publish, do not stall -------------
+# The exact shape that used to notify "local work would be lost" on every run.
+: > "$GH_CALLS"; NOTIFIED=""
+git --git-dir="$REMOTE" symbolic-ref HEAD refs/heads/master
+REMOTE_ONLY=$(mktemp -d)
+git clone -q "$REMOTE" "$REMOTE_ONLY/c"
+( cd "$REMOTE_ONLY/c" && git config user.email t@t && git config user.name t \
+  && echo remote-side > remote.txt && git add remote.txt \
+  && git commit -qm "remote work" && git push -q origin master )
+git -C "$REPO" fetch -q origin
+echo local-side > "$REPO/local.txt"
+git -C "$REPO" add local.txt; git -C "$REPO" commit -qm "local work"
+LOCAL_ONLY=$(git -C "$REPO" rev-parse master)
+REMOTE_ONLY_SHA=$(git -C "$REPO" rev-parse origin/master)
+publish_fork_if_ahead || fail "a diverged base must still publish"
+[ -z "$NOTIFIED" ] || fail "an ordinary divergence must not notify the user"
+git --git-dir="$REMOTE" merge-base --is-ancestor "$LOCAL_ONLY" master \
+  || fail "local-only work was dropped by the divergence merge"
+git --git-dir="$REMOTE" merge-base --is-ancestor "$REMOTE_ONLY_SHA" master \
+  || fail "remote-only work was dropped by the divergence merge"
+rm -rf "$REMOTE_ONLY"
+
+# --- build output is never published ----------------------------------------
+# One bad `git add` of a target directory is gigabytes of objects, and a push
+# cannot be undone on the remote.
+: > "$GH_CALLS"; NOTIFIED=""
+mkdir -p "$REPO/target-base/debug"
+echo binary > "$REPO/target-base/debug/artifact"
+git -C "$REPO" add -f target-base
+git -C "$REPO" commit -qm "accidental build output"
+if publish_fork_if_ahead; then
+  fail "a commit carrying build output must not be published"
+fi
+[ -s "$GH_CALLS" ] && fail "nothing may be pushed when build output is present"
+[ -n "$NOTIFIED" ] || fail "refusing to publish build output has to notify"
+git -C "$REPO" reset -q --hard HEAD~1
+rm -rf "$REPO/target-base"
 
 echo "PASS"

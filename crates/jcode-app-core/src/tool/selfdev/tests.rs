@@ -1201,6 +1201,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write stale status file");
@@ -1302,6 +1303,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write superseded status file");
@@ -1392,6 +1394,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
             wake: true,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         },
     )
     .expect("write running status file");

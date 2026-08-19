@@ -682,6 +682,9 @@ pub fn run_setup_hotkey(
         if _listen_macos_hotkey {
             return run_macos_hotkey_listener();
         }
+        if _uninstall {
+            return uninstall_macos_hotkey_listener();
+        }
 
         if _uninstall {
             return uninstall_macos_launch_hotkeys();

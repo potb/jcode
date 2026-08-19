@@ -86,8 +86,16 @@ impl MultiProvider {
         let provider_init_start = std::time::Instant::now();
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
+        let env_selection = Self::initial_provider_from_env_with_source();
+        let config_default_may_win = env_selection
+            .is_some_and(|(_, source)| !source.overrides_config_default())
+            && provider_state.default_provider_key().is_some();
+        let initial_provider = env_selection
+            .filter(|_| !config_default_may_win)
+            .map(|(provider, _)| provider);
         let mut default_named_provider_profile: Option<String> = None;
-        if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
+        if initial_provider.is_none()
+            && std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
             && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
             && let Some(pref) = provider_state.default_provider_key()
         {
@@ -271,17 +279,10 @@ impl MultiProvider {
             );
         }
 
-        // A login inside a running process writes the activation env globally,
-        // so in a shared `jcode serve` it would otherwise repoint every later
-        // session away from the configured `default_provider`. Only a
-        // process-level (CLI) selection outranks config.
-        let env_selection = Self::initial_provider_from_env_with_source();
-        let config_default_provider_wins = env_selection.is_some_and(|(_, source)| {
-            !source.overrides_config_default()
-                && provider_state
-                    .preferred_provider_is_configured(availability)
-                    .unwrap_or(false)
-        });
+        let config_default_provider_wins = config_default_may_win
+            && provider_state
+                .preferred_provider_is_configured(availability)
+                .unwrap_or(false);
         let initial_provider = env_selection
             .filter(|_| !config_default_provider_wins)
             .map(|(provider, _)| provider);
@@ -359,7 +360,12 @@ impl MultiProvider {
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
-        if let Some(model) = provider_state.default_model() {
+        // An explicit CLI/environment provider selection owns startup routing.
+        // Applying the configured default model here can reactivate its configured
+        // provider/profile before the caller pins a dual-auth credential mode.
+        if result.initial_provider.is_none()
+            && let Some(model) = provider_state.default_model()
+        {
             if let Err(e) =
                 result.set_config_default_model(model, provider_state.default_provider_key())
             {

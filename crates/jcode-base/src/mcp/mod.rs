@@ -17,6 +17,6 @@ pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};
 pub use protocol::*;
 pub use schema_cache::{McpSchemaCache, fingerprint_config};
 pub use tool::{
-    McpTool, create_mcp_tools, create_mcp_tools_from_cached, mcp_tool_name, mcp_tool_prefix,
-    sanitize_mcp_name_segment,
+    McpTool, create_mcp_tools, create_mcp_tools_from_cached, dispatch_name, mcp_tool_name,
+    mcp_tool_prefix, sanitize_mcp_name_segment,
 };

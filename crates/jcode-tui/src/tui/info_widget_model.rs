@@ -453,6 +453,7 @@ mod tests {
             usage_pinned: false,
             todo_widget_yields_to_band: false,
             todo_widget_mode_off: false,
+            usage_display_used: false,
             tokens_per_second: None,
             provider_name: None,
             auth_method: crate::tui::info_widget::AuthMethod::Unknown,
