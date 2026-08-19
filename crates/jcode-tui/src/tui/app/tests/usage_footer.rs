@@ -547,3 +547,93 @@ fn background_widget_config_hides_the_floating_card_and_strip() {
         "running tasks must place the card again once it is switched back on"
     );
 }
+
+/// `display.background_widget = false` must also skip *gathering* the
+/// background-task snapshot, not merely hide it at render time.
+///
+/// The gate above proves the chrome disappears. It does not prove the PR's
+/// third claim, which is a cost claim: `info_widget_data()` runs several times
+/// per frame and the scan it performs walks the shared status directory, so
+/// gathering rows nothing renders is per-frame work for nothing.
+///
+/// The order matters. Asserting only that the data is `None` while the widget
+/// is off would pass even if the scan still ran and simply found nothing, so
+/// this asserts the *visible* case first: with a live status file present the
+/// snapshot must be `Some`, which proves the fixture really does produce data
+/// through the real scan. Only then does switching the config off make the
+/// `None` meaningful.
+#[test]
+fn background_widget_off_skips_gathering_the_snapshot() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_path = temp.path().join("config.toml");
+
+    let app = usage_footer_test_app();
+
+    // A status file owned by *this* live process, in the shared task dir the
+    // manager scans, for this app's session. That is the only way to make
+    // `info_widget_data()` produce a background snapshot without spawning a
+    // real task: the scan trusts a `Running` file while its owner pid is alive.
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let status = serde_json::json!({
+        "task_id": info.task_id,
+        "tool_name": "bash",
+        "display_name": "cargo test",
+        "session_id": app.session.id,
+        "status": "running",
+        "exit_code": null,
+        "error": null,
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "completed_at": null,
+        "duration_secs": null,
+        "pid": std::process::id(),
+        "detached": true,
+    });
+    std::fs::write(
+        &info.status_file,
+        serde_json::to_string(&status).expect("serialize status"),
+    )
+    .expect("write status file");
+    struct StatusFileGuard(std::path::PathBuf);
+    impl Drop for StatusFileGuard {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+    let _status_file = StatusFileGuard(info.status_file.clone());
+
+    std::fs::write(&config_path, "[display]\nbackground_widget = true\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .background_info
+            .is_some(),
+        "test precondition: the fixture must produce a real background snapshot \
+         while the widget is on, otherwise the assertion below is vacuous"
+    );
+
+    std::fs::write(&config_path, "[display]\nbackground_widget = false\n").expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .background_info
+            .is_none(),
+        "the background snapshot must not be gathered while the widget is off"
+    );
+}
