@@ -29,7 +29,7 @@ of each crate. It never builds the `tests/` directory, so an integration binary
 that does not even **compile** is invisible to it, and reports green.
 
 That is not hypothetical. `cef23e116` added a required field to
-`ScheduledItem` and updated the 15 struct literals in the crate's own unit
+`ScheduledItem` and updated the 12 struct literals in the crate's own unit
 tests, but missed three in `tests/e2e/ambient.rs`. The `e2e` target failed with
 `E0063` for four days, its 64 tests never ran, and every `--lib` scan in that
 window passed.
