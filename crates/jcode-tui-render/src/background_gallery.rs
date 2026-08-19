@@ -369,13 +369,14 @@ pub fn render_bg_strip(
 
     // Focused accordion: expand the selected task's detail directly beneath
     // its row, so the eye does not have to travel to a separate pane.
-    if focused && detail_budget > 0 {
-        if let (Some(task), Some(at)) = (ordered.get(selected), selected_row_at) {
-            let detail = render_task_detail(task, width, detail_budget, WrapMode::Truncate);
-            let insert_at = (at + 1).min(out.len());
-            for (offset, line) in detail.into_iter().enumerate() {
-                out.insert(insert_at + offset, line);
-            }
+    if focused
+        && detail_budget > 0
+        && let (Some(task), Some(at)) = (ordered.get(selected), selected_row_at)
+    {
+        let detail = render_task_detail(task, width, detail_budget, WrapMode::Truncate);
+        let insert_at = (at + 1).min(out.len());
+        for (offset, line) in detail.into_iter().enumerate() {
+            out.insert(insert_at + offset, line);
         }
     }
 

@@ -480,6 +480,12 @@ impl BackgroundTaskManager {
     }
 
     /// Spawn a background task with explicit notify flag
+    // Six of the eight are the task's identity and delivery preamble
+    // (tool_name/display_name/command/session_id/notify/wake), shared verbatim
+    // with `adopt_with_options`. Folding them into an options struct is a
+    // worthwhile change but a wider one than this lint fix; same precedent as
+    // the other `too_many_arguments` allows in the workspace.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_with_notify<F, Fut>(
         &self,
         tool_name: &str,
@@ -695,6 +701,9 @@ impl BackgroundTaskManager {
     /// name and delivery flags. Used both for user-initiated handoff (Alt+B) and
     /// for promoting a foreground command that exceeded its timeout but is still
     /// running, so it keeps running and surfaces as a background-task card.
+    // Same six-argument delivery preamble as `spawn_with_notify`; see the note
+    // there.
+    #[allow(clippy::too_many_arguments)]
     pub async fn adopt_with_options(
         &self,
         tool_name: &str,
