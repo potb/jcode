@@ -824,18 +824,12 @@ pub(super) fn calculate_render_size(
     node_count: usize,
     edge_count: usize,
     terminal_width: Option<u16>,
-) -> (f64, f64) {
-    let (width, height) = svg::calculate_render_size(
+) -> f64 {
+    svg::calculate_render_size(
         node_count,
         edge_count,
         scaled_terminal_width(terminal_width),
-    );
-    if let Some(aspect) = current_render_profile().preferred_aspect_ratio() {
-        let profile_height = (width / aspect as f64).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
-        (width, profile_height)
-    } else {
-        (width, height)
-    }
+    )
 }
 
 /// Widen the requested cell width by the scope's zoom scale, saturating at
@@ -1015,7 +1009,7 @@ fn render_mermaid_deferred_inner(
         )));
     }
 
-    let (target_width, _) = calculate_render_size(node_count, edge_count, terminal_width);
+    let target_width = calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
     let render_profile = current_render_profile();
     let width_scale_percent = crate::current_render_width_scale_percent();
@@ -1186,14 +1180,11 @@ fn render_mermaid_sized_internal(
     }
 
     // Calculate target size
-    let (target_width, target_height) =
-        calculate_render_size(node_count, edge_count, terminal_width);
+    let target_width = calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
-    let target_height_u32 = target_height as u32;
 
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.last_target_width = Some(target_width_u32);
-        state.stats.last_target_height = Some(target_height_u32);
     }
 
     // Check cache (memory + on-disk fallback, width-aware).
@@ -1311,12 +1302,12 @@ fn render_mermaid_sized_internal(
             };
 
             let svg_start = Instant::now();
-            let output_dimensions = Some((target_width as f32, target_height as f32));
+            let output_width = Some(target_width as f32);
             // Render and collect size metadata. With the mmdr size API enabled this
             // comes directly from the renderer; the default compatibility path keeps
             // the old SVG retargeting behavior until the dependency is updated.
             let (svg, dimensions) =
-                render_svg_for_png(&layout, &theme, &layout_config, output_dimensions);
+                render_svg_for_png(&layout, &theme, &layout_config, output_width);
             let svg_ms = svg_start.elapsed().as_secs_f32() * 1000.0;
 
             // Convert SVG to PNG with adaptive dimensions

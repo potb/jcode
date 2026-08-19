@@ -228,7 +228,9 @@ impl SessionPicker {
         // working on a response from ones ready for input, which the stored
         // `SessionStatus::Active` alone cannot.
         let is_current = self.session_is_current(session);
-        let live_badge = if self.session_is_live(session) {
+        let live_badge = if self.session_is_detached(session) {
+            Some(("◌", rgb(150, 170, 255), "detached".to_string()))
+        } else if self.session_is_live(session) {
             if session.source == SessionSource::ClaudeCode {
                 Some(("●", rgb(120, 210, 255), "live Claude".to_string()))
             } else if self.session_is_streaming(session) {

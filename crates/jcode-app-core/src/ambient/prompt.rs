@@ -554,7 +554,7 @@ fn configured_projects() -> Vec<ResolvedProject> {
 }
 
 /// Just the project paths, highest priority first.
-fn configured_project_priority() -> Vec<String> {
+pub(crate) fn workable_project_paths() -> Vec<String> {
     workable_projects().into_iter().map(|p| p.path).collect()
 }
 
@@ -642,6 +642,18 @@ fn workable_projects() -> Vec<ResolvedProject> {
         .collect()
 }
 
+/// The projects a cycle may address: just its own when it has a focus.
+fn projects_in_scope(focus: Option<&str>) -> Vec<ResolvedProject> {
+    let projects = workable_projects();
+    match focus {
+        None => projects,
+        Some(focus) => projects
+            .into_iter()
+            .filter(|project| paths_match(focus, &project.path))
+            .collect(),
+    }
+}
+
 /// Every window spec declared by a configured project, deduplicated.
 ///
 /// The runner needs this because its own gate reads the GLOBAL
@@ -697,11 +709,57 @@ pub(crate) fn priority_rank(priority: &[String], dir: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// The configured project a working directory belongs to, as its canonical
+/// configured path, or `None` when it belongs to no configured project.
+///
+/// See `docs/AMBIENT_PER_PROJECT.md` for why identity is resolved centrally.
+pub fn resolve_project_key(working_dir: Option<&str>) -> Option<String> {
+    let dir = expand_project_path(working_dir?.trim());
+    if dir.is_empty() {
+        return None;
+    }
+    configured_projects()
+        .into_iter()
+        .find(|project| paths_match(&dir, &project.path))
+        .map(|project| project.path)
+}
+
 /// Build the dynamic system prompt for an ambient cycle.
 ///
 /// Populates the template from AMBIENT_MODE.md with real data from the
 /// current state, queue, memory graph, sessions, and resource budget.
 pub fn build_ambient_system_prompt(
+    state: &AmbientState,
+    queue: &[ScheduledItem],
+    graph_health: &MemoryGraphHealth,
+    recent_sessions: &[RecentSessionInfo],
+    feedback_memories: &[String],
+    budget: &ResourceBudget,
+    active_user_sessions: usize,
+) -> String {
+    build_ambient_system_prompt_for(
+        None,
+        state,
+        queue,
+        graph_health,
+        recent_sessions,
+        feedback_memories,
+        budget,
+        active_user_sessions,
+    )
+}
+
+/// Build the prompt for a cycle that belongs to `focus`, a canonical project
+/// key as resolved by [`resolve_project_key`].
+///
+/// `None` is the unfocused cycle: no configured project owns it (gardening and
+/// memory work), and the prompt is byte for byte what it has always been. With
+/// a focus, the cycle is told which project it is for instead of being handed
+/// every project and asked to choose — the last stage of #126, and the reason
+/// a cycle can no longer pick a project whose window is closed.
+#[allow(clippy::too_many_arguments)]
+pub fn build_ambient_system_prompt_for(
+    focus: Option<&str>,
     state: &AmbientState,
     queue: &[ScheduledItem],
     graph_health: &MemoryGraphHealth,
@@ -718,7 +776,42 @@ pub fn build_ambient_system_prompt(
          development environment.\n\n",
     );
 
-    // --- Current State ---
+    if let Some(focus) = focus {
+        prompt.push_str(&format!(
+            "## This Cycle Is For {focus}\n\n\
+             This is a cycle OF that project, not a cycle that may pick one. \
+             Use `{focus}` as your working directory, so its memory, AGENTS.md \
+             and git state resolve, and confine the work to it. Every project \
+             gets its own cycles and its own turn, so work another project \
+             needs is not yours to pick up here: leave it for that project's \
+             cycle rather than widening this one. Memory gardening and \
+             answering the user are always in scope.\n\n"
+        ));
+    }
+
+    let scope = projects_in_scope(focus);
+    let scope_priority: Vec<String> = scope.iter().map(|p| p.path.clone()).collect();
+
+    // Sessions from another project are that project's context, not this
+    // cycle's, and listing them is itself an invitation to work there.
+    let focused_sessions: Vec<RecentSessionInfo>;
+    let recent_sessions: &[RecentSessionInfo] = match focus {
+        None => recent_sessions,
+        Some(focus) => {
+            focused_sessions = recent_sessions
+                .iter()
+                .filter(|session| {
+                    session
+                        .working_dir
+                        .as_deref()
+                        .is_some_and(|dir| paths_match(dir, focus))
+                })
+                .cloned()
+                .collect();
+            &focused_sessions
+        }
+    };
+
     prompt.push_str("## Current State\n");
     if let Some(last_run) = state.last_run {
         let ago = Utc::now() - last_run;
@@ -823,7 +916,7 @@ pub fn build_ambient_system_prompt(
     }
     if !project_counts.is_empty() {
         prompt.push_str("## Projects Active Recently\n");
-        let priority = configured_project_priority();
+        let priority = scope_priority.clone();
         // Session count answers "where has the user been", not "what matters".
         // A configured priority is an explicit answer to the second question,
         // so it outranks activity; unlisted projects keep the activity order
@@ -866,7 +959,7 @@ pub fn build_ambient_system_prompt(
     // exactly the case this knob exists for: the important project is the one
     // being neglected. Listing only "projects active recently" would hide it.
     {
-        let priority = configured_project_priority();
+        let priority = scope_priority.clone();
         let seen: std::collections::BTreeSet<&str> = recent_sessions
             .iter()
             .filter_map(|s| s.working_dir.as_deref())
@@ -1150,7 +1243,7 @@ pub fn build_ambient_system_prompt(
     // another project's PR to this fork. It is an override for the repo it
     // names; elsewhere the project's own `origin` is correct.
     let pr_repo = crate::config::config().ambient.pr_repo.trim().to_string();
-    let projects = workable_projects();
+    let projects = scope.clone();
     let forked: Vec<&ResolvedProject> = projects.iter().filter(|p| !p.pr_repo.is_empty()).collect();
     let direct: Vec<&ResolvedProject> = projects.iter().filter(|p| p.pr_repo.is_empty()).collect();
 
@@ -1256,8 +1349,12 @@ pub fn build_ambient_system_prompt(
     // were never looked at. "No work in project 1" is a reason to move to
     // project 2, not a reason to end the cycle.
     {
-        let priority = configured_project_priority();
-        if crate::config::config().ambient.proactive_work && !priority.is_empty() {
+        let priority = scope_priority.clone();
+        // A focused cycle has exactly one project, so telling it to move on to
+        // the next one contradicts its own scope: that is the other project's
+        // cycle to run.
+        if focus.is_none() && crate::config::config().ambient.proactive_work && !priority.is_empty()
+        {
             prompt.push_str(
                 "\n## Work Through The Priority List, Do Not Stop At The First Quiet Project\n\n\
                  The user's configured project list is an ORDER to walk, not a \
@@ -1364,9 +1461,13 @@ pub fn build_ambient_system_prompt(
     // agent picks its own working directory, so it needs these up front rather
     // than after it has already decided where to work.
     {
-        let projects = workable_projects();
+        let projects = scope.clone();
         let mut dirs: Vec<String> = Vec::new();
-        for dir in recent_sessions.iter().filter_map(|s| s.working_dir.clone()) {
+        for dir in recent_sessions
+            .iter()
+            .filter_map(|s| s.working_dir.clone())
+            .filter(|dir| focus.is_none_or(|focus| paths_match(dir, focus)))
+        {
             if !dirs.contains(&dir) {
                 dirs.push(dir);
             }

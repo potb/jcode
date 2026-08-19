@@ -1,4 +1,5 @@
 use super::AmbientRunnerHandle;
+use crate::ambient::test_env::EnvVarGuard;
 use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -9,29 +10,6 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-        let prev = std::env::var_os(key);
-        crate::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(prev) = self.prev.take() {
-            crate::env::set_var(self.key, prev);
-        } else {
-            crate::env::remove_var(self.key);
-        }
-    }
-}
 
 struct TestProvider;
 
@@ -192,6 +170,7 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         },
         created_by_session: parent.id.clone(),
         created_at: chrono::Utc::now(),
+        project: None,
         working_dir: parent.working_dir.clone(),
         task_description: Some("Follow up later".to_string()),
         relevant_files: vec!["src/lib.rs".to_string()],

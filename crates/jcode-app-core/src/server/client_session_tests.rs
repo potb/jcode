@@ -248,6 +248,7 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
                 is_processing: false,
                 current_tool_name: None,
                 terminal_env: Vec::new(),
+                is_detaching: false,
                 disconnect_tx,
             },
         )])));

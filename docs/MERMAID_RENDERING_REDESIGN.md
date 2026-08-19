@@ -22,7 +22,7 @@ Observed pain points:
 The renderer now has an `mmdr-size-api` path guarded by the `mmdr-size-api` feature plus `JCODE_MMDR_SIZE_API_AVAILABLE=1`. That should become the primary path for the redesign:
 
 - Renderer should ask Mermaid/layout for measured SVG/canvas dimensions instead of relying on source text complexity estimates for final PNG sizing.
-- `calculate_render_size` should become a request target hint, not the source of truth for output dimensions.
+- `calculate_render_size` is a width-budget request hint, not the source of truth for output dimensions. (Landed: it returns a width only.)
 - The fallback SVG-retargeting path should remain only as compatibility code until the patched renderer is always available.
 - Debug stats should report `render_size_backend` and fail loudly in tests when the size API path is expected but unavailable.
 - Cache keys should include normalized target/profile inputs, while artifacts should store measured output dimensions returned by the size API.
@@ -31,9 +31,9 @@ This reduces bugs from aspect-ratio retargeting, blurry upscaling, placeholder h
 
 ### Fitting rule: width drives, height does not
 
-`calculate_render_size` returns a roughly 4:3 request box (`height = width *
-0.75`). The size-API render path used to fit the measured natural canvas into
-that box with `min(target_w / natural_w, target_h / natural_h)`. That `min` is
+`calculate_render_size` used to return a roughly 4:3 request box (`height = width
+* 0.75`). The size-API render path fitted the measured natural canvas into that
+box with `min(target_w / natural_w, target_h / natural_h)`. That `min` is
 right for diagrams *wider* than the box, where it avoids letterboxing, and
 wrong for diagrams *taller* than it: the height term wins and the rendered
 width collapses to roughly a quarter of the pane width that was available, at
@@ -41,12 +41,43 @@ every pane width (potb/jcode#150). The panel then upscales the small PNG to
 compensate, which is blurry and, past the Kitty fast-path zoom gate, re-encoded
 and re-transmitted on every redraw.
 
-The request box is a *hint*, so `fit_natural_to_target_width` scales by the
-width term alone and lets the natural aspect ratio decide height. Wide diagrams
-are unaffected: for them the width term was already the smaller of the two, so
-the scale is identical. Vertical overflow is acceptable because the diagram
-surfaces scroll vertically; the real limit is memory, and a pixel-area budget
-(`RENDER_AREA_BUDGET_PX`, the area of the largest box ever requested) caps it.
+The request is therefore a *width budget* only, and `fit_natural_to_target_width`
+scales by the width term alone and lets the natural aspect ratio decide height.
+Wide diagrams are unaffected: for them the width term was already the smaller of
+the two, so the scale is identical. Vertical overflow is acceptable because the
+diagram surfaces scroll vertically; the real limit is memory, and a pixel-area
+budget (`RENDER_AREA_BUDGET_PX`, the area of the largest box ever requested)
+caps it.
+
+This part has landed: `calculate_render_size` returns a single `f64` width, the
+derived target height and its `MermaidDebugStats::last_target_height` mirror are
+gone, and the pane's preferred aspect ratio no longer bends the requested size
+(it still selects a render profile, so it still takes part in the cache key).
+
+### Zoom ceilings: two different 100%-relative numbers
+
+Two unrelated caps look alike and are easy to confuse.
+
+`KITTY_VIEWPORT_MAX_ZOOM_PERCENT` (200, in
+`crates/jcode-tui-mermaid/src/mermaid_viewport.rs`) is the top of the range the
+Kitty *virtual viewport* fast path supports. Inside it the terminal holds one
+placement and scrolling only moves the visible window; above it the pane falls
+back to crop-and-resize, which re-transmits pixels every frame. The same
+constant bounds the two pre-scaling clamps that build the state that path
+consumes, so all three uses move together.
+
+`SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT` and
+`PINNED_DIAGRAM_MAX_AUTO_FILL_ZOOM_PERCENT` (both 1000, in `jcode-tui`) cap
+something else: how far a *layout* may upscale to fill an under-used pane. They
+are deliberately much higher, because a plan above 200% is legal — it just
+costs a re-transmission per frame instead of a scroll.
+
+So the two numbers are not a mismatch to be reconciled. What ties them together
+is a rendering-cost expectation, not a shared bound, and it is enforced by
+tests rather than by the constants: `ui_pinned_tests` asserts that the diagrams
+we actually ship plan at or below the fast-path ceiling. Raising the auto-fill
+cap is safe; letting a shipped diagram plan past 200% is the regression those
+tests exist to catch.
 
 ## Target design
 

@@ -32,6 +32,7 @@ fn test_scheduled_queue_push_and_pop() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -47,6 +48,7 @@ fn test_scheduled_queue_push_and_pop() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -81,6 +83,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -95,6 +98,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -128,6 +132,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -143,6 +148,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -175,6 +181,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         },
         created_by_session: "session_123".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -192,6 +199,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         },
         created_by_session: "session_123".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -207,6 +215,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         target: ScheduleTarget::Ambient,
         created_by_session: "ambient".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -436,6 +445,7 @@ fn test_build_ambient_system_prompt_with_data() {
         target: ScheduleTarget::Ambient,
         created_by_session: "session_abc".into(),
         created_at: Utc::now() - Duration::minutes(10),
+        project: None,
         working_dir: Some("/home/user/project".into()),
         task_description: Some("Check CI status for the main branch".into()),
         relevant_files: vec!["src/main.rs".into()],
@@ -788,6 +798,7 @@ fn test_scheduled_queue_items_accessor() {
         target: ScheduleTarget::Ambient,
         created_by_session: "test".into(),
         created_at: Utc::now(),
+        project: None,
         working_dir: None,
         task_description: None,
         relevant_files: Vec::new(),
@@ -1904,4 +1915,367 @@ fn ambient_prompt_omits_skills_section_when_none_installed() {
     let mut prompt = String::new();
     crate::ambient::prompt::append_available_skills(&mut prompt, &[]);
     assert!(prompt.is_empty());
+}
+
+/// Project identity must be canonical and boundary-safe: a queue item created
+/// in a subdirectory belongs to its project, a `~` path and a trailing slash
+/// resolve to the same key, and a sibling sharing a name prefix does not.
+///
+/// This is the property everything later in issue #126 is partitioned by, so a
+/// wrong answer here silently mixes two projects' state, queues and locks.
+#[test]
+fn scheduled_item_project_key_is_canonical_and_boundary_safe() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_user_home = std::env::var_os("HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("HOME", "/home/potb");
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"~/jcode\"\n\n\
+         [[ambient.projects]]\npath = \"/home/potb/projects/acme/web\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let key = |dir: Option<&str>| crate::ambient::prompt::resolve_project_key(dir);
+
+    assert_eq!(
+        key(Some("/home/potb/jcode")).as_deref(),
+        Some("/home/potb/jcode"),
+        "a configured `~` path must resolve to its expanded canonical form"
+    );
+    assert_eq!(
+        key(Some("/home/potb/jcode/crates/jcode-app-core")).as_deref(),
+        Some("/home/potb/jcode"),
+        "a subdirectory must key to the project, not to itself"
+    );
+    assert_eq!(
+        key(Some("/home/potb/jcode/")).as_deref(),
+        Some("/home/potb/jcode"),
+        "a trailing slash is the same directory"
+    );
+    assert_eq!(
+        key(Some("/home/potb/jcode-cron")),
+        None,
+        "a sibling sharing a name prefix is a different project"
+    );
+    assert_eq!(key(Some("/home/potb")), None, "a parent is not the project");
+    assert_eq!(key(None), None);
+    assert_eq!(key(Some("   ")), None, "a blank working dir owns nothing");
+    assert_eq!(
+        key(Some("/home/potb/projects/acme/web")).as_deref(),
+        Some("/home/potb/projects/acme/web"),
+        "each configured project resolves to itself"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(prev) = prev_user_home {
+        crate::env::set_var("HOME", prev);
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// A `queue.json` written before `project` existed must keep loading, and its
+/// items must still be attributable: the acceptance criterion on #126 says
+/// migrate, not discard. `project_key()` falls back to resolving `working_dir`,
+/// so an old item answers the same as a freshly scheduled one.
+#[test]
+fn legacy_queue_items_without_a_project_field_still_resolve_one() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_user_home = std::env::var_os("HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("HOME", "/home/potb");
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n[[ambient.projects]]\npath = \"/home/potb/jcode\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let queue_path = temp.path().join("legacy_queue.json");
+    std::fs::write(
+        &queue_path,
+        r#"[{"id":"sched_old","scheduled_for":"2026-01-01T00:00:00Z",
+             "context":"queued by an older build","priority":"Normal",
+             "created_by_session":"s1","created_at":"2026-01-01T00:00:00Z",
+             "working_dir":"/home/potb/jcode/crates"}]"#,
+    )
+    .expect("write legacy queue");
+
+    let queue = ScheduledQueue::load(queue_path);
+    assert_eq!(queue.len(), 1, "a pre-field queue must still load");
+    let item = &queue.items()[0];
+    assert_eq!(item.project, None, "the file has no stored project");
+    assert_eq!(
+        item.project_key().as_deref(),
+        Some("/home/potb/jcode"),
+        "an old item must still be attributable via its working_dir"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(prev) = prev_user_home {
+        crate::env::set_var("HOME", prev);
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// Scheduling stamps the project onto the item. Resolving lazily on every read
+/// would let an item change owner when the config changes under it, so the key
+/// is recorded once, at the moment the item is created.
+#[test]
+fn scheduling_stamps_the_project_onto_the_queued_item() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n[[ambient.projects]]\npath = \"/home/potb/jcode\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let mut manager = crate::ambient::AmbientManager::new().expect("manager");
+    let request = |working_dir: Option<&str>| ScheduleRequest {
+        wake_in_minutes: Some(30),
+        wake_at: None,
+        context: "later".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "s1".into(),
+        working_dir: working_dir.map(ToOwned::to_owned),
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    };
+
+    let in_project = manager
+        .schedule(request(Some("/home/potb/jcode/crates/jcode-tui")))
+        .expect("schedule");
+    let elsewhere = manager
+        .schedule(request(Some("/tmp/unconfigured")))
+        .expect("schedule");
+
+    let find = |id: &str| {
+        manager
+            .queue()
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .expect("queued item")
+            .clone()
+    };
+    assert_eq!(
+        find(&in_project).project.as_deref(),
+        Some("/home/potb/jcode"),
+        "a project item must carry its canonical key from the moment it is queued"
+    );
+    assert_eq!(
+        find(&elsewhere).project,
+        None,
+        "work outside every configured project belongs to no project"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// Stage 4 of #126: a cycle belongs to one project, so the prompt names that
+/// project and stops handing the agent every other one to choose between.
+#[test]
+fn a_focused_cycle_names_its_project_and_hides_the_others() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\nproactive_work = true\n\
+         project_priority = [\"/work/alpha\", \"/work/beta\"]\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let sessions = vec![
+        RecentSessionInfo {
+            id: "s_alpha".into(),
+            status: "closed".into(),
+            topic: None,
+            duration_secs: 60,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/work/alpha".into()),
+        },
+        RecentSessionInfo {
+            id: "s_beta".into(),
+            status: "closed".into(),
+            topic: None,
+            duration_secs: 60,
+            extraction_status: "extracted".into(),
+            working_dir: Some("/work/beta".into()),
+        },
+    ];
+    let render = |focus: Option<&str>| {
+        crate::ambient::build_ambient_system_prompt_for(
+            focus,
+            &AmbientState::default(),
+            &[],
+            &MemoryGraphHealth::default(),
+            &sessions,
+            &[],
+            &ResourceBudget::default(),
+            0,
+        )
+    };
+
+    let unfocused = render(None);
+    assert!(
+        unfocused.contains("## Work Through The Priority List"),
+        "an unfocused cycle still picks its own project, so it keeps the walk \
+         instruction"
+    );
+    assert!(unfocused.contains("/work/beta"));
+    assert!(!unfocused.contains("## This Cycle Is For"));
+
+    let focused = render(Some("/work/alpha"));
+    assert!(
+        focused.contains("## This Cycle Is For /work/alpha"),
+        "a focused cycle must be told which project it is for"
+    );
+    assert!(
+        !focused.contains("/work/beta"),
+        "the other project must not appear at all: offering it is what let a \
+         cycle work outside its own turn"
+    );
+    assert!(
+        !focused.contains("## Work Through The Priority List"),
+        "telling a one-project cycle to move on to the next project \
+         contradicts its own scope"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// The focused prompt must still carry the focused project's own rules: the
+/// point of a per-project cycle is that its instructions and PR target are the
+/// ones in force.
+#[test]
+fn a_focused_cycle_keeps_its_own_project_instructions_and_pr_target() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/work/alpha\"\npr_repo = \"me/alpha\"\n\
+         instructions = \"Alpha rule: land one PR.\"\n\n\
+         [[ambient.projects]]\npath = \"/work/beta\"\npr_repo = \"me/beta\"\n\
+         instructions = \"Beta rule: never merge.\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let focused = crate::ambient::build_ambient_system_prompt_for(
+        Some("/work/alpha"),
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &[],
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    assert!(focused.contains("Alpha rule: land one PR."));
+    assert!(focused.contains("me/alpha"));
+    assert!(
+        !focused.contains("Beta rule: never merge."),
+        "another project's standing rules must not be in force this cycle"
+    );
+    assert!(
+        !focused.contains("me/beta"),
+        "another project's PR target is how work lands in the wrong repo"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+/// A session in a subdirectory of the focused project belongs to it, so its
+/// instructions must not be dropped by the focus filter.
+#[test]
+fn a_focused_cycle_keeps_sessions_from_its_own_subdirectories() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[ambient]\nenabled = true\n\n\
+         [[ambient.projects]]\npath = \"/work/alpha\"\n\
+         instructions = \"Alpha rule: land one PR.\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let sessions = vec![RecentSessionInfo {
+        id: "s_sub".into(),
+        status: "closed".into(),
+        topic: None,
+        duration_secs: 60,
+        extraction_status: "extracted".into(),
+        working_dir: Some("/work/alpha/crates/core".into()),
+    }];
+    let focused = crate::ambient::build_ambient_system_prompt_for(
+        Some("/work/alpha"),
+        &AmbientState::default(),
+        &[],
+        &MemoryGraphHealth::default(),
+        &sessions,
+        &[],
+        &ResourceBudget::default(),
+        0,
+    );
+    assert!(
+        focused.contains("s_sub"),
+        "a subdirectory session belongs to its project, so the focus filter \
+         must keep it: dropping it hides the very work this cycle is about"
+    );
+    assert!(
+        focused.contains("Alpha rule: land one PR."),
+        "the focused project's rules stay in force"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
 }

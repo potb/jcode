@@ -249,7 +249,7 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
 fn persist(
     mutate: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
 ) -> anyhow::Result<()> {
-    let mut config = crate::config::Config::load();
+    let mut config = crate::config::Config::load_for_edit();
     mutate(&mut config.display.colors);
     config.save()?;
     crate::tui::theme_detect::init_palette();

@@ -480,6 +480,7 @@ pub(super) async fn handle_client(
 
     // Per-client state
     let mut client_is_processing = false;
+    let mut client_detached = false;
     let (processing_done_tx, mut processing_done_rx) =
         mpsc::unbounded_channel::<(u64, Result<()>, Option<String>)>();
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -539,6 +540,7 @@ pub(super) async fn handle_client(
                 is_processing: false,
                 current_tool_name: None,
                 terminal_env: active_terminal_env.clone(),
+                is_detaching: false,
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1051,6 +1053,40 @@ pub(super) async fn handle_client(
                 );
             }
             continue;
+        }
+
+        // A detach that will be refused must be answered before the generic Ack
+        // below, which is written for every request: otherwise the client sees a
+        // success Ack followed by an Error for the same request id.
+        if let Request::Detach {
+            id,
+            ref session_id,
+            ref client_instance_id,
+        } = request
+            && let Some(reason) = detach_rejection_reason(
+                session_id,
+                &client_session_id,
+                client_instance_id.as_deref(),
+                current_client_instance_id.as_deref(),
+            )
+        {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: reason,
+                retry_after_secs: None,
+            });
+            continue;
+        }
+
+        // An accepted detach surrenders the session here, not at socket
+        // teardown: the Ack write, the loop break and cleanup all follow, and
+        // this connection must not read as the session's owner during them or
+        // an attach racing the detach is refused as a duplicate (issue #133).
+        if let Request::Detach { .. } = request {
+            let mut connections = client_connections.write().await;
+            if let Some(info) = connections.get_mut(&client_connection_id) {
+                info.is_detaching = true;
+            }
         }
 
         // Send ack
@@ -1735,6 +1771,32 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent) {
                     last_available_models_snapshot = Some(snapshot);
                 }
+            }
+
+            Request::Detach { id, .. } => {
+                crate::logging::info(&format!(
+                    "SERVER_DETACH_REQUEST id={} session={} connection={}",
+                    id, client_session_id, client_connection_id
+                ));
+                // Tests only: hold the connection inside the detach window so
+                // the ownership rules that apply there can be observed from a
+                // real client. Never set in a real run (issue #133).
+                if let Some(delay) = super::util::detach_window_test_delay() {
+                    tokio::time::sleep(delay).await;
+                }
+                client_detached = true;
+                break;
+            }
+
+            Request::ListSessions { id } => {
+                super::client_actions::handle_list_sessions(
+                    id,
+                    &sessions,
+                    &swarm_members,
+                    &client_connections,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::ResumeAllSessions { id } => {
@@ -2789,6 +2851,7 @@ pub(super) async fn handle_client(
             &sessions,
             &client_session_id,
             client_is_processing,
+            client_detached,
             &mut processing_task,
             event_handle,
             &swarm_members,
@@ -3300,6 +3363,29 @@ pub(super) async fn process_message_streaming_mpsc(
         );
     }
     result
+}
+
+/// Returns why a detach must be refused, or `None` when it may proceed.
+fn detach_rejection_reason(
+    requested_session_id: &str,
+    connection_session_id: &str,
+    requested_instance_id: Option<&str>,
+    connection_instance_id: Option<&str>,
+) -> Option<String> {
+    if requested_session_id != connection_session_id {
+        return Some(format!(
+            "detach targets session {} but this connection owns {}",
+            requested_session_id, connection_session_id
+        ));
+    }
+    // Absent ids do not prove identity, so only two present-and-different ids
+    // are treated as a mismatch; a legacy client sending none still detaches.
+    if let (Some(requested), Some(current)) = (requested_instance_id, connection_instance_id)
+        && requested != current
+    {
+        return Some("detach rejected: client instance does not own this connection".to_string());
+    }
+    None
 }
 
 #[cfg(test)]

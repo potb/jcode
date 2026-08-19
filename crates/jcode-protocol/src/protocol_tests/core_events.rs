@@ -637,3 +637,93 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(retry_after_secs, None);
     Ok(())
 }
+
+#[test]
+fn test_detach_request_roundtrip_and_wire_name() -> Result<()> {
+    let req = Request::Detach {
+        id: 7,
+        session_id: "sess-1".to_string(),
+        client_instance_id: Some("inst-a".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(
+        json.contains("\"type\":\"detach\""),
+        "unexpected wire name: {json}"
+    );
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 7);
+    let Request::Detach {
+        session_id,
+        client_instance_id,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected Detach"));
+    };
+    assert_eq!(session_id, "sess-1");
+    assert_eq!(client_instance_id.as_deref(), Some("inst-a"));
+    Ok(())
+}
+
+#[test]
+fn test_detach_request_accepts_client_without_instance_id() -> Result<()> {
+    let decoded = parse_request_json(r#"{"type":"detach","id":9,"session_id":"sess-2"}"#)?;
+    let Request::Detach {
+        client_instance_id, ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected Detach"));
+    };
+    assert_eq!(client_instance_id, None);
+    Ok(())
+}
+
+#[test]
+fn test_list_sessions_request_roundtrip_and_wire_name() -> Result<()> {
+    let req = Request::ListSessions { id: 21 };
+    let json = serde_json::to_string(&req)?;
+    assert!(
+        json.contains("\"type\":\"list_sessions\""),
+        "unexpected wire name: {json}"
+    );
+    assert_eq!(parse_request_json(&json)?.id(), 21);
+    Ok(())
+}
+
+#[test]
+fn test_session_list_event_reports_attachment_counts() -> Result<()> {
+    let event = ServerEvent::SessionList {
+        id: 22,
+        sessions: vec![
+            LiveSessionInfo {
+                session_id: "sess-detached".to_string(),
+                attached_clients: 0,
+                friendly_name: Some("tiger".to_string()),
+                working_dir: None,
+                status: Some("ready".to_string()),
+            },
+            LiveSessionInfo {
+                session_id: "sess-attached".to_string(),
+                attached_clients: 2,
+                friendly_name: None,
+                working_dir: Some("/tmp/work".to_string()),
+                status: None,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(
+        json.contains("\"type\":\"session_list\""),
+        "unexpected wire name: {json}"
+    );
+    let ServerEvent::SessionList { id, sessions } = parse_event_json(&json)? else {
+        return Err(anyhow!("expected SessionList"));
+    };
+    assert_eq!(id, 22);
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].attached_clients, 0);
+    assert_eq!(sessions[0].friendly_name.as_deref(), Some("tiger"));
+    assert_eq!(sessions[1].attached_clients, 2);
+    assert_eq!(sessions[1].working_dir.as_deref(), Some("/tmp/work"));
+    Ok(())
+}

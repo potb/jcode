@@ -95,10 +95,11 @@ const INLINE_ASPECT_CHROME_ROWS: u16 = 4;
 /// steps keeps resize jitter from re-rendering diagrams constantly.
 const INLINE_ASPECT_QUANT_STEP: f32 = 0.25;
 
-/// Never request an aspect goal taller (narrower) than the 4:3 sizing
-/// default: `calculate_render_size` only adjusts height from width, so a
-/// portrait goal in a narrow terminal would just produce a taller render
-/// than today's default behavior.
+/// Never request an aspect goal taller (narrower) than 4:3. The goal reaches
+/// the layout engine through `LayoutConfig::preferred_aspect_ratio`, so a
+/// portrait goal in a narrow terminal just asks the layout for a taller,
+/// narrower diagram than the default. It no longer affects the requested
+/// render size, which is a width budget alone.
 const INLINE_ASPECT_MIN: f32 = 4.0 / 3.0;
 
 /// Cap on how flat an inline aspect goal can get in very wide, short

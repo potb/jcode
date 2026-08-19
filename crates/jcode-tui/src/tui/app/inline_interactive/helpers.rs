@@ -88,7 +88,7 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
+    let mut cfg = crate::config::Config::load_for_edit();
     let value = model
         .map(str::trim)
         .filter(|value| !value.is_empty())

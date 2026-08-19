@@ -181,6 +181,20 @@ pub enum Request {
         allow_session_takeover: bool,
     },
 
+    /// Leave the session attached state without ending it: the server Acks,
+    /// then treats the socket close as deliberate and preserves the session.
+    #[serde(rename = "detach")]
+    Detach {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
+    },
+
+    /// List the sessions the server currently holds live, attached or not.
+    #[serde(rename = "list_sessions")]
+    ListSessions { id: u64 },
+
     /// Resume/continue every live session that was interrupted and would
     /// auto-continue on a reload (e.g. crashed/errored mid-turn). This is the
     /// on-demand equivalent of the automatic post-reload recovery sweep.
@@ -1441,6 +1455,15 @@ pub enum ServerEvent {
         message: String,
         /// Whether compaction was started successfully
         success: bool,
+    },
+
+    /// Response to list_sessions — every live session and whether a client is
+    /// attached to it. Unlike the local active-PID registry, this reports
+    /// detached sessions, which have no client process to observe.
+    #[serde(rename = "session_list")]
+    SessionList {
+        id: u64,
+        sessions: Vec<LiveSessionInfo>,
     },
 
     /// Response to resume_all_sessions — summary of which sessions were continued.

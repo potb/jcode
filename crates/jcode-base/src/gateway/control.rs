@@ -209,7 +209,7 @@ pub enum ToggleOutcome {
 /// bound at server startup and a no-op change should not tell the user to
 /// restart for nothing.
 pub fn set_gateway_enabled(enabled: bool) -> Result<ToggleOutcome> {
-    let mut config = crate::config::Config::load();
+    let mut config = crate::config::Config::load_for_edit();
     if config.gateway.enabled == enabled {
         return Ok(ToggleOutcome::Unchanged { enabled });
     }

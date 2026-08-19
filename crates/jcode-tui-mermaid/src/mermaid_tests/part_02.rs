@@ -49,18 +49,21 @@ fn preferred_aspect_ratio_context_is_scoped_and_bucketed() {
 }
 
 #[test]
-fn preferred_aspect_ratio_adjusts_render_height_without_changing_width_bucket() {
-    let (default_width, default_height) = super::calculate_render_size(6, 5, Some(80));
-    let (profile_width, profile_height) = super::with_preferred_aspect_ratio(Some(0.5), || {
+fn preferred_aspect_ratio_leaves_the_width_budget_untouched() {
+    let default_width = super::calculate_render_size(6, 5, Some(80));
+    let portrait_width = super::with_preferred_aspect_ratio(Some(0.5), || {
+        super::calculate_render_size(6, 5, Some(80))
+    });
+    let landscape_width = super::with_preferred_aspect_ratio(Some(2.0), || {
         super::calculate_render_size(6, 5, Some(80))
     });
 
-    assert_eq!(profile_width, default_width);
-    assert!(
-        profile_height > default_height,
-        "portrait side-pane aspect should request a taller render: default={default_height}, profiled={profile_height}"
-    );
-    assert!((profile_width / profile_height - 0.5).abs() < 0.01);
+    // The render target is a width budget only. The pane's aspect ratio still
+    // selects a render profile (it takes part in the cache key), but it must
+    // no longer bend the requested size, because a height derived from the
+    // pane shape is what starved tall diagrams of resolution (issue #150).
+    assert_eq!(portrait_width, default_width);
+    assert_eq!(landscape_width, default_width);
 }
 
 #[test]
@@ -87,6 +90,58 @@ fn deferred_render_supersedes_prefix_stream_updates_only() {
 
 #[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
 #[test]
+fn tall_diagram_still_consumes_the_full_width_budget() {
+    let _stats_guard = render_stats_test_lock();
+    super::reset_debug_stats();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    // A vertical chain: natural layout is far TALLER than 4:3. This is the
+    // shape issue #150 is about, and the shape the wide-diagram test above
+    // cannot see: a height-derived box binds the fit here and nowhere else,
+    // collapsing the render to roughly a quarter of the available width.
+    let content = format!(
+        "flowchart TD\nA[Start {unique}] --> B[Step]\nB --> C[Step]\nC --> D[Step]\nD --> E[Step]\nE --> F[Step]\nF --> G[End]"
+    );
+
+    let result = super::render_mermaid_untracked(&content, Some(100));
+    if let super::RenderResult::Error(error) = &result {
+        panic!("render failed: {error}");
+    }
+    let stats = super::debug_stats();
+
+    let target_width = stats.last_target_width.expect("target width");
+    let measured_width = stats.last_measured_width.expect("measured width");
+    let measured_height = stats.last_measured_height.expect("measured height");
+    let viewbox_width = stats.last_viewbox_width.unwrap_or_default();
+    let viewbox_height = stats.last_viewbox_height.unwrap_or_default();
+
+    // Guard the premise: if this stops being a tall diagram the test below
+    // silently stops testing anything.
+    assert!(
+        viewbox_height > viewbox_width,
+        "premise broken: expected a tall diagram, got {viewbox_width}x{viewbox_height}"
+    );
+
+    // The defect: a 4:3 target box makes the height term bind, so the render
+    // never reaches the width it asked for.
+    assert!(
+        measured_width + 1 >= target_width,
+        "tall diagram starved of width: measured {measured_width}x{measured_height}, target width {target_width}"
+    );
+
+    // And the canvas hugs the ink rather than being letterboxed into a box.
+    let measured_ratio = measured_width as f64 / measured_height.max(1) as f64;
+    let natural_ratio = viewbox_width as f64 / viewbox_height.max(1) as f64;
+    assert!(
+        (measured_ratio - natural_ratio).abs() / natural_ratio < 0.05,
+        "output aspect {measured_ratio:.3} should match natural aspect {natural_ratio:.3}"
+    );
+}
+
+#[cfg(all(feature = "mmdr-size-api", mmdr_size_api_available))]
+#[test]
 fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
     let _stats_guard = render_stats_test_lock();
     super::reset_debug_stats();
@@ -108,7 +163,6 @@ fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
     let stats = super::debug_stats();
 
     let target_width = stats.last_target_width.expect("target width");
-    let target_height = stats.last_target_height.expect("target height");
     let measured_width = stats.last_measured_width.expect("measured width");
     let measured_height = stats.last_measured_height.expect("measured height");
     let viewbox_width = stats.last_viewbox_width.unwrap_or_default();
@@ -116,10 +170,11 @@ fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
     assert!(viewbox_width > 0);
     assert!(viewbox_height > 0);
 
-    // Output canvas must fit inside the requested box (small rounding slack).
+    // Width is the only budget: the canvas must honour it, and height is free
+    // to follow the ink rather than being clipped to a box.
     assert!(
-        measured_width <= target_width + 1 && measured_height <= target_height + 1,
-        "measured {measured_width}x{measured_height} exceeds target {target_width}x{target_height}"
+        measured_width <= target_width + 1,
+        "measured width {measured_width} exceeds target width {target_width}"
     );
     // The canvas must hug the ink: output aspect matches the natural viewbox
     // aspect instead of the target box aspect (no letterboxing).
@@ -129,10 +184,12 @@ fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
         (measured_ratio - natural_ratio).abs() / natural_ratio < 0.05,
         "output aspect {measured_ratio:.3} should match natural aspect {natural_ratio:.3}"
     );
-    // The binding axis should reach the target box (fit, not shrink-only).
+    // Width is the binding axis for every diagram shape: a tall diagram must
+    // still consume the whole width budget instead of being starved by a
+    // height limit. This is the assertion that fails if the 4:3 box returns.
     assert!(
-        measured_width + 1 >= target_width || measured_height + 1 >= target_height,
-        "fit should touch the target box on one axis: measured {measured_width}x{measured_height}, target {target_width}x{target_height}"
+        measured_width + 1 >= target_width,
+        "width budget should be reached: measured {measured_width}, target {target_width}"
     );
     assert_eq!(Some(width), stats.last_measured_width);
     assert_eq!(Some(height), stats.last_measured_height);
@@ -919,8 +976,8 @@ fn sequence_diagram_estimate_now_requests_more_than_the_minimum_render_width() {
         nodes + edges > 5,
         "complexity was {nodes}+{edges}, still in the smallest bucket"
     );
-    let (narrow, _) = super::calculate_render_size(4, 1, Some(80));
-    let (wide, _) = super::calculate_render_size(nodes, edges, Some(80));
+    let narrow = super::calculate_render_size(4, 1, Some(80));
+    let wide = super::calculate_render_size(nodes, edges, Some(80));
     assert!(wide > narrow, "expected a wider render target: {narrow} -> {wide}");
 }
 
@@ -995,4 +1052,38 @@ fn fallback_measured_dimensions_match_the_retargeted_svg() {
     let out = super::svg::retarget_svg_for_png(svg, 600.0);
     assert!(out.contains(r#"width="600""#), "{out}");
     assert!(out.contains(r#"height="1800""#), "{out}");
+}
+
+#[test]
+fn kitty_fast_path_boundary_is_pinned_at_the_documented_zoom() {
+    use super::{KITTY_VIEWPORT_MAX_ZOOM_PERCENT, zoom_uses_kitty_viewport_fast_path};
+
+    assert_eq!(
+        KITTY_VIEWPORT_MAX_ZOOM_PERCENT, 200,
+        "the fast-path ceiling is a documented contract (see the \"Zoom ceilings\" \
+         section of docs/MERMAID_RENDERING_REDESIGN.md); moving it changes the \
+         per-frame cost of every side-panel diagram"
+    );
+    assert!(
+        zoom_uses_kitty_viewport_fast_path(KITTY_VIEWPORT_MAX_ZOOM_PERCENT),
+        "the ceiling itself is inside the fast path, not past it"
+    );
+    assert!(
+        !zoom_uses_kitty_viewport_fast_path(KITTY_VIEWPORT_MAX_ZOOM_PERCENT + 1),
+        "one percent above the ceiling must fall back to crop-and-resize"
+    );
+    assert!(zoom_uses_kitty_viewport_fast_path(100));
+}
+
+#[test]
+fn a_zoom_past_the_ceiling_leaves_the_fast_path() {
+    use super::zoom_uses_kitty_viewport_fast_path;
+
+    // Auto-fill planners in `jcode-tui` cap at 1000%, deliberately above this
+    // ceiling: a plan past it is legal and merely costs a re-transmission per
+    // frame instead of a scroll. The assertion that the two constants really
+    // stand in that relation lives in `jcode-tui`, which owns both; here we
+    // only pin that a zoom of that magnitude does leave the fast path.
+    assert!(!zoom_uses_kitty_viewport_fast_path(1000));
+    assert!(!zoom_uses_kitty_viewport_fast_path(201));
 }

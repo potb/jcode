@@ -1252,6 +1252,10 @@ pub struct App {
     tool_output_scan_index: usize,
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
+    /// Request id of an in-flight `/detach`. The client must not quit until the
+    /// server Acks it, or the socket closes while the request is still in
+    /// flight and the session is ended instead of detached.
+    pending_detach_request: Option<u64>,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,
@@ -1655,6 +1659,11 @@ pub struct App {
     model_status_content: String,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
+    /// Detached-session ids from a `SessionList` that arrived before the picker
+    /// existed, applied when it opens.
+    pending_detached_sessions: Option<std::collections::HashSet<String>>,
+    /// When the server session listing was last requested, throttling the poll.
+    server_session_presence_requested_at: Option<std::time::Instant>,
     session_picker_mode: SessionPickerMode,
     pending_session_picker_load: Option<PendingSessionPickerLoad>,
     catchup_return_stack: Vec<String>,

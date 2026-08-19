@@ -2328,14 +2328,54 @@ impl App {
         true
     }
 
+    /// Feed the server's own view of live sessions into the picker. A detached
+    /// session has no local process, so without this it is invisible to a
+    /// presence snapshot built from the active-PID registry.
+    pub(super) fn apply_server_session_presence(
+        &mut self,
+        sessions: &[crate::protocol::LiveSessionInfo],
+    ) -> bool {
+        let detached: std::collections::HashSet<String> = sessions
+            .iter()
+            .filter(|session| session.attached_clients == 0)
+            .map(|session| session.session_id.clone())
+            .collect();
+        let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
+            self.pending_detached_sessions = Some(detached);
+            return false;
+        };
+        picker_cell.borrow_mut().set_detached_sessions(detached)
+    }
+
+    /// Whether to ask the server for its live-session listing right now: only
+    /// while the picker is on screen, and no more often than the presence
+    /// refresh interval.
+    pub(super) fn wants_server_session_presence(&self) -> bool {
+        if self.session_picker_overlay.is_none() {
+            return false;
+        }
+        match self.server_session_presence_requested_at {
+            None => true,
+            Some(at) => at.elapsed() >= session_picker::LIVE_PRESENCE_REFRESH_INTERVAL,
+        }
+    }
+
+    pub(super) fn note_server_session_presence_requested(&mut self) {
+        self.server_session_presence_requested_at = Some(std::time::Instant::now());
+    }
+
     /// Tick hook: while the session picker overlay is up, periodically refresh
     /// the live presence snapshot so working/ready badges (and the Active view
     /// membership) track reality. Returns true when a redraw is needed.
     pub(super) fn poll_session_picker_presence(&mut self) -> bool {
+        let pending = self.pending_detached_sessions.take();
         let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
+            self.pending_detached_sessions = pending;
             return false;
         };
-        picker_cell.borrow_mut().maybe_refresh_live_presence()
+        let applied_pending = pending
+            .is_some_and(|detached| picker_cell.borrow_mut().set_detached_sessions(detached));
+        picker_cell.borrow_mut().maybe_refresh_live_presence() || applied_pending
     }
 
     fn start_session_picker_load(&mut self) {

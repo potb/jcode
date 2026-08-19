@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use std::path::PathBuf;
 
-use super::paths::{lock_path, state_path};
+use super::paths::project_lock_path;
+use super::state_file::AmbientStateFile;
 use super::{AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, ScheduledItem};
 use crate::storage;
 
@@ -11,17 +12,17 @@ use crate::storage;
 // ---------------------------------------------------------------------------
 
 impl AmbientState {
+    /// The global slot of `state.json`, migrating a pre-envelope file on read.
     pub fn load() -> Result<Self> {
-        let path = state_path()?;
-        if path.exists() {
-            storage::read_json(&path)
-        } else {
-            Ok(Self::default())
-        }
+        Ok(AmbientStateFile::load()?.global)
     }
 
+    /// Write this state into the global slot, leaving per-project state intact.
+    /// Fails rather than overwriting a `state.json` it could not read.
     pub fn save(&self) -> Result<()> {
-        storage::write_json(&state_path()?, self)
+        let mut file = AmbientStateFile::load()?;
+        file.global = self.clone();
+        file.save()
     }
 
     pub fn record_cycle(&mut self, result: &AmbientCycleResult) {
@@ -186,11 +187,17 @@ pub struct AmbientLock {
 }
 
 impl AmbientLock {
-    /// Try to acquire the ambient lock.
+    /// Try to acquire the global ambient lock.
     /// Returns `Ok(Some(lock))` if acquired, `Ok(None)` if another instance
     /// already holds it, or `Err` on I/O failure.
     pub fn try_acquire() -> Result<Option<Self>> {
-        let path = lock_path()?;
+        Self::try_acquire_for(None)
+    }
+
+    /// Per-project variant, so one project's cycle does not exclude another's.
+    /// See `docs/AMBIENT_PER_PROJECT.md`.
+    pub fn try_acquire_for(project: Option<&str>) -> Result<Option<Self>> {
+        let path = project_lock_path(project)?;
 
         // Check existing lock
         if path.exists() {
@@ -232,14 +239,15 @@ impl Drop for AmbientLock {
     }
 }
 
-/// Whether a *different* live process currently holds the ambient lock.
-///
-/// Startup recovery uses this to tell "the previous process died and left work
-/// behind" from "another daemon is running a cycle right now". Recovering in
-/// the second case would duplicate that cycle's items back onto the queue.
-/// Our own PID does not count, since `server reload` re-execs in place.
+/// Whether a *different* live process currently holds the global ambient lock.
+/// See `docs/AMBIENT_MODE.md` for why startup recovery needs this.
 pub fn is_locked_by_another_process() -> bool {
-    let Ok(path) = lock_path() else {
+    is_locked_by_another_process_for(None)
+}
+
+/// Per-project variant of [`is_locked_by_another_process`].
+pub fn is_locked_by_another_process_for(project: Option<&str>) -> bool {
+    let Ok(path) = project_lock_path(project) else {
         return false;
     };
     let Ok(contents) = std::fs::read_to_string(&path) else {

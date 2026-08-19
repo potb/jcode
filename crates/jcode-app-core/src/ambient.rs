@@ -14,26 +14,39 @@ pub mod headroom;
 mod manager;
 mod paths;
 mod persistence;
+pub(crate) mod project_schedule;
+#[cfg(test)]
+mod project_schedule_tests;
 pub(crate) mod prompt;
 pub mod runner;
 pub mod schedule_window;
 #[cfg(test)]
 mod schedule_window_tests;
 pub mod scheduler;
+mod state_file;
+#[cfg(test)]
+mod state_file_tests;
+#[cfg(test)]
+mod test_env;
 
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
 pub use manager::AmbientManager;
-pub use persistence::{AmbientLock, ScheduledQueue, is_locked_by_another_process};
+pub use persistence::{
+    AmbientLock, ScheduledQueue, is_locked_by_another_process, is_locked_by_another_process_for,
+};
+pub use project_schedule::{ProjectKey, ProjectWakeLedger, select_cycle_project};
 #[cfg(test)]
 pub(crate) use prompt::format_duration_rough;
+pub(crate) use prompt::workable_project_paths;
 pub use prompt::{
     MemoryGraphHealth, ProjectGraphHealth, RecentSessionInfo, ResourceBudget,
-    build_ambient_system_prompt, format_minutes_human, format_scheduled_session_message,
-    gather_feedback_memories, gather_memory_graph_health, gather_project_graph_health,
-    gather_recent_sessions,
+    build_ambient_system_prompt, build_ambient_system_prompt_for, format_minutes_human,
+    format_scheduled_session_message, gather_feedback_memories, gather_memory_graph_health,
+    gather_project_graph_health, gather_recent_sessions, resolve_project_key,
 };
+pub use state_file::AmbientStateFile;
 
 use crate::storage;
 
@@ -133,6 +146,11 @@ pub struct ScheduledItem {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Canonical path of the configured project this item belongs to.
+    ///
+    /// See `docs/AMBIENT_PER_PROJECT.md`; read it via [`Self::project_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +159,16 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+}
+
+impl ScheduledItem {
+    /// The project owning this item, resolving `working_dir` when the stored
+    /// `project` is absent, as it is for items queued by an older build.
+    pub fn project_key(&self) -> Option<String> {
+        self.project
+            .clone()
+            .or_else(|| prompt::resolve_project_key(self.working_dir.as_deref()))
+    }
 }
 
 /// Persistent ambient state
