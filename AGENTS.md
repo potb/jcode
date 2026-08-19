@@ -48,12 +48,22 @@ such change, run `--tests` at least once rather than trusting `--lib`.
 
 When you report suite health, state the scope you measured. "`-p jcode-tui
 --lib` is green" is a claim about 1 of 86 crates, not about the suite. It is
-also, as of `56745ff7a`, not true: that crate has order-dependent failures.
-`test_background_task_markdown_is_suppressed_even_if_role_was_lost` passes on
-its own and fails in a full run, and the parallel failure count varies run to
-run (6, then 9, then 4), so a green result there may only mean you got a
-lucky interleaving. Re-run a failure serially with `-- --test-threads=1`
-before believing either outcome.
+also, as of `56745ff7a`, not reliably true, for two unrelated reasons that are
+easy to conflate:
+
+- **Order dependence** (#208). Some tests pass alone and fail in a full run.
+  `test_background_task_markdown_is_suppressed_even_if_role_was_lost` is one,
+  and it is worth knowing how it resolved: the code under test was never
+  broken. The assertion `!text.contains("╭")` was written to mean "no message
+  card rendered" but matched *any* rounded border in the buffer, including the
+  info side cards other tests cause to be drawn. Before concluding a global
+  leaked, print what the test actually saw.
+- **Nondeterminism** (#210). Under parallelism the failing set varies between
+  runs on an untouched tree (6, then 5, then 6), so a green result there may
+  only mean you got a lucky interleaving.
+
+Re-run a failure serially with `-- --test-threads=1` before believing either
+outcome, and do not treat that crate as a clean health signal today.
 
 ## Verifying a change at runtime
 
