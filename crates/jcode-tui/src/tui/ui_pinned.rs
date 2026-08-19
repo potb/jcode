@@ -1871,8 +1871,11 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
     rendered
 }
 
-// The eight are exactly the cache key's fields: every one of them changes the
-// rendered output, so none can be dropped and grouping them would duplicate
+// Seven of the eight are the cache key's fields; the eighth,
+// `mermaid_aspect_ratio`, is the raw `f32` the render needs but the key cannot
+// hold (no `Hash`/`Eq`), which is why the key stores its discretized
+// `mermaid_aspect_bucket` instead. Every one of them changes the rendered
+// output, so none can be dropped, and grouping them would near-duplicate
 // `SidePanelMarkdownKey` for a single call site.
 #[allow(clippy::too_many_arguments)]
 fn render_side_panel_markdown_lines_cached(
