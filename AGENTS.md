@@ -21,6 +21,35 @@
 - On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
+## `--lib` is not a suite check
+
+`cargo test --workspace --lib` is the fast health scan, and it is easy to
+mistake for "the tests pass". It is not: `--lib` builds only the library target
+of each crate. It never builds the `tests/` directory, so an integration binary
+that does not even **compile** is invisible to it, and reports green.
+
+That is not hypothetical. `cef23e116` added a required field to
+`ScheduledItem` and updated the 15 struct literals in the crate's own unit
+tests, but missed three in `tests/e2e/ambient.rs`. The `e2e` target failed with
+`E0063` for four days, its 64 tests never ran, and every `--lib` scan in that
+window passed.
+
+So before claiming a change is clean, compile the other target kinds:
+
+```bash
+cargo test --workspace --tests --no-run   # integration binaries compile
+cargo test --test e2e                     # and the e2e target actually runs
+```
+
+`cargo check --all-targets` (what `ci.yml` runs) catches the compile half too.
+The rule of thumb: **adding or removing a struct field, an enum variant, or a
+trait method can break a target kind nobody in the loop compiles.** After any
+such change, run `--tests` at least once rather than trusting `--lib`.
+
+When you report suite health, state the scope you measured. "`-p jcode-tui
+--lib` is green" is a true statement about 1 of 86 crates; "the suite is green"
+is a different and much stronger claim.
+
 ## Verifying a change at runtime
 
 `cargo build` alone proves nothing about behavior. `jcode run` and interactive
