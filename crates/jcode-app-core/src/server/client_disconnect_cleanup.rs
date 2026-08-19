@@ -308,7 +308,7 @@ mod tests {
     use crate::provider::{EventStream, Provider};
     use crate::tool::Registry;
     use async_trait::async_trait;
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use tokio::sync::{Mutex, RwLock, broadcast};
