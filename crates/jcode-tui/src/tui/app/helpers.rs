@@ -1230,10 +1230,10 @@ type SidecarLabelCache = Option<(std::time::Instant, Option<String>)>;
 const SIDECAR_LABEL_TTL: Duration = Duration::from_secs(30);
 
 fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
-    if let Some((ts, cached)) = cache.as_ref() {
-        if ts.elapsed() < SIDECAR_LABEL_TTL {
-            return cached.clone();
-        }
+    if let Some((ts, cached)) = cache.as_ref()
+        && ts.elapsed() < SIDECAR_LABEL_TTL
+    {
+        return cached.clone();
     }
 
     let sidecar = crate::sidecar::Sidecar::new();

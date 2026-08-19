@@ -196,7 +196,7 @@ fn read_lease(path: &PathBuf) -> Option<StoredLease> {
 fn is_expired(lease: &StoredLease) -> bool {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let age = now_ms - lease.acquired_at_ms;
-    age < 0 || age >= LEASE_TTL_MS
+    !(0..LEASE_TTL_MS).contains(&age)
 }
 
 /// Write through a temporary file in the same directory, then rename, so a

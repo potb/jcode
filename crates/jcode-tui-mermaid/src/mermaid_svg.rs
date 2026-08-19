@@ -33,9 +33,11 @@ pub(super) fn estimate_diagram_size(content: &str) -> (usize, usize) {
         if EDGE_TOKENS.iter().any(|token| trimmed.contains(token)) {
             edges += 1;
         }
-        if declares_lifeline(trimmed) {
-            nodes += 1;
-        } else if (trimmed.contains('[') && trimmed.contains(']'))
+        // A lifeline declaration and a bracketed node shape are both a single
+        // node; they are separate conditions only because a lifeline carries no
+        // brackets. Kept as one arm so the two cannot drift apart.
+        if declares_lifeline(trimmed)
+            || (trimmed.contains('[') && trimmed.contains(']'))
             || (trimmed.contains('{') && trimmed.contains('}'))
             || (trimmed.contains('(') && trimmed.contains(')'))
         {

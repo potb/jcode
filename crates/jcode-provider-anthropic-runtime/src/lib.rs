@@ -132,12 +132,8 @@ impl DirectTransportConfig {
 }
 
 fn active_anthropic_profile_models() -> Option<Vec<String>> {
-    let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") else {
-        return None;
-    };
-    let Some(profile) = jcode_base::config::config().providers.get(&profile_name) else {
-        return None;
-    };
+    let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE").ok()?;
+    let profile = jcode_base::config::config().providers.get(&profile_name)?;
     if !matches!(
         profile.provider_type,
         jcode_base::config::NamedProviderType::AnthropicCompatible
@@ -1969,6 +1965,10 @@ async fn force_refresh_oauth_token(
 }
 
 /// Stream the response from Anthropic API
+// The eight are the transport's irreducible inputs (client, credentials, the
+// request, the event sink, and three pieces of routing context); grouping them
+// would only move the same list behind a struct used once.
+#[allow(clippy::too_many_arguments)]
 async fn stream_response(
     client: Client,
     token: String,

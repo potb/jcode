@@ -1067,7 +1067,7 @@ pub fn parse_apple_terminal_keymap(json: &str) -> Vec<DiscoveredBinding> {
             });
         }
     }
-    out.sort_by(|a, b| a.chord.canonical().cmp(&b.chord.canonical()));
+    out.sort_by_key(|a| a.chord.canonical());
     out
 }
 
@@ -1239,7 +1239,7 @@ pub fn parse_iterm2_keymap(json: &str) -> Vec<DiscoveredBinding> {
             });
         }
     }
-    out.sort_by(|a, b| a.chord.canonical().cmp(&b.chord.canonical()));
+    out.sort_by_key(|a| a.chord.canonical());
     out
 }
 

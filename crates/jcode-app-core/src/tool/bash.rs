@@ -204,10 +204,7 @@ fn summarize_background_command(description: Option<&str>, command: &str) -> Str
     // "cd <dir>" says nothing about what is running. Drop leading `cd ... &&`
     // segments so the label describes the actual command.
     let mut trimmed = trimmed;
-    loop {
-        let Some(rest) = trimmed.strip_prefix("cd ") else {
-            break;
-        };
+    while let Some(rest) = trimmed.strip_prefix("cd ") {
         let Some((_, after)) = rest.split_once("&&") else {
             break;
         };

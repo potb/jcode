@@ -277,13 +277,13 @@ fn spawn_exec_job(job: CronJobConfig, slot: Option<DateTime<Utc>>) {
 fn fire(job: CronJobConfig, slot: Option<DateTime<Utc>>) {
     if job.command.is_some() {
         spawn_exec_job(job, slot);
-    } else if job.prompt.is_some() {
-        if let Err(e) = run_prompt_job(&job, slot) {
-            // Not necessarily a failure: the commonest case is the previous
-            // fire still sitting undelivered in the queue, which is the guard
-            // working as intended rather than something going wrong.
-            logging::info(&format!("cron: prompt job '{}' not queued: {}", job.id, e));
-        }
+    } else if job.prompt.is_some()
+        && let Err(e) = run_prompt_job(&job, slot)
+    {
+        // Not necessarily a failure: the commonest case is the previous fire
+        // still sitting undelivered in the queue, which is the guard working as
+        // intended rather than something going wrong.
+        logging::info(&format!("cron: prompt job '{}' not queued: {}", job.id, e));
     }
 }
 
