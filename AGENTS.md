@@ -47,8 +47,13 @@ trait method can break a target kind nobody in the loop compiles.** After any
 such change, run `--tests` at least once rather than trusting `--lib`.
 
 When you report suite health, state the scope you measured. "`-p jcode-tui
---lib` is green" is a true statement about 1 of 86 crates; "the suite is green"
-is a different and much stronger claim.
+--lib` is green" is a claim about 1 of 86 crates, not about the suite. It is
+also, as of `56745ff7a`, not true: that crate has order-dependent failures.
+`test_background_task_markdown_is_suppressed_even_if_role_was_lost` passes on
+its own and fails in a full run, and the parallel failure count varies run to
+run (6, then 9, then 4), so a green result there may only mean you got a
+lucky interleaving. Re-run a failure serially with `-- --test-threads=1`
+before believing either outcome.
 
 ## Verifying a change at runtime
 
