@@ -1,9 +1,9 @@
 {
-  "total": 3428,
+  "total": 3434,
   "totals_by_pattern": {
-    "dot_ok": 1300,
-    "let_underscore": 1250,
-    "unwrap_or_default": 878
+    "dot_ok": 1302,
+    "let_underscore": 1252,
+    "unwrap_or_default": 880
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -86,6 +86,11 @@
       "let_underscore": 0,
       "unwrap_or_default": 3
     },
+    "crates/jcode-app-core/src/ambient/state_file.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
+    },
     "crates/jcode-app-core/src/catchup.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
@@ -163,7 +168,7 @@
     },
     "crates/jcode-app-core/src/server/client_actions.rs": {
       "dot_ok": 1,
-      "let_underscore": 42,
+      "let_underscore": 43,
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/client_comm_channels.rs": {
@@ -183,7 +188,7 @@
     },
     "crates/jcode-app-core/src/server/client_lifecycle.rs": {
       "dot_ok": 0,
-      "let_underscore": 35,
+      "let_underscore": 36,
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/client_lifecycle_logging.rs": {
@@ -352,7 +357,7 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/util.rs": {
-      "dot_ok": 13,
+      "dot_ok": 15,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -749,7 +754,7 @@
     "crates/jcode-base/src/config/config_file.rs": {
       "dot_ok": 1,
       "let_underscore": 4,
-      "unwrap_or_default": 2
+      "unwrap_or_default": 3
     },
     "crates/jcode-base/src/config/env_overrides.rs": {
       "dot_ok": 1,
