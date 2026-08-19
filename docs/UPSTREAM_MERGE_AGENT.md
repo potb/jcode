@@ -61,12 +61,14 @@ that it did.
 4. Otherwise hand the conflicts to a single-purpose jcode agent.
 5. Notify through jcode's configured channels and leave the branch for review.
 
-On a verified merge it adopts the result and publishes it:
+On a verified merge it publishes the result and then adopts it:
 
-6. Fast-forward your real `master` to the merge branch.
-7. Push those commits to `auto/upstream-merge-pr` on your fork, open a pull
+6. Push the merge commit to `auto/upstream-merge-pr` on your fork, open a pull
    request into the base branch, and merge it.
-8. Fast-forward your local base branch onto the fork's new merge commit.
+7. Move your local base branch onto the fork's new merge commit.
+
+Publishing comes first on purpose. Keeping the fork current is what this job is
+for, and it must not wait on your checkout being idle.
 
 The publish step goes through a pull request because the fork's base branch is
 protected by a ruleset that forbids direct pushes.
@@ -79,41 +81,57 @@ would replace them with one new commit merely containing the same code: upstream
 SHAs would be unreachable, `git merge-base` would still report the old fork
 point, and every later run would re-merge the same history.
 
-`JCODE_UPSTREAM_MERGE_METHOD=squash` is supported but defeats the purpose; the
-adopt step then falls back to the rewrite path described below.
+`JCODE_UPSTREAM_MERGE_METHOD=squash` is supported but defeats the purpose.
 
-Both steps are guarded, because you are often mid-edit in this repo. It adopts
-only onto a clean tree, still on the expected branch, still at the commit the
-merge was built from; and it publishes only to the fork, never to upstream, and
-only when the fork's base branch is an ancestor of your local base, or is a
-rewrite of it that lost nothing (see below). Only the
-dedicated PR branch is ever force-pushed, and that branch is owned entirely by
-this job. If any guard fails you get a "merged, needs adopting" notification and
-the branch is left for you:
+## It keeps working while you work
 
-```bash
-git -C ~/jcode merge --ff-only auto/upstream-merge
-```
+Every step that moves history is built with `git merge-tree` and
+`git commit-tree`, which need no index and no working tree. So an editing
+session cannot stall the job, and your git config cannot break it: with
+`merge.ff = only`, which is a common setting, an ordinary `git merge` of a
+diverged branch aborts outright.
+
+Your base branch is the one thing treated as yours:
+
+- It never moves while that worktree has uncommitted changes.
+- It never moves onto a commit missing anything it already carries.
+- It moves as a plain ref update when no worktree has it checked out, so working
+  on a feature branch does not hold the job up.
+
+When the branch cannot move, the fork is still published and a later run adopts
+the result once your tree settles. Nothing is left for you to do by hand.
+
+Publishing only ever targets the fork, never upstream, and only the dedicated PR
+branch is force-pushed, which this job owns entirely. A commit carrying a build
+directory (`target`, `target-base`, `node_modules`, `.direnv`) is never pushed,
+since one bad `git add` is gigabytes of objects and a push cannot be undone on
+the remote. Override the list with `JCODE_UPSTREAM_FORBIDDEN_PATHS`.
 
 Set `JCODE_UPSTREAM_PUSH=0` to keep everything local. Publishing needs `gh`
 installed and authenticated.
 
-## When the fork's base branch is rewritten
+## When your base branch and the fork's disagree
 
-Editing history on GitHub (squashing, reordering, or dropping commits) leaves
-the remote branch with no ancestry link to your local one. Refusing on sight
-would wedge this job forever, so it compares content instead: it merges the two
-in memory and checks whether your local branch contributes anything the rewrite
-does not already contain.
+Two situations look identical at the SHA level, and both are normal:
 
-- **Nothing new** (the usual squash/reorder): your local base is an outdated
-  encoding of the same code, so it is reset onto the rewritten remote and the
-  run continues.
-- **Local work is missing from the rewrite**: nothing is reset or published, and
-  you get a high-priority notification naming the missing changes.
+- **A history rewrite on GitHub** (squashing, reordering, dropping commits)
+  leaves the remote with no ancestry link to your local branch.
+- **Both sides gained commits**, which is what happens whenever you commit
+  locally while a pull request merges on the fork.
 
-Either way the reset only happens on a clean tree that is still on the base
-branch. Uncommitted work is never discarded.
+Content decides which one it is. The two branches are merged in memory and the
+result compared against the remote:
+
+- **Your branch adds nothing** (the usual squash or reorder): it is an outdated
+  encoding of the same code, so the remote is adopted and the run continues.
+- **Both sides carry real work**: they are merged, and the merge is published
+  like any other. Nothing is lost and nothing needs your attention.
+- **The two conflict**: nothing is published or moved, and you get one
+  high-priority notification. Resolve it once and the job resumes on its own.
+
+Repeats of the same notification are suppressed for 24 hours, so a condition
+waiting on you is reported once rather than on every scheduled run. Tune with
+`JCODE_UPSTREAM_NOTIFY_REPEAT_HOURS`, or set it to `0` to always notify.
 
 ## GitHub Actions are kept disabled on the fork
 
@@ -202,6 +220,8 @@ All via environment variables, so the systemd unit and plist stay generic:
 | `JCODE_UPSTREAM_BRANCH` | `auto/upstream-merge` | Scratch result branch |
 | `JCODE_UPSTREAM_STATE_DIR` | `~/.jcode/upstream-merge` | Worktree, logs, lock, verdict |
 | `JCODE_UPSTREAM_CHECK_CMD` | `cargo check --workspace` | Build check the agent must make pass |
+| `JCODE_UPSTREAM_NOTIFY_REPEAT_HOURS` | `24` | Suppress a repeated notification title for this long; `0` always notifies |
+| `JCODE_UPSTREAM_FORBIDDEN_PATHS` | `target target-base node_modules .direnv` | Paths that must never be published |
 | `JCODE_BIN` | `~/.local/bin/jcode` | jcode binary |
 
 Setting up a fork from scratch:
@@ -223,3 +243,15 @@ stale-PID recovery, so an interrupted run does not wedge the schedule.
 ## Logs
 
 `~/.jcode/upstream-merge/logs/<timestamp>.log`, one per run.
+
+## Tests
+
+```bash
+scripts/tests/run_all.sh
+```
+
+Real git repos with `gh` and `jcode` stubbed, no network. `upstream_merge_e2e_test.sh`
+runs the whole script through the situation that broke it: new upstream commits,
+a fork base branch that moved on GitHub, local commits, and an uncommitted edit
+session throughout, under `merge.ff = only`. No cargo target reaches this
+scheduled shell job, so its regressions are only ever caught here.
