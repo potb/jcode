@@ -64,6 +64,11 @@ pub struct DisplayConfig {
     /// true). Set to false to hide saved/injected memory chatter from the HUD.
     #[serde(default = "default_true")]
     pub memory_widget: bool,
+    /// Whether the info widget shows the floating background-task card
+    /// (default: true). Set to false to keep background tasks out of the HUD;
+    /// the Alt+B panel and the `bg` tool still work.
+    #[serde(default = "default_true")]
+    pub background_widget: bool,
     /// Whether the info widget shows the KV cache hit-rate line (default:
     /// true). Set to false to hide `KV cache: yield … · last … · session …`
     /// from the HUD; `/cache stats` still works.
@@ -180,6 +185,7 @@ impl Default for DisplayConfig {
             pin_todos: true,
             todo_widget: TodoWidgetMode::default(),
             memory_widget: true,
+            background_widget: true,
             kv_cache_widget: true,
             pin_usage: false,
             queue_mode: false,
@@ -331,6 +337,21 @@ mod memory_widget_tests {
         assert!(text.contains("memory_widget = false"), "{}", text);
     }
 }
+#[cfg(test)]
+mod background_widget_tests {
+    use super::DisplayConfig;
+
+    #[test]
+    fn background_widget_defaults_on_and_parses_off() {
+        let cfg: DisplayConfig = toml::from_str("").unwrap();
+        assert!(cfg.background_widget);
+        let cfg: DisplayConfig = toml::from_str("background_widget = false").unwrap();
+        assert!(!cfg.background_widget);
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("background_widget = false"), "{}", text);
+    }
+}
+
 #[cfg(test)]
 mod kv_cache_widget_tests {
     use super::DisplayConfig;

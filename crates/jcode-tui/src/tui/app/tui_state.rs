@@ -303,7 +303,12 @@ impl App {
         // Tools usually run in the server/daemon process, not this client, so
         // ask for a session-scoped snapshot: it merges this process's tasks
         // with running status files owned by the server for the same session.
-        let background_info = {
+        // `display.background_widget = false` opts out of the HUD card and the
+        // overview line, which are the only consumers of this data, so skip the
+        // status-file scan entirely instead of gathering rows nothing renders.
+        let background_info = if !crate::tui::info_widget::background_widget_visible() {
+            None
+        } else {
             let bg_manager = crate::background::global();
             let background_session_id = if self.is_remote {
                 self.remote_session_id.as_deref()

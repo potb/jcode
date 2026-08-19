@@ -146,6 +146,11 @@ pin_images = true
 # false to keep saved/injected memory chatter out of the HUD.
 # memory_widget = true
 
+# Show the floating background-task card beside the chat (default: true). Set
+# to false to keep background tasks out of the HUD; Alt+B still opens the
+# background task panel and the `bg` tool is unaffected.
+# background_widget = true
+
 # Show the KV cache hit-rate line ("KV cache: yield … · last … · session …")
 # in the info widget (default: true). Set to false to hide it; /cache stats
 # still reports the same numbers on demand.

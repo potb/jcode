@@ -715,6 +715,13 @@ pub fn memory_widget_visible() -> bool {
     crate::config::config().display.memory_widget
 }
 
+/// Whether the floating background-task card renders beside the chat at all.
+/// `display.background_widget = false` hides it, along with the ambient inline
+/// strip; the Alt+B panel and the `bg` tool are unaffected.
+pub fn background_widget_visible() -> bool {
+    crate::config::config().display.background_widget
+}
+
 /// Whether the KV cache hit-rate line/widget should render at all
 /// (`display.kv_cache_widget`, default true).
 pub fn kv_cache_widget_visible() -> bool {
@@ -958,11 +965,14 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|s| !s.managed_members.is_empty())
                 .unwrap_or(false),
-            WidgetKind::BackgroundTasks => self
-                .background_info
-                .as_ref()
-                .map(|b| b.running_count > 0)
-                .unwrap_or(false),
+            WidgetKind::BackgroundTasks => {
+                background_widget_visible()
+                    && self
+                        .background_info
+                        .as_ref()
+                        .map(|b| b.running_count > 0)
+                        .unwrap_or(false)
+            }
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
             WidgetKind::UsageLimits => self
@@ -1262,6 +1272,12 @@ fn bg_dock_engaged(state: &WidgetsState) -> bool {
 /// reacting to the dock's frame-to-frame placement churn would turn it into
 /// visible flicker. The linger debounces disengagement.
 pub(crate) fn bg_strip_stands_down_for_dock() -> bool {
+    // With the HUD card switched off the user has opted out of ambient
+    // background-task chrome next to the chat, so the unfocused strip stands
+    // down permanently too. Alt+B still focuses the panel explicitly.
+    if !background_widget_visible() {
+        return true;
+    }
     let guard = get_or_init_state();
     let Some(state) = guard.as_ref() else {
         return false;
