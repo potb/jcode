@@ -891,7 +891,24 @@ fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(!text.contains("╭") && !text.contains("594967sj63"));
+    // Deliberately not `!text.contains("╭")`. That glyph was meant to say "no
+    // message card was drawn", but it matches any rounded border anywhere in
+    // the 80x16 buffer, and the info side cards (session facts, context gauge)
+    // legitimately draw one whenever the surrounding test order leaves them
+    // visible. That made this assertion fail on a frame where the suppression
+    // under test had worked perfectly. Assert the absence of the message's own
+    // content instead, which is what the test is actually about.
+    for fragment in [
+        "594967sj63",
+        "Background task",
+        "Full output",
+        "Command timed out",
+    ] {
+        assert!(
+            !text.contains(fragment),
+            "background task markdown leaked {fragment:?} into the frame:\n{text}"
+        );
+    }
     assert!(app.display_messages().is_empty());
     assert_eq!(app.display_user_message_count(), 0);
 }
