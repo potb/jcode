@@ -1213,9 +1213,9 @@ fn cached_sidecar_label() -> Option<String> {
 
 /// Process-wide storage for [`cached_sidecar_label`].
 ///
-/// Split from the logic below so tests can drive TTL expiry through
-/// [`expire_sidecar_label_cache_for_tests`] instead of sleeping for the real
-/// TTL.
+/// Split from the logic below so tests can drive their own cache (and their own
+/// TTL expiry) through [`cached_sidecar_label_counting`] instead of sleeping for
+/// the real TTL or mutating this process-global slot.
 fn sidecar_label_cache_slot() -> &'static std::sync::Mutex<SidecarLabelCache> {
     static LABEL: std::sync::OnceLock<std::sync::Mutex<SidecarLabelCache>> =
         std::sync::OnceLock::new();
@@ -1230,6 +1230,20 @@ type SidecarLabelCache = Option<(std::time::Instant, Option<String>)>;
 const SIDECAR_LABEL_TTL: Duration = Duration::from_secs(30);
 
 fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
+    cached_sidecar_label_in_counting(cache, &mut || {})
+}
+
+/// [`cached_sidecar_label_in`] with a caller-owned probe counter.
+///
+/// The counter is a parameter rather than a process-global atomic on purpose:
+/// `--lib` runs these tests in parallel with every other test that renders the
+/// info widget, and a shared counter (or a shared cache slot backdated by the
+/// TTL-expiry test) makes "no re-probe happened" report on the whole process
+/// instead of on this test. That was the deterministic interference behind #210.
+fn cached_sidecar_label_in_counting(
+    cache: &mut SidecarLabelCache,
+    on_probe: &mut dyn FnMut(),
+) -> Option<String> {
     if let Some((ts, cached)) = cache.as_ref()
         && ts.elapsed() < SIDECAR_LABEL_TTL
     {
@@ -1237,7 +1251,7 @@ fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
     }
 
     let sidecar = crate::sidecar::Sidecar::new();
-    record_sidecar_probe();
+    on_probe();
     let label = Some(format!(
         "{} · {}",
         sidecar.backend_name(),
@@ -1247,7 +1261,7 @@ fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
     label
 }
 
-/// Number of times the sidecar backend has actually been probed.
+/// Read the sidecar label through a caller-owned cache, counting real probes.
 ///
 /// The property that matters is "the render path does not re-probe", and a
 /// wall-clock budget is a poor proxy for it: timing assertions measure the host
@@ -1255,30 +1269,22 @@ fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
 /// `JCODE_TEST_PERF_ASSERTIONS` (refs #592). Counting the probes asserts the
 /// same invariant exactly, and stays correct on a loaded machine.
 #[cfg(test)]
-static SIDECAR_PROBE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-fn record_sidecar_probe() {
-    SIDECAR_PROBE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+pub(super) fn cached_sidecar_label_counting(
+    cache: &mut SidecarLabelCache,
+    probes: &mut usize,
+) -> Option<String> {
+    cached_sidecar_label_in_counting(cache, &mut || *probes += 1)
 }
 
-#[cfg(not(test))]
-fn record_sidecar_probe() {}
-
-#[cfg(test)]
-pub(super) fn sidecar_probe_count_for_tests() -> usize {
-    SIDECAR_PROBE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Backdate the cached label past its TTL so the next read re-probes.
+/// Backdate a caller-owned cached label past its TTL so the next read re-probes.
 ///
-/// Exists so the expiry branch is covered by a test without a 30s sleep.
+/// Exists so the expiry branch is covered by a test without a 30s sleep. Takes
+/// the cache by reference rather than reaching for the process-global slot, so
+/// one test's expiry cannot make another test's cache hit turn into a probe.
 #[cfg(test)]
-pub(super) fn expire_sidecar_label_cache_for_tests() {
-    if let Ok(mut guard) = sidecar_label_cache_slot().lock() {
-        if let Some((ts, _)) = guard.as_mut() {
-            *ts = backdated_now(SIDECAR_LABEL_TTL + Duration::from_secs(1));
-        }
+pub(super) fn expire_sidecar_label_cache(cache: &mut SidecarLabelCache) {
+    if let Some((ts, _)) = cache.as_mut() {
+        *ts = backdated_now(SIDECAR_LABEL_TTL + Duration::from_secs(1));
     }
 }
 
