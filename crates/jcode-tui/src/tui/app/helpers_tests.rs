@@ -574,12 +574,15 @@ fn backdated_now_never_panics_and_prefers_past_instants() {
 /// string clone), so this stays meaningful without being timing-flaky.
 #[test]
 fn cached_sidecar_label_does_not_reprobe_within_ttl() {
-    // Prime the cache. This one may pay the full probe cost.
-    let first = super::cached_sidecar_label();
+    let mut cache = None;
+    let mut probes = 0usize;
 
-    let probes_after_priming = super::sidecar_probe_count_for_tests();
+    // Prime the cache. This one pays the full probe cost.
+    let first = super::cached_sidecar_label_counting(&mut cache, &mut probes);
+    assert_eq!(probes, 1, "priming must run exactly one probe");
+
     for _ in 0..200 {
-        let repeat = super::cached_sidecar_label();
+        let repeat = super::cached_sidecar_label_counting(&mut cache, &mut probes);
         assert_eq!(
             repeat, first,
             "cached label must stay stable within its TTL"
@@ -587,8 +590,7 @@ fn cached_sidecar_label_does_not_reprobe_within_ttl() {
     }
 
     assert_eq!(
-        super::sidecar_probe_count_for_tests(),
-        probes_after_priming,
+        probes, 1,
         "200 reads within the TTL re-probed the sidecar backend, which puts a \
          config.toml parse back on the render path"
     );
@@ -645,29 +647,35 @@ fn gather_memory_info_suppresses_sidecar_label_when_memory_disabled() {
 /// editing `agents.memory_model`) would never show up in the memory widget.
 #[test]
 fn cached_sidecar_label_reprobes_after_ttl_expiry() {
-    let first = super::cached_sidecar_label();
+    let mut cache = None;
+    let mut probes = 0usize;
+
+    let first = super::cached_sidecar_label_counting(&mut cache, &mut probes);
 
     // Within the TTL: same value, no re-probe.
-    assert_eq!(super::cached_sidecar_label(), first);
+    assert_eq!(
+        super::cached_sidecar_label_counting(&mut cache, &mut probes),
+        first
+    );
+    assert_eq!(probes, 1, "a read inside the TTL must be a cache hit");
 
     // Past the TTL: the probe runs again. Credentials have not changed inside
     // this test, so the value must be stable, which also proves expiry does not
     // blank the label.
-    super::expire_sidecar_label_cache_for_tests();
+    super::expire_sidecar_label_cache(&mut cache);
     assert_eq!(
-        super::cached_sidecar_label(),
+        super::cached_sidecar_label_counting(&mut cache, &mut probes),
         first,
         "re-probe after TTL expiry must still yield a usable label"
     );
+    assert_eq!(probes, 2, "expiry must actually re-probe");
 
     // And the refreshed entry must be cached again rather than probing forever.
-    let probes_after_refresh = super::sidecar_probe_count_for_tests();
     for _ in 0..100 {
-        let _ = super::cached_sidecar_label();
+        let _ = super::cached_sidecar_label_counting(&mut cache, &mut probes);
     }
     assert_eq!(
-        super::sidecar_probe_count_for_tests(),
-        probes_after_refresh,
+        probes, 2,
         "reads after a TTL refresh are not being cached again"
     );
 }
