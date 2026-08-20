@@ -1214,22 +1214,22 @@ fn cached_sidecar_label() -> Option<String> {
 /// Process-wide storage for [`cached_sidecar_label`].
 ///
 /// Split from the logic below so tests can drive their own cache (and their own
-/// TTL expiry) through [`cached_sidecar_label_in`] instead of sleeping for the
-/// real TTL or mutating this process-global slot.
+/// TTL expiry) through [`cached_sidecar_label_counting`] instead of sleeping for
+/// the real TTL or mutating this process-global slot.
 fn sidecar_label_cache_slot() -> &'static std::sync::Mutex<SidecarLabelCache> {
     static LABEL: std::sync::OnceLock<std::sync::Mutex<SidecarLabelCache>> =
         std::sync::OnceLock::new();
     LABEL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-pub(super) type SidecarLabelCache = Option<(std::time::Instant, Option<String>)>;
+type SidecarLabelCache = Option<(std::time::Instant, Option<String>)>;
 
 /// The TTL is short relative to how often the render path asks for this label
 /// (several times per frame) and long relative to how often it can change (a
 /// login, or an edited `agents.memory_model`).
 const SIDECAR_LABEL_TTL: Duration = Duration::from_secs(30);
 
-pub(super) fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
+fn cached_sidecar_label_in(cache: &mut SidecarLabelCache) -> Option<String> {
     cached_sidecar_label_in_counting(cache, &mut || {})
 }
 
