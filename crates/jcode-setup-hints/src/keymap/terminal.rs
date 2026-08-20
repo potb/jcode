@@ -32,41 +32,33 @@
 //! preference domain, so [`read_apple_terminal_keybinds`] reads them live
 //! through the shared plist pipeline. See that function for why only rebound
 //! keys are visible, and why that is the interesting set anyway.
+//!
+//! Not every listed binding intercepts a key: a terminal that re-encodes a chord
+//! as the escape sequence for that same chord still delivers it. See
+//! `docs/KEYMAP_CONFLICTS.md` for which of those are skipped and why.
 
 use super::chord::KeyChord;
 use super::source::{AltSide, DiscoveredBinding, KeySource};
 
-/// Parse a single Ghostty keybind line of the form:
-///
-/// ```text
-/// keybind = super+shift+,=reload_config
-/// super+backspace=text:\x17
-/// ```
-///
-/// The left side (up to the first top-level `=`) is the trigger; the right side
-/// is the action. The trigger is `mod+mod+key`. Returns `None` for lines that
-/// are not bindings (comments, blanks, multi-key sequences we do not model).
+const CSI_SHIFT: u32 = 1;
+const CSI_ALT: u32 = 2;
+const CSI_CTRL: u32 = 4;
+const CSI_SUPER: u32 = 8;
+
+/// Parse one `[keybind =] mod+mod+key=action` line, or `None` if it is not a
+/// binding jcode models. See `docs/KEYMAP_CONFLICTS.md`.
 pub fn parse_ghostty_keybind_line(line: &str) -> Option<DiscoveredBinding> {
-    let mut line = line.trim();
+    let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    // Strip an optional leading `keybind =` / `keybind:` prefix.
-    if let Some(rest) = line.strip_prefix("keybind") {
-        let rest = rest.trim_start();
-        let rest = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':'))?;
-        line = rest.trim();
-    }
-
-    // Split trigger=action on the first '='.
-    let eq = line.find('=')?;
-    let trigger = line[..eq].trim();
-    let action = line[eq + 1..].trim();
-    if trigger.is_empty() {
-        return None;
-    }
+    let line = strip_keybind_prefix(line)?;
+    let (trigger, action) = split_trigger_and_action(line)?;
 
     let chord = parse_trigger(trigger)?;
+    if is_transparent_passthrough(&chord, action) {
+        return None;
+    }
     Some(DiscoveredBinding {
         chord,
         source: KeySource::Terminal,
@@ -78,20 +70,75 @@ pub fn parse_ghostty_keybind_line(line: &str) -> Option<DiscoveredBinding> {
     })
 }
 
-/// Parse a `mod+mod+key` trigger into a chord. Returns `None` for triggers that
-/// describe a multi-key sequence (Ghostty uses `>` between chords) since we only
-/// model single chords for conflict detection.
-fn parse_trigger(trigger: &str) -> Option<KeyChord> {
-    if trigger.contains('>') {
+fn strip_keybind_prefix(line: &str) -> Option<&str> {
+    let Some(rest) = line.strip_prefix("keybind") else {
+        return Some(line);
+    };
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':'))?;
+    Some(rest.trim())
+}
+
+fn split_trigger_and_action(line: &str) -> Option<(&str, &str)> {
+    let (trigger, action) = line.split_once('=')?;
+    let trigger = trigger.trim();
+    if trigger.is_empty() {
         return None;
     }
-    // Ghostty exposes a few logical triggers (mapped to the platform's native
-    // shortcut) that are not real key chords. They can never collide with a
-    // jcode binding, so drop them to keep the snapshot clean.
-    if matches!(
-        trigger.to_ascii_lowercase().as_str(),
-        "copy" | "paste" | "unbind" | "ignore"
-    ) {
+    Some((trigger, action.trim()))
+}
+
+fn is_transparent_passthrough(trigger: &KeyChord, action: &str) -> bool {
+    let Some(payload) = action.strip_prefix("csi:") else {
+        return false;
+    };
+    decode_csi_chord(payload).is_some_and(|encoded| encoded == *trigger)
+}
+
+fn decode_csi_chord(payload: &str) -> Option<KeyChord> {
+    let payload = payload.trim();
+    let final_byte = payload.chars().last()?;
+    let params: Vec<&str> = payload[..payload.len() - final_byte.len_utf8()]
+        .split(';')
+        .collect();
+    let (keycode, modifier_param) = match params.as_slice() {
+        [keycode] => (*keycode, "1"),
+        [keycode, modifiers] => (*keycode, *modifiers),
+        _ => return None,
+    };
+
+    let key = match final_byte {
+        'A' => "up",
+        'B' => "down",
+        'C' => "right",
+        'D' => "left",
+        'H' => "home",
+        'F' => "end",
+        '~' => match keycode {
+            "2" => "insert",
+            "3" => "delete",
+            "5" => "pageup",
+            "6" => "pagedown",
+            "7" => "home",
+            "8" => "end",
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    let bits = modifier_param.parse::<u32>().ok()?.checked_sub(1)?;
+    Some(KeyChord::new(
+        bits & CSI_SUPER != 0,
+        bits & CSI_CTRL != 0,
+        bits & CSI_ALT != 0,
+        bits & CSI_SHIFT != 0,
+        key,
+    ))
+}
+
+/// Parse a `mod+mod+key` trigger into a chord, or `None` if it is not one.
+fn parse_trigger(trigger: &str) -> Option<KeyChord> {
+    if is_multi_key_sequence(trigger) || is_logical_trigger(trigger) {
         return None;
     }
     let mut cmd = false;
@@ -100,17 +147,14 @@ fn parse_trigger(trigger: &str) -> Option<KeyChord> {
     let mut shift = false;
     let mut key: Option<String> = None;
 
-    // Split on '+', but a trailing '+' means the key itself is '+'.
-    let tokens = split_trigger_tokens(trigger);
-    for tok in tokens {
+    for tok in split_trigger_tokens(trigger) {
         match tok.to_ascii_lowercase().as_str() {
             "super" | "cmd" | "command" => cmd = true,
             "ctrl" | "control" => ctrl = true,
             "alt" | "opt" | "option" => alt = true,
             "shift" => shift = true,
-            other => {
-                // Last non-modifier token wins as the key.
-                key = Some(other.to_string());
+            last_non_modifier_token_wins => {
+                key = Some(last_non_modifier_token_wins.to_string());
             }
         }
     }
@@ -119,9 +163,18 @@ fn parse_trigger(trigger: &str) -> Option<KeyChord> {
     Some(KeyChord::new(cmd, ctrl, alt, shift, &key))
 }
 
-/// Split a trigger on '+' while treating a literal '+' key correctly. For
-/// example `super++` is `["super", "+"]` and `ctrl+shift++` is
-/// `["ctrl", "shift", "+"]`.
+fn is_multi_key_sequence(trigger: &str) -> bool {
+    trigger.contains('>')
+}
+
+fn is_logical_trigger(trigger: &str) -> bool {
+    matches!(
+        trigger.to_ascii_lowercase().as_str(),
+        "copy" | "paste" | "unbind" | "ignore"
+    )
+}
+
+/// Split a trigger on `+`, where `super++` yields `["super", "+"]`.
 fn split_trigger_tokens(trigger: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -129,11 +182,9 @@ fn split_trigger_tokens(trigger: &str) -> Vec<String> {
     for (i, &c) in chars.iter().enumerate() {
         if c == '+' {
             if cur.is_empty() {
-                // A '+' with nothing before it is the literal '+' key.
-                // Only treat it as the key when it is not a separator between
-                // two names (i.e. previous char was already a separator).
-                let is_trailing_or_double = i + 1 == chars.len() || chars[i + 1] == '+';
-                if is_trailing_or_double || tokens.is_empty() {
+                let plus_is_the_key =
+                    i + 1 == chars.len() || chars[i + 1] == '+' || tokens.is_empty();
+                if plus_is_the_key {
                     tokens.push("+".to_string());
                     continue;
                 }
@@ -1515,6 +1566,63 @@ Mouse
     fn skips_logical_copy_paste_triggers() {
         assert!(parse_ghostty_keybind_line("keybind = copy=copy_to_clipboard:mixed").is_none());
         assert!(parse_ghostty_keybind_line("keybind = paste=paste_from_clipboard").is_none());
+    }
+
+    #[test]
+    fn skips_ghostty_cmd_and_alt_arrow_csi_that_re_encode_their_own_chord() {
+        for line in [
+            "keybind = super+arrow_right=csi:1;9C",
+            "keybind = super+arrow_left=csi:1;9D",
+            "keybind = alt+arrow_right=csi:1;3C",
+            "keybind = alt+arrow_left=csi:1;3D",
+        ] {
+            assert!(
+                parse_ghostty_keybind_line(line).is_none(),
+                "expected transparent passthrough for {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_csi_that_drops_the_modifier_and_so_hides_the_chord() {
+        let b = parse_ghostty_keybind_line("keybind = super+arrow_right=csi:C").unwrap();
+        assert_eq!(b.chord.canonical(), "cmd+right");
+        assert_eq!(b.action, "csi:C");
+    }
+
+    #[test]
+    fn keeps_text_and_esc_payloads() {
+        let b = parse_ghostty_keybind_line("keybind = super+backspace=text:\\x15").unwrap();
+        assert_eq!(b.chord.canonical(), "cmd+backspace");
+    }
+
+    #[test]
+    fn decodes_tilde_terminated_csi_keys() {
+        assert!(parse_ghostty_keybind_line("keybind = ctrl+page_up=csi:5;5~").is_none());
+        assert!(parse_ghostty_keybind_line("keybind = shift+page_down=csi:6;2~").is_none());
+    }
+
+    #[test]
+    fn keeps_tilde_csi_that_names_a_different_key() {
+        let page_up_sent_as_page_down =
+            parse_ghostty_keybind_line("keybind = ctrl+page_up=csi:6;5~").unwrap();
+        assert_eq!(page_up_sent_as_page_down.chord.canonical(), "ctrl+pageup");
+    }
+
+    #[test]
+    fn ignores_unparseable_csi_payloads() {
+        for line in [
+            "keybind = super+arrow_right=csi:",
+            "keybind = super+arrow_right=csi:1;2;3C",
+            "keybind = super+arrow_right=csi:1;xC",
+            "keybind = super+arrow_right=csi:1;0C",
+            "keybind = super+arrow_right=csi:9;9Z",
+        ] {
+            assert!(
+                parse_ghostty_keybind_line(line).is_some(),
+                "unparseable payload must stay a binding: {line}"
+            );
+        }
     }
 
     #[test]

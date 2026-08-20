@@ -20,6 +20,28 @@ against jcode's own configured bindings, and warns about overlaps.
   defaults merged with the user's config). This also catches rewrites such as
   Ghostty mapping `Alt+Left`/`Alt+Right` to word-navigation escape sequences.
 
+**Deliberately not reported (transparent passthrough):**
+
+A terminal binding whose action re-encodes its own trigger does not intercept
+anything. Ghostty ships several of these so terminal apps can see the chord at
+all, e.g. `super+arrow_right=csi:1;9C` and `alt+arrow_left=csi:1;3D`. jcode
+decodes the `csi:` payload back into a chord and drops the binding when it equals
+the trigger, because the key still arrives intact and flagging it produces a
+false positive that pushes users to rebind a working key.
+
+The decode covers CSI payloads of the form `keycode;modifiers` plus a final byte:
+`A`/`B`/`C`/`D`/`H`/`F` for the cursor keys and `~` with a numeric keycode
+(`2`=Insert, `3`=Delete, `5`=PageUp, `6`=PageDown, `7`=Home, `8`=End). The
+modifier parameter is the xterm/kitty bitmask plus one, where the bits are
+1=shift, 2=alt, 4=ctrl, 8=super. `text:` and `esc:` payloads (such as Ghostty's
+`super+backspace=text:\x15`) lose the original key identity, so they are still
+treated as real conflicts.
+
+Triggers that are not single chords are skipped as unmodellable: multi-key
+sequences (`ctrl+a>n`) and Ghostty's logical triggers (`copy`, `paste`, `unbind`,
+`ignore`), which stand for whatever the platform's native shortcut happens to be
+and so can never collide with a specific jcode chord.
+
 **Cannot detect:**
 
 - Ad-hoc remappers (Karabiner-Elements, BetterTouchTool), window managers, or
