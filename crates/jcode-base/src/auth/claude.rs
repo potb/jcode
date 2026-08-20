@@ -381,7 +381,8 @@ pub fn set_active_account(label: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add or update an account. Returns the label used.
+/// Add or update an account, returning the label it is stored under, which is
+/// not always `account.label`: a new account gets a generated one instead.
 pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
     let mut auth = load_auth_file()?;
     let label = crate::auth::account_store::upsert_account(
