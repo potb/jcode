@@ -1060,3 +1060,5 @@ mod tests {
         assert_eq!(picker.selected, 0);
     }
 }
+
+// scratch: control arm, bare --squash
