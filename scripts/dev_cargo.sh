@@ -990,29 +990,46 @@ configure_linux_linker() {
 # commit every rustc invocation to it. Some environments export flags or ship a
 # gcc that rejects the option, which otherwise fails the whole build at the
 # first build-script link with an unrecognized-option error.
-declare -A __jcode_linker_probe_cache=()
+#
+# Memoized in a delimited string, not an associative array: macOS ships bash 3.2
+# where `declare -A` is a syntax error that aborts the whole script.
+__jcode_linker_probe_cache="|"
+
+remembered_linker_verdict() {
+  local key="$1"
+  case "$__jcode_linker_probe_cache" in
+    *"|${key}=ok|"*) printf 'ok\n' ;;
+    *"|${key}=bad|"*) printf 'bad\n' ;;
+  esac
+}
+
+remember_linker_verdict() {
+  local key="$1" verdict="$2"
+  __jcode_linker_probe_cache="${__jcode_linker_probe_cache}${key}=${verdict}|"
+}
 
 linker_driver_accepts() {
   local driver="$1" linker="$2"
   local key="${driver}:${linker}"
-  if [[ -n "${__jcode_linker_probe_cache[$key]-}" ]]; then
-    [[ "${__jcode_linker_probe_cache[$key]}" == "ok" ]]
-    return
+  local verdict
+  verdict=$(remembered_linker_verdict "$key")
+  if [[ -z "$verdict" ]]; then
+    local tmpdir
+    tmpdir=$(mktemp -d) || return 1
+    printf 'int main(void){return 0;}\n' >"$tmpdir/probe.c"
+    local rc=0
+    "$driver" "-fuse-ld=$linker" "$tmpdir/probe.c" -o "$tmpdir/probe" \
+      >/dev/null 2>&1 || rc=$?
+    rm -rf "$tmpdir"
+    if [[ "$rc" -eq 0 ]]; then
+      verdict="ok"
+    else
+      verdict="bad"
+      log "$driver cannot link with -fuse-ld=$linker; skipping it"
+    fi
+    remember_linker_verdict "$key" "$verdict"
   fi
-  local tmpdir
-  tmpdir=$(mktemp -d) || return 1
-  printf 'int main(void){return 0;}\n' >"$tmpdir/probe.c"
-  local rc=0
-  "$driver" "-fuse-ld=$linker" "$tmpdir/probe.c" -o "$tmpdir/probe" \
-    >/dev/null 2>&1 || rc=$?
-  rm -rf "$tmpdir"
-  if [[ "$rc" -eq 0 ]]; then
-    __jcode_linker_probe_cache[$key]="ok"
-  else
-    __jcode_linker_probe_cache[$key]="bad"
-    log "$driver cannot link with -fuse-ld=$linker; skipping it"
-  fi
-  [[ "${__jcode_linker_probe_cache[$key]}" == "ok" ]]
+  [[ "$verdict" == "ok" ]]
 }
 
 _configure_linux_linker_impl() {
