@@ -145,7 +145,6 @@ fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order(
 
 #[test]
 fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
-    use ratatui::style::Color;
     use unicode_width::UnicodeWidthStr;
 
     let _lock = viewport_snapshot_test_lock();
@@ -159,7 +158,12 @@ fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
 
     let rows = buffer_rows(&terminal);
     let buffer = terminal.backend().buffer();
-    let neutral = Color::Rgb(140, 140, 150);
+    // Build the expected color through the same helper production uses, so the
+    // assertion holds on 256-color terminals too. A hardcoded `Color::Rgb`
+    // literal makes this test fail deterministically whenever the host does not
+    // advertise truecolor (bare `TERM=dumb`, plain `xterm-256color`, CI), since
+    // `rgb()` then quantizes every fact span to `Color::Indexed`.
+    let neutral = jcode_tui_style::color::rgb(140, 140, 150);
     for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "~/jcode"] {
         let y = row_containing(&rows, needle);
         let byte_x = rows[y].find(needle).expect("fact text start");
