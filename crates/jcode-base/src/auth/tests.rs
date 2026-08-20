@@ -1137,3 +1137,137 @@ fn has_any_available_reads_the_snapshot_without_touching_disk() {
     restore_env_var("JCODE_HOME", prev_home);
     AuthStatus::invalidate_cache();
 }
+fn issue_211_saved_env() -> Vec<(&'static str, Option<OsString>)> {
+    [
+        "JCODE_HOME",
+        "HOME",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_ENV_FILE",
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect()
+}
+
+fn issue_211_point_at_empty_home_and_clear_anthropic_env(temp_home: &std::path::Path) {
+    crate::env::set_var("JCODE_HOME", temp_home);
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_ENV_FILE",
+    ] {
+        crate::env::remove_var(key);
+    }
+    AuthStatus::invalidate_cache();
+}
+
+fn issue_211_switch_home_leaving_cache_populated(temp_home: &std::path::Path) {
+    crate::env::set_var("JCODE_HOME", temp_home);
+    crate::env::remove_var("ANTHROPIC_API_KEY");
+}
+
+#[test]
+fn issue_211_temp_home_isolates_oauth_credentials() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let saved = issue_211_saved_env();
+
+    issue_211_point_at_empty_home_and_clear_anthropic_env(&temp.path().join("jcode-home"));
+    let isolated = AuthStatus::check_fast();
+
+    for (key, previous) in saved {
+        restore_env_var(key, previous);
+    }
+    AuthStatus::invalidate_cache();
+
+    assert!(
+        !isolated.anthropic.has_oauth,
+        "a temp JCODE_HOME must hide real OAuth credentials, got has_oauth=true"
+    );
+}
+
+#[test]
+fn issue_211_temp_home_does_not_isolate_api_key_env() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let saved = issue_211_saved_env();
+
+    issue_211_point_at_empty_home_and_clear_anthropic_env(&temp.path().join("jcode-home"));
+    let without_key = AuthStatus::check_fast();
+
+    crate::env::set_var("ANTHROPIC_API_KEY", "issue-211-probe-key");
+    AuthStatus::invalidate_cache();
+    let with_key = AuthStatus::check_fast();
+
+    for (key, previous) in saved {
+        restore_env_var(key, previous);
+    }
+    AuthStatus::invalidate_cache();
+
+    assert!(
+        !without_key.anthropic.has_api_key,
+        "control: with the env cleared there must be no API key"
+    );
+    assert!(
+        with_key.anthropic.has_api_key,
+        "ANTHROPIC_API_KEY must still be visible under a temp JCODE_HOME, so \
+         home isolation alone cannot fix the env half of #211"
+    );
+}
+
+#[test]
+fn issue_211_auth_token_env_is_a_second_leak_path() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let saved = issue_211_saved_env();
+
+    issue_211_point_at_empty_home_and_clear_anthropic_env(&temp.path().join("jcode-home"));
+    crate::env::set_var("ANTHROPIC_AUTH_TOKEN", "issue-211-probe-token");
+    AuthStatus::invalidate_cache();
+    let with_token = AuthStatus::check_fast();
+
+    for (key, previous) in saved {
+        restore_env_var(key, previous);
+    }
+    AuthStatus::invalidate_cache();
+
+    assert!(
+        with_token.anthropic.has_api_key,
+        "ANTHROPIC_AUTH_TOKEN must also surface as has_api_key, so scrubbing \
+         only ANTHROPIC_API_KEY would still leak"
+    );
+}
+
+#[test]
+fn issue_211_fast_cache_does_not_bleed_across_homes() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let saved = issue_211_saved_env();
+
+    let home_with_key = temp.path().join("home-a");
+    issue_211_point_at_empty_home_and_clear_anthropic_env(&home_with_key);
+    crate::env::set_var("ANTHROPIC_API_KEY", "issue-211-cache-key");
+    let primed = AuthStatus::check_fast();
+
+    issue_211_switch_home_leaving_cache_populated(&temp.path().join("home-b"));
+    let after_switch = AuthStatus::check_fast();
+
+    for (key, previous) in saved {
+        restore_env_var(key, previous);
+    }
+    AuthStatus::invalidate_cache();
+
+    assert!(
+        primed.anthropic.has_api_key,
+        "control: first home had a key"
+    );
+    assert!(
+        !after_switch.anthropic.has_api_key,
+        "a cached snapshot from another JCODE_HOME must not be reused"
+    );
+}
