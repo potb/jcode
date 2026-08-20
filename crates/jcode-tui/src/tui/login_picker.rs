@@ -928,9 +928,21 @@ mod tests {
             OVERLAY_PERCENT_Y,
             Rect::new(0, 0, 50, 14),
         );
-        let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
+        // Probe a cell that is genuinely OUTSIDE the overlay. `overlay.x +
+        // overlay.width - 3` is three cells in from the panel's right edge,
+        // i.e. still inside it, so the original probe asserted the opposite of
+        // this test's name and passed on the panel's own background.
+        let buf = terminal.backend().buffer();
+        assert!(overlay.x > 0, "overlay must not span the full width");
+        let probe = &buf[(overlay.x - 1, overlay.y + 2)];
         assert_eq!(probe.symbol(), "X");
-        assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
+
+        // Compare against the colors the panel actually paints. The previous
+        // literal `Color::Rgb(18, 21, 30)` appears nowhere in this file (the
+        // panel uses `PANEL_BG` = `Color::Rgb(24, 28, 40)`), so the guard could
+        // never fire whatever the renderer did.
+        assert_ne!(probe.bg, PANEL_BG);
+        assert_ne!(probe.bg, SELECTED_BG);
     }
 
     #[test]
