@@ -45,7 +45,7 @@ run_memo_under() {
     remember_linker_verdict cc:mold ok
     remember_linker_verdict cc:lld bad
     printf 'mold=[%s] lld=[%s] ' \"\$(remembered_linker_verdict cc:mold)\" \"\$(remembered_linker_verdict cc:lld)\"
-    printf 'unrelated=[%s] prefix=[%s]' \"\$(remembered_linker_verdict clang:mold)\" \"\$(remembered_linker_verdict c)\"
+    printf 'unrelated=[%s] prefix=[%s] suffix=[%s] suffixbad=[%s]' \"\$(remembered_linker_verdict clang:mold)\" \"\$(remembered_linker_verdict c)\" \"\$(remembered_linker_verdict c:mold)\" \"\$(remembered_linker_verdict c:lld)\"
   " 2>&1
 }
 
@@ -57,7 +57,7 @@ awk '
   /^remember_linker_verdict\(\)/ , /^}/ { print }
 ' "$script" >"$probe_harness"
 
-expected='empty=[] mold=[ok] lld=[bad] unrelated=[] prefix=[]'
+expected='empty=[] mold=[ok] lld=[bad] unrelated=[] prefix=[] suffix=[] suffixbad=[]'
 
 verdict_check=$(run_memo_under bash "$probe_harness")
 if [[ "$verdict_check" != "$expected" ]]; then
