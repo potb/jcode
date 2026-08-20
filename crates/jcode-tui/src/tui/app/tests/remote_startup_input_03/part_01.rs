@@ -482,80 +482,84 @@ fn test_multiple_pastes() {
 
 #[test]
 fn test_restore_session_adds_reload_message() {
-    use crate::session::Session;
+    with_temp_jcode_home(|| {
+        use crate::session::Session;
 
-    let mut app = create_test_app();
+        let mut app = create_test_app();
 
-    // Create and save a session with a fake provider_session_id
-    let mut session = Session::create(None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "test message".to_string(),
-            cache_control: None,
-        }],
-    );
-    session.provider_session_id = Some("fake-uuid".to_string());
-    let session_id = session.id.clone();
-    session.save().unwrap();
+        // Create and save a session with a fake provider_session_id
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "test message".to_string(),
+                cache_control: None,
+            }],
+        );
+        session.provider_session_id = Some("fake-uuid".to_string());
+        let session_id = session.id.clone();
+        session.save().unwrap();
 
-    // Restore the session
-    app.restore_session(&session_id);
+        // Restore the session
+        app.restore_session(&session_id);
 
-    // Should have the original message + reload success message in display
-    assert_eq!(app.display_messages().len(), 2);
-    assert_eq!(app.display_messages()[0].role, "user");
-    assert_eq!(app.display_messages()[0].content, "test message");
-    assert_eq!(app.display_messages()[1].role, "system");
-    assert!(
-        app.display_messages()[1]
-            .content
-            .contains("Reload complete - continuing.")
-    );
+        // Should have the original message + reload success message in display
+        assert_eq!(app.display_messages().len(), 2);
+        assert_eq!(app.display_messages()[0].role, "user");
+        assert_eq!(app.display_messages()[0].content, "test message");
+        assert_eq!(app.display_messages()[1].role, "system");
+        assert!(
+            app.display_messages()[1]
+                .content
+                .contains("Reload complete - continuing.")
+        );
 
-    // Local restore keeps provider messages lazy until the next active turn.
-    assert_eq!(app.messages.len(), 0);
-    assert_eq!(
-        app.session.debug_memory_profile()["provider_messages_cache"]["count"],
-        0
-    );
+        // Local restore keeps provider messages lazy until the next active turn.
+        assert_eq!(app.messages.len(), 0);
+        assert_eq!(
+            app.session.debug_memory_profile()["provider_messages_cache"]["count"],
+            0
+        );
 
-    // Provider session ID should be cleared (Claude sessions don't persist across restarts)
-    assert!(app.provider_session_id.is_none());
+        // Provider session ID should be cleared (Claude sessions don't persist across restarts)
+        assert!(app.provider_session_id.is_none());
 
-    // Clean up
-    let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+        // Clean up
+        let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    });
 }
 
 #[test]
 fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
-    use crate::session::Session;
+    with_temp_jcode_home(|| {
+        use crate::session::Session;
 
-    let mut app = create_test_app();
+        let mut app = create_test_app();
 
-    let mut session = Session::create(None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::ToolResult {
-            tool_use_id: "tool_selfdev_reload".to_string(),
-            content: "Reload initiated. Process restarting...".to_string(),
-            is_error: Some(false),
-        }],
-    );
-    let session_id = session.id.clone();
-    session.save().unwrap();
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_selfdev_reload".to_string(),
+                content: "Reload initiated. Process restarting...".to_string(),
+                is_error: Some(false),
+            }],
+        );
+        let session_id = session.id.clone();
+        session.save().unwrap();
 
-    app.restore_session(&session_id);
+        app.restore_session(&session_id);
 
-    assert!(
-        app.hidden_queued_system_messages
-            .iter()
-            .any(|message| message.contains("Continue exactly where you left off"))
-    );
-    assert!(app.pending_turn);
-    assert!(matches!(app.status, ProcessingStatus::Sending));
+        assert!(
+            app.hidden_queued_system_messages
+                .iter()
+                .any(|message| message.contains("Continue exactly where you left off"))
+        );
+        assert!(app.pending_turn);
+        assert!(matches!(app.status, ProcessingStatus::Sending));
 
-    let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+        let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    });
 }
 
 #[test]
@@ -574,26 +578,28 @@ fn test_system_reminder_is_added_to_system_prompt_not_user_messages() {
 
 #[test]
 fn test_recover_session_without_tools_preserves_debug_and_canary_flags() {
-    let mut app = create_test_app();
-    app.session.is_debug = true;
-    app.session.is_canary = true;
-    app.session.testing_build = Some("self-dev".to_string());
-    app.session.working_dir = Some("/tmp/jcode-test".to_string());
-    let old_session_id = app.session.id.clone();
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.session.is_debug = true;
+        app.session.is_canary = true;
+        app.session.testing_build = Some("self-dev".to_string());
+        app.session.working_dir = Some("/tmp/jcode-test".to_string());
+        let old_session_id = app.session.id.clone();
 
-    app.recover_session_without_tools();
+        app.recover_session_without_tools();
 
-    assert_ne!(app.session.id, old_session_id);
-    assert_eq!(
-        app.session.parent_id.as_deref(),
-        Some(old_session_id.as_str())
-    );
-    assert!(app.session.is_debug);
-    assert!(app.session.is_canary);
-    assert_eq!(app.session.testing_build.as_deref(), Some("self-dev"));
-    assert_eq!(app.session.working_dir.as_deref(), Some("/tmp/jcode-test"));
+        assert_ne!(app.session.id, old_session_id);
+        assert_eq!(
+            app.session.parent_id.as_deref(),
+            Some(old_session_id.as_str())
+        );
+        assert!(app.session.is_debug);
+        assert!(app.session.is_canary);
+        assert_eq!(app.session.testing_build.as_deref(), Some("self-dev"));
+        assert_eq!(app.session.working_dir.as_deref(), Some("/tmp/jcode-test"));
 
-    let _ = std::fs::remove_file(crate::session::session_path(&app.session.id).unwrap());
+        let _ = std::fs::remove_file(crate::session::session_path(&app.session.id).unwrap());
+    });
 }
 
 #[test]
