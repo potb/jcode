@@ -1,7 +1,7 @@
 {
-  "total": 3434,
+  "total": 3435,
   "totals_by_pattern": {
-    "dot_ok": 1302,
+    "dot_ok": 1303,
     "let_underscore": 1252,
     "unwrap_or_default": 880
   },
@@ -1502,7 +1502,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": {
-      "dot_ok": 9,
+      "dot_ok": 10,
       "let_underscore": 15,
       "unwrap_or_default": 1
     },
