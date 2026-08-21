@@ -491,6 +491,11 @@ fn test_account_command_combines_claude_and_openai_accounts() {
 #[test]
 fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() {
     with_temp_jcode_home(|| {
+        let _cursor_env = ScopedRemovedEnvVars::new(&[
+            "CURSOR_API_KEY",
+            "CURSOR_ACCESS_TOKEN",
+            "CURSOR_REFRESH_TOKEN",
+        ]);
         seed_trusted_cursor_vscdb();
 
         crate::auth::AuthStatus::invalidate_cache();
@@ -513,6 +518,39 @@ fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() 
             "/account opens on the fast snapshot, which must not read Cursor's state.vscdb"
         );
     });
+}
+
+/// Unset environment variables for a scope, restoring them on drop.
+#[cfg(unix)]
+struct ScopedRemovedEnvVars {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(unix)]
+impl ScopedRemovedEnvVars {
+    fn new(names: &[&'static str]) -> Self {
+        let previous = names
+            .iter()
+            .map(|name| {
+                let prior = std::env::var_os(name);
+                crate::env::remove_var(name);
+                (*name, prior)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScopedRemovedEnvVars {
+    fn drop(&mut self) {
+        for (name, prior) in &self.previous {
+            match prior {
+                Some(value) => crate::env::set_var(name, value),
+                None => crate::env::remove_var(name),
+            }
+        }
+    }
 }
 
 /// Write a Cursor `state.vscdb` holding a usable access token where the production lookup
