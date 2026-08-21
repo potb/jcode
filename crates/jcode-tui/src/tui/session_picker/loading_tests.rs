@@ -1104,11 +1104,15 @@ fn benchmark_real_resume_loading_reports_timings() {
     );
 }
 
+/// Pins `JCODE_SESSION_PICKER_MAX_SESSIONS` because the assertion below ranges
+/// over the scan limit: sibling tests in this file set it to 50 process-wide,
+/// which caps the load under the 100 this test requires.
 #[test]
 fn benchmark_resume_loading_reports_timings() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _scan_limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "120");
 
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
