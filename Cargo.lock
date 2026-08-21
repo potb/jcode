@@ -4498,6 +4498,7 @@ dependencies = [
  "rand 0.9.3",
  "ratatui",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
