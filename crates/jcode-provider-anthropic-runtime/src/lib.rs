@@ -1965,10 +1965,10 @@ async fn force_refresh_oauth_token(
 }
 
 /// Stream the response from Anthropic API
-// The eight are the transport's irreducible inputs (client, credentials, the
-// request, the event sink, and three pieces of routing context); grouping them
-// would only move the same list behind a struct used once.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming requires transport, authentication, request, event, and session context"
+)]
 async fn stream_response(
     client: Client,
     token: String,

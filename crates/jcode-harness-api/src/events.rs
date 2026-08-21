@@ -32,6 +32,9 @@ pub enum ApiEvent {
     History {
         session_id: String,
         messages: Vec<HistoryMessage>,
+        /// Images anchored to user prompts or tool calls in this transcript.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<RenderedImage>,
     },
 
     /// Reply to `Ping`.
@@ -77,6 +80,13 @@ pub enum ApiEvent {
         /// Wall-clock duration of the tool call, when the server measured it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+    },
+
+    /// Images the model just received from a tool result or image generator.
+    /// Clients should render these at their transcript anchor immediately.
+    SidePaneImages {
+        session_id: String,
+        images: Vec<RenderedImage>,
     },
 
     /// Token usage update for the attached session.
@@ -306,4 +316,29 @@ pub struct HistoryMessage {
     /// "user" | "assistant" | "tool".
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RenderedImageSource {
+    UserInput,
+    ToolResult { tool_name: String },
+    Other { role: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RenderedImageAnchor {
+    ToolCall { id: String },
+    UserPrompt { ordinal: usize },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderedImage {
+    pub media_type: String,
+    pub data: String,
+    pub label: Option<String>,
+    pub source: RenderedImageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<RenderedImageAnchor>,
 }
