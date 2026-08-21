@@ -715,7 +715,7 @@ impl App {
             self.remote_provider_name.as_deref(),
             &self.remote_available_entries,
             routes,
-            RouteAuthInputs::from_machine(),
+            RouteAuthInputs::from_machine,
         );
     }
 
@@ -725,7 +725,7 @@ impl App {
         remote_provider_name: Option<&str>,
         remote_available_entries: &[String],
         routes: &mut Vec<crate::provider::ModelRoute>,
-        auth: RouteAuthInputs,
+        auth: impl FnOnce() -> RouteAuthInputs,
     ) {
         if remote_available_entries.is_empty() {
             return;
@@ -777,6 +777,7 @@ impl App {
                 .or_default()
                 .insert(route.api_method.as_str());
         }
+        let auth = auth();
         let bedrock_available = auth.bedrock_available;
         let missing: Vec<String> = remote_available_entries
             .iter()
@@ -1238,7 +1239,7 @@ impl App {
                             // Probed on the worker thread, not hoisted to the
                             // caller: this branch exists to keep the UI thread
                             // free, and a cold `check_fast()` blocks ~20-30ms.
-                            RouteAuthInputs::from_machine(),
+                            RouteAuthInputs::from_machine,
                         );
                         routes
                     },
@@ -4515,7 +4516,7 @@ mod tests {
             Some("mock-provider"),
             &entries,
             &mut routes,
-            auth,
+            || auth,
         );
         routes
             .into_iter()
@@ -4566,6 +4567,33 @@ mod tests {
         assert!(
             with_oauth.len() > none.len(),
             "stating oauth must widen the set: {none:?} vs {with_oauth:?}"
+        );
+    }
+
+    #[test]
+    fn issue_211_auth_is_not_probed_when_there_is_nothing_to_extend() {
+        // Regression guard. Before the seam, `check_fast()` sat AFTER four
+        // early returns, so an empty catalog never probed the machine at all.
+        // Passing an evaluated `RouteAuthInputs` made the probe eager at the
+        // call site, which put credential I/O on paths that previously did
+        // none - including the synchronous picker open. The parameter is a
+        // closure so the cost stays where master had it.
+        let probed = std::cell::Cell::new(false);
+        let mut routes: Vec<crate::provider::ModelRoute> = Vec::new();
+
+        App::extend_remote_routes_for_uncovered_models_static(
+            Some("mock-provider"),
+            &[],
+            &mut routes,
+            || {
+                probed.set(true);
+                RouteAuthInputs::default()
+            },
+        );
+
+        assert!(
+            !probed.get(),
+            "an empty catalog must return before probing machine credentials"
         );
     }
 
