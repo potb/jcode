@@ -581,6 +581,21 @@ impl JcodeClient {
         match self
             .request_ok(ApiRequest::ListSessions {
                 include_archived: false,
+                limit: None,
+            })?
+            .event
+        {
+            ApiEvent::Sessions { sessions } => Ok(sessions),
+            other => Err(unexpected("sessions", &other)),
+        }
+    }
+
+    /// List only the newest persisted sessions, for bounded dashboard startup.
+    pub fn list_sessions_limited(&self, limit: u32) -> Result<Vec<SessionInfo>> {
+        match self
+            .request_ok(ApiRequest::ListSessions {
+                include_archived: false,
+                limit: Some(limit),
             })?
             .event
         {
@@ -698,13 +713,23 @@ impl JcodeClient {
     }
 
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
+        self.get_history_with_images(session_id)
+            .map(|(messages, _)| messages)
+    }
+
+    pub fn get_history_with_images(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<HistoryMessage>, Vec<jcode_harness_api::RenderedImage>)> {
         match self
             .request_ok(ApiRequest::GetHistory {
                 session_id: session_id.to_string(),
             })?
             .event
         {
-            ApiEvent::History { messages, .. } => Ok(messages),
+            ApiEvent::History {
+                messages, images, ..
+            } => Ok((messages, images)),
             other => Err(unexpected("history", &other)),
         }
     }
@@ -1160,6 +1185,7 @@ fn discover_global_sessions(
         let sessions = match parent
             .request_ok(ApiRequest::ListSessions {
                 include_archived: true,
+                limit: None,
             })
             .and_then(|frame| match frame.event {
                 ApiEvent::Sessions { sessions } => Ok(sessions),

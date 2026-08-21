@@ -82,6 +82,8 @@ impl Config {
 - Enabled allow-list: {}
 - Disabled tools: {}
 - Disable base tools: {}
+- MCP tools: {}
+- MCP auto threshold: {} tokens
 
 **Provider:**
 - Default model: {}
@@ -246,6 +248,8 @@ impl Config {
                 effective_disabled_tools.join(", ")
             },
             self.tools.disable_base_tools,
+            self.tools.mcp_tools.as_str(),
+            self.tools.mcp_tools_token_threshold,
             self.provider
                 .default_model
                 .as_deref()
