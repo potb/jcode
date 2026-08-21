@@ -1223,7 +1223,6 @@ impl App {
                 }
                 let remote_provider_name = self.remote_provider_name.clone();
                 let remote_available_entries = self.remote_available_entries.clone();
-                let route_auth = RouteAuthInputs::from_machine();
                 self.start_model_picker_route_load_with(
                     cache_signature,
                     picker_started,
@@ -1236,7 +1235,10 @@ impl App {
                             remote_provider_name.as_deref(),
                             &remote_available_entries,
                             &mut routes,
-                            route_auth,
+                            // Probed on the worker thread, not hoisted to the
+                            // caller: this branch exists to keep the UI thread
+                            // free, and a cold `check_fast()` blocks ~20-30ms.
+                            RouteAuthInputs::from_machine(),
                         );
                         routes
                     },
