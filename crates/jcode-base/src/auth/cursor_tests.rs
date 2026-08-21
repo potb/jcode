@@ -279,7 +279,7 @@ fn load_key_from_file(path: &PathBuf) -> Result<String> {
 /// The Cursor reader itself runs `sqlite3`, so without the binary there is no
 /// behavior left to exercise. The dev shell provides it; on a bare host these
 /// tests report that they were skipped rather than failing for a missing tool.
-fn sqlite3_available() -> bool {
+pub(in crate::auth) fn sqlite3_available() -> bool {
     std::process::Command::new("sqlite3")
         .arg("-version")
         .stdout(std::process::Stdio::null())
@@ -299,7 +299,10 @@ macro_rules! require_sqlite3 {
 }
 
 /// Helper: create a mock state.vscdb with the given key/value pairs.
-fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf {
+pub(in crate::auth) fn create_mock_vscdb(
+    dir: &std::path::Path,
+    entries: &[(&str, &str)],
+) -> PathBuf {
     let db_path = dir.join("state.vscdb");
     let status = std::process::Command::new("sqlite3")
         .arg(&db_path)

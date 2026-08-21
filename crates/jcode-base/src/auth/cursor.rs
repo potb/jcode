@@ -655,4 +655,4 @@ fn timestamp_header_now() -> String {
 
 #[cfg(test)]
 #[path = "cursor_tests.rs"]
-mod tests;
+pub(in crate::auth) mod tests;

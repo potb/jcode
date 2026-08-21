@@ -307,10 +307,9 @@ impl AuthStatus {
     /// Fast auth snapshot for interactive UI surfaces like `/account`.
     ///
     /// Prefers a recent full probe, and otherwise falls back to a cheap
-    /// local-files/env-only probe that avoids subprocesses such as
-    /// `cursor-agent status` or `sqlite3` lookups. Do not reuse the full cache
-    /// forever: external credential files may be deleted or replaced while the
-    /// process is running.
+    /// local-files/env-only probe that avoids the Cursor `state.vscdb` read.
+    /// Do not reuse the full cache forever: external credential files may be
+    /// deleted or replaced while the process is running.
     pub fn check_fast() -> Self {
         let home_key = auth_cache_home_key();
         if let Ok(cache) = AUTH_STATUS_CACHE.read()
