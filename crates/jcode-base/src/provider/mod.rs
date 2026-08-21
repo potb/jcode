@@ -48,9 +48,9 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
-    remote_model_routes_fallback_with,
-    remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
-    remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
+    remote_model_routes_fallback_with, remote_model_routes_lightweight_fallback,
+    remote_model_should_offer_copilot_route, remote_openai_compatible_route_for_model,
+    simplified_model_routes_for_picker,
 };
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
