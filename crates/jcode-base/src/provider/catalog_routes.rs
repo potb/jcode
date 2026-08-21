@@ -854,15 +854,20 @@ pub fn remote_model_routes_fallback(
     remote_model_routes_fallback_with(
         remote_provider_name,
         remote_available_entries,
-        &AuthStatus::check_fast(),
+        AuthStatus::check_fast,
     )
 }
 
 /// Build fallback routes from a stated `AuthStatus`; `default()` means no credentials.
+///
+/// `auth` is a closure, not a value, so it is evaluated only on the path that
+/// actually needs credentials — exactly where the ambient `check_fast()` call
+/// used to sit. Taking an `AuthStatus` by value would make the probe eager at
+/// every call site and defeat the early return below (#211).
 pub fn remote_model_routes_fallback_with(
     remote_provider_name: Option<&str>,
     remote_available_entries: &[String],
-    auth: &AuthStatus,
+    auth: impl FnOnce() -> AuthStatus,
 ) -> Vec<ModelRoute> {
     if remote_provider_name.is_some_and(|name| {
         name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
@@ -881,6 +886,7 @@ pub fn remote_model_routes_fallback_with(
             .collect();
     }
 
+    let auth = auth();
     let mut routes = Vec::new();
     for model in remote_available_entries {
         if !is_listable_model_name(model) {
@@ -1708,7 +1714,7 @@ mod tests {
             remote_model_routes_fallback_with(
                 Some("mock-provider"),
                 &["claude-sonnet-4-6".to_string()],
-                auth,
+                || auth.clone(),
             )
             .into_iter()
             .filter(|route| route.provider == "Anthropic")
@@ -1720,7 +1726,10 @@ mod tests {
         fn no_stated_credentials_yields_no_anthropic_routes() {
             // The assertion the picker-level seam could not make: this names
             // the api_method, because this function is what chooses it.
-            assert_eq!(anthropic_methods(&AuthStatus::default()), Vec::<String>::new());
+            assert_eq!(
+                anthropic_methods(&AuthStatus::default()),
+                Vec::<String>::new()
+            );
         }
 
         #[test]
@@ -1764,6 +1773,34 @@ mod tests {
                 methods,
                 Vec::<String>::new(),
                 "a host env credential must not reach a stated-auth build"
+            );
+        }
+
+        #[test]
+        fn auth_is_not_probed_on_the_jcode_subscription_path() {
+            // On master the ambient `check_fast()` sat AFTER this early return,
+            // so the subscription path did zero credential I/O. Taking the
+            // auth by value would have made the probe eager at every call
+            // site and silently added that I/O back.
+            let probed = std::cell::Cell::new(false);
+
+            let routes = remote_model_routes_fallback_with(
+                Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
+                &["claude-sonnet-4-6".to_string()],
+                || {
+                    probed.set(true);
+                    AuthStatus::default()
+                },
+            );
+
+            assert_eq!(
+                routes.len(),
+                1,
+                "the subscription path still builds a route"
+            );
+            assert!(
+                !probed.get(),
+                "the subscription path must not probe the machine for credentials"
             );
         }
     }
