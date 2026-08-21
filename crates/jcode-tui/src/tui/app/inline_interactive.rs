@@ -4502,14 +4502,16 @@ mod tests {
     ) -> Vec<(String, String, String)> {
         let mut routes: Vec<crate::provider::ModelRoute> = declared
             .iter()
-            .map(|(model, provider, api_method)| crate::provider::ModelRoute {
-                model: (*model).to_string(),
-                provider: (*provider).to_string(),
-                api_method: (*api_method).to_string(),
-                available: true,
-                detail: String::new(),
-                cheapness: None,
-            })
+            .map(
+                |(model, provider, api_method)| crate::provider::ModelRoute {
+                    model: (*model).to_string(),
+                    provider: (*provider).to_string(),
+                    api_method: (*api_method).to_string(),
+                    available: true,
+                    detail: String::new(),
+                    cheapness: None,
+                },
+            )
             .collect();
         let entries: Vec<String> = entries.iter().map(|e| (*e).to_string()).collect();
         App::extend_remote_routes_for_uncovered_models_static(
@@ -4524,8 +4526,7 @@ mod tests {
             .collect()
     }
 
-    const DECLARED: [(&str, &str, &str); 1] =
-        [("claude-sonnet-4-6", "Antigravity", "cli")];
+    const DECLARED: [(&str, &str, &str); 1] = [("claude-sonnet-4-6", "Antigravity", "cli")];
     const ENTRIES: [&str; 1] = ["claude-sonnet-4-6"];
 
     #[test]
