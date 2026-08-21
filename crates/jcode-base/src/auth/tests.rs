@@ -135,7 +135,6 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
         "CURSOR_API_KEY",
         "CURSOR_ACCESS_TOKEN",
         "CURSOR_REFRESH_TOKEN",
-        "JCODE_CURSOR_CLI_PATH",
     ]
     .into_iter()
     .map(|key| (key, std::env::var_os(key)))
@@ -180,10 +179,6 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
     crate::env::set_var("CURSOR_API_KEY", "cursor-test-key");
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
-    crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
-        temp.path().join("missing-cursor-agent"),
-    );
     AuthStatus::invalidate_cache();
 
     let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
@@ -719,16 +714,10 @@ fn cursor_status_is_available_when_api_key_exists_without_cli() {
     let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
 
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::set_var("CURSOR_API_KEY", "cursor-test-key");
-    crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
-        temp.path().join("missing-cursor-agent"),
-    );
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check();
@@ -737,7 +726,6 @@ fn cursor_status_is_available_when_api_key_exists_without_cli() {
     restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
     restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
     restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
     AuthStatus::invalidate_cache();
 }
 
@@ -748,8 +736,6 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
 
     crate::env::set_var(
         "CURSOR_ACCESS_TOKEN",
@@ -757,10 +743,6 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     );
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::remove_var("CURSOR_API_KEY");
-    crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
-        temp.path().join("missing-cursor-agent"),
-    );
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check();
@@ -769,7 +751,6 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
     restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
     restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
     AuthStatus::invalidate_cache();
 }
 
