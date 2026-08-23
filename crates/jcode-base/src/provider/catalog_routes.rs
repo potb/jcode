@@ -1932,6 +1932,41 @@ mod tests {
         }
 
         #[test]
+        fn the_wrapper_still_probes_the_machine_for_credentials() {
+            // The tests above all call the `_with` form, so none of them can
+            // see what the no-arg wrapper passes: swapping its
+            // `AuthStatus::check_fast` for `AuthStatus::default` leaves the
+            // whole crate green. The picker calls the WRAPPER, so that
+            // substitution would silently stop offering configured providers.
+            // A sandbox gives a clean JCODE_HOME and drops the memoized auth
+            // cache, so an env credential set here is one the wrapper can only
+            // report by actually probing.
+            let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+            crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key");
+            crate::auth::AuthStatus::invalidate_cache();
+
+            let methods: Vec<String> = simplified_model_routes_for_picker(
+                "mock-provider",
+                "mock-model",
+                ["claude-sonnet-4-6".to_string()],
+            )
+            .into_iter()
+            .filter(|route| route.provider == "Anthropic")
+            .map(|route| route.api_method)
+            .collect();
+
+            crate::env::remove_var("ANTHROPIC_API_KEY");
+            crate::auth::AuthStatus::invalidate_cache();
+            drop(sandbox);
+
+            assert!(
+                methods.iter().any(|method| method == "claude-api"),
+                "the wrapper must probe the machine: with ANTHROPIC_API_KEY set \
+                 it has to offer claude-api, got {methods:?}"
+            );
+        }
+
+        #[test]
         fn auth_is_probed_once_regardless_of_how_many_models_are_listed() {
             // Unlike the fallback seam, this function has no early return: the
             // probe is needed on every path. What laziness buys here is that
