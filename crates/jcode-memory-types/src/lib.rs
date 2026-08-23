@@ -1064,6 +1064,28 @@ mod search_matching_tests {
         assert!(!matches("anything at all", ""));
     }
 
+    /// Pins a real widening beyond #193's stated goal, so it cannot change silently.
+    #[test]
+    fn punctuated_query_tokens_match_their_parts_separately() {
+        assert_eq!(
+            normalize_search_text("node-modules"),
+            "node modules",
+            "control: the normalizer is what splits the token, before matching begins"
+        );
+        assert!(
+            matches("the node process reads modules from disk", "node-modules"),
+            "a hyphenated query matches an entry holding the parts apart"
+        );
+        assert!(
+            matches("node_modules is absent here", "node-modules"),
+            "control: the punctuated spelling still matches, as it did before"
+        );
+        assert!(
+            !matches("the node process reads files from disk", "node-modules"),
+            "the widening is bounded: every part must still be present"
+        );
+    }
+
     #[test]
     fn tags_are_searchable_alongside_content() {
         let tagged = entry("lint ratchet consolidated").with_tags(vec!["ceiling".to_string()]);
