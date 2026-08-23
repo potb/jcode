@@ -24,6 +24,15 @@ stood when it was written, so a path that has since moved is part of the
 record rather than rot, and scanning them would bury the live docs under
 hundreds of intentionally frozen references.
 
+A document outside those directories is excluded on the same grounds when it
+opens with a `> Historical:` blockquote, a marker this repo already uses to
+retire a document in place. Such a file is a record of a tree that no longer
+exists, so repointing its paths at today's layout would falsify it: the whole
+value of `docs/DESKTOP_APP_ARCHITECTURE.md` saying `crates/jcode-desktop` is
+that the app it describes was the one at that path. The banner has to appear
+in the opening lines, so a passing mention of the word further down cannot
+silently switch the check off for a live document.
+
 Obvious placeholders are ignored: paths containing `<`, `>`, `*`, `{`, `...`,
 `YYYY`, or a `foo`/`bar`/`baz` component are illustrative, not real, and so is
 a bare directory prefix such as `crates/`, which names no target to check.
@@ -43,6 +52,9 @@ BASELINE_FILE = REPO_ROOT / "scripts" / "doc_path_refs_budget.json"
 SCAN_ROOTS = (REPO_ROOT / "docs",)
 
 EXCLUDED_DIRS = ("docs/plans/", "docs/audits/")
+
+HISTORICAL_MARKER = "> Historical:"
+HISTORICAL_SCAN_LINES = 10
 
 REF_PATTERN = re.compile(r"`((?:crates|scripts|src|docs|\.github)/[A-Za-z0-9_.@/-]+)`")
 
@@ -69,7 +81,17 @@ def markdown_files() -> list[Path]:
                     continue
                 files.append(path)
     files.extend(sorted(REPO_ROOT.glob("*.md")))
-    return files
+    return [path for path in files if not is_historical(path)]
+
+
+def is_historical(path: Path) -> bool:
+    """True when the document retires itself with a leading `> Historical:` banner."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    head = text.splitlines()[:HISTORICAL_SCAN_LINES]
+    return any(line.startswith(HISTORICAL_MARKER) for line in head)
 
 
 def is_placeholder(ref: str) -> bool:

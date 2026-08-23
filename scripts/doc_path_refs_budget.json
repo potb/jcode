@@ -1,32 +1,8 @@
 {
-  "total": 19,
+  "total": 5,
   "files": {
     "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
       "src/usage.rs"
-    ],
-    "docs/DESKTOP_APP_ARCHITECTURE.md": [
-      "crates/jcode-desktop"
-    ],
-    "docs/DESKTOP_CODEBASE_ARCHITECTURE.md": [
-      "crates/jcode-desktop",
-      "src/protocol.rs",
-      "src/tui",
-      "src/tui/app.rs",
-      "src/tui/app/remote/server_events.rs",
-      "src/tui/markdown.rs",
-      "src/tui/ui.rs",
-      "src/tui/ui_messages.rs",
-      "src/tui/ui_prepare.rs"
-    ],
-    "docs/DESKTOP_FIRST_PROTOTYPE.md": [
-      "crates/jcode-desktop"
-    ],
-    "docs/DESKTOP_SINGLE_SESSION_DESIGN.md": [
-      "crates/jcode-desktop"
-    ],
-    "docs/DESKTOP_STABLE_HOST_RELOAD_STARTUP.md": [
-      "crates/jcode-desktop",
-      "crates/jcode-desktop/src/main.rs"
     ],
     "docs/DISCOVERY_ELICITATION_SPEC.md": [
       "scripts/discovery_elicitation_cases.json"
