@@ -106,13 +106,11 @@ fn has_cursor_api_key_from_env() {
     }
 }
 
+/// Pins `auth.json` resolution to `JCODE_HOME` rather than `dirs::config_dir()`,
+/// which on Linux leaked the real `~/.config/cursor/auth.json` into the
+/// onboarding sandbox and made Cursor the only importable provider there.
 #[test]
 fn cursor_auth_file_path_respects_jcode_home() {
-    // Regression: on Linux the auth.json path previously used
-    // `dirs::config_dir()` directly, ignoring JCODE_HOME. That leaked the real
-    // `~/.config/cursor/auth.json` into the onboarding sandbox, so a
-    // fresh-install sandbox showed only Cursor as importable while every other
-    // provider correctly looked under `$JCODE_HOME/external/...`.
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let temp = TempDir::new().unwrap();
@@ -274,12 +272,8 @@ fn load_key_from_file(path: &PathBuf) -> Result<String> {
     anyhow::bail!("No CURSOR_API_KEY found")
 }
 
-/// Whether the `sqlite3` CLI this code path shells out to is available.
-///
-/// The Cursor reader itself runs `sqlite3`, so without the binary there is no
-/// behavior left to exercise. The dev shell provides it; on a bare host these
-/// tests report that they were skipped rather than failing for a missing tool.
-fn sqlite3_available() -> bool {
+/// Whether the `sqlite3` CLI that builds these tests' fixture databases exists.
+fn sqlite3_available_for_fixtures() -> bool {
     std::process::Command::new("sqlite3")
         .arg("-version")
         .stdout(std::process::Stdio::null())
@@ -291,7 +285,7 @@ fn sqlite3_available() -> bool {
 /// Skip the body of a sqlite3-backed test when the CLI is missing.
 macro_rules! require_sqlite3 {
     () => {
-        if !sqlite3_available() {
+        if !sqlite3_available_for_fixtures() {
             eprintln!("skipping: sqlite3 is not installed");
             return;
         }
@@ -354,11 +348,14 @@ fn vscdb_missing_key_returns_error() {
     let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
+    let message = result.unwrap_err().to_string();
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("not found or empty")
+        message.contains("not found in"),
+        "an absent row should report the absent-row error, got: {message}"
+    );
+    assert!(
+        !message.contains("not found or empty"),
+        "an absent row must not report the empty-value error, got: {message}"
     );
 }
 
@@ -369,6 +366,11 @@ fn vscdb_empty_value_returns_error() {
     let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "")]);
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("not found or empty"),
+        "a present but blank row should report the empty-value error, got: {message}"
+    );
 }
 
 #[test]
@@ -438,11 +440,12 @@ fn vscdb_paths_not_empty() {
     }
 }
 
+/// Asserts only the shape of the failure, because whether Cursor is installed
+/// is a property of the machine: an `Ok` here is a legitimate outcome, so this
+/// pins the error wording without requiring the error to occur.
 #[test]
 fn find_vscdb_missing_returns_error() {
     let result = find_cursor_vscdb();
-    // On this machine Cursor isn't installed, so it should fail
-    // (if Cursor IS installed, this test still passes - it finds the file)
     if let Err(err) = result {
         assert!(err.to_string().contains("not found"));
     }
