@@ -133,7 +133,7 @@ Measured on 2026-04-30 with `scripts/dev_cargo.sh check --profile selfdev -p jco
 | Scenario | Observed time | Interpretation |
 | --- | ---: | --- |
 | No-op check after recent doc-only commit | ~65.8s | Environment/cache state can dominate a first check. Treat as warmup/noise baseline, not pure no-op steady state. |
-| Touch root behavior module (usage, then at `src/usage.rs`, now `crates/jcode-base/src/usage/`) | ~6.25s | A root-only behavior edit can be relatively cheap when dependencies are already built. |
+| Touch root behavior module (usage, then at src/usage.rs in the root crate, now `crates/jcode-base/src/usage/`) | ~6.25s | A root-only behavior edit can be relatively cheap when dependencies are already built. |
 | Touch the usage DTO module (then `jcode-core`, now `crates/jcode-usage-types/`) | ~65.35s | Editing `jcode-core` invalidates broad downstream dependents. Avoid adding high-churn domain DTOs to `jcode-core`. |
 
 The paths above are the ones measured on 2026-04-30 and are kept as recorded; both modules have since moved, which is exactly the outcome the measurement argued for.

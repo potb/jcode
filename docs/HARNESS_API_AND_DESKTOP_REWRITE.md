@@ -8,10 +8,12 @@ Status: draft, approved direction (2026-07-24)
   socket (`~/.jcode/jcode.sock`), with `Request` / `ServerEvent` in
   `crates/jcode-protocol`. But it is an *internal* wire format: unversioned,
   ~147 variants, TUI-shaped, and coupled to client rendering assumptions.
-- The current desktop app (`crates/jcode-desktop`, ~44k lines) hand-rolls
-  rendering on wgpu 0.19 + winit 0.29 + glyphon, plus its own host/worker IPC.
-  Text layout, rich text, scrolling, and markdown are all custom and are the
-  main source of rendering quality problems. Rewrite from scratch.
+- The desktop app this document set out to replace (crates/jcode-desktop at the
+  time of writing, ~44k lines; since removed, with `crates/jcode-desktop2` as the
+  current app) hand-rolls rendering on wgpu 0.19 + winit 0.29 + glyphon, plus its
+  own host/worker IPC. Text layout, rich text, scrolling, and markdown are all
+  custom and are the main source of rendering quality problems. Rewrite from
+  scratch.
 
 ## Part 1: Harness API
 

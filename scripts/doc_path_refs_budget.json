@@ -1,18 +1,8 @@
 {
-  "total": 5,
+  "total": 1,
   "files": {
-    "docs/CRATE_OWNERSHIP_BOUNDARIES.md": [
-      "src/usage.rs"
-    ],
     "docs/DISCOVERY_ELICITATION_SPEC.md": [
       "scripts/discovery_elicitation_cases.json"
-    ],
-    "docs/HARNESS_API_AND_DESKTOP_REWRITE.md": [
-      "crates/jcode-desktop"
-    ],
-    "docs/dev/crate-splitting-plan.md": [
-      "src/provider/anthropic.rs",
-      "src/storage.rs"
     ]
   }
 }
