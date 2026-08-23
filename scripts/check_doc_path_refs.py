@@ -15,8 +15,18 @@ Policy (same shape as the other ratchets in this repo):
 - The total may not increase.
 - `--update` refreshes the baseline after intentional cleanup.
 
+Scope: every Markdown file under `docs/`, plus every Markdown file at the
+repository root.
+
+`docs/plans/` and `docs/audits/` are excluded. They are historical records
+rather than live documentation: a plan or an audit describes the tree as it
+stood when it was written, so a path that has since moved is part of the
+record rather than rot, and scanning them would bury the live docs under
+hundreds of intentionally frozen references.
+
 Obvious placeholders are ignored: paths containing `<`, `>`, `*`, `{`, `...`,
-`YYYY`, or a `foo`/`bar`/`baz` component are illustrative, not real.
+`YYYY`, or a `foo`/`bar`/`baz` component are illustrative, not real, and so is
+a bare directory prefix such as `crates/`, which names no target to check.
 """
 
 from __future__ import annotations
@@ -31,16 +41,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = REPO_ROOT / "scripts" / "doc_path_refs_budget.json"
 SCAN_ROOTS = (REPO_ROOT / "docs",)
-EXTRA_DOCS = ("AGENTS.md", "README.md")
 
-# Historical records, not live documentation. A plan or an audit describes the
-# tree as it stood when it was written, so a path that has since moved is part
-# of the record rather than rot. Scanning them would bury the live docs under
-# hundreds of intentionally frozen references.
 EXCLUDED_DIRS = ("docs/plans/", "docs/audits/")
 
-# A backticked token that starts at a known top-level directory and has at
-# least one path separator, e.g. `crates/jcode-base/src/usage.rs`.
 REF_PATTERN = re.compile(r"`((?:crates|scripts|src|docs|\.github)/[A-Za-z0-9_.@/-]+)`")
 
 PLACEHOLDER_MARKERS = ("<", ">", "*", "{", "...", "YYYY")
@@ -65,10 +68,7 @@ def markdown_files() -> list[Path]:
                 if rel.startswith(EXCLUDED_DIRS):
                     continue
                 files.append(path)
-    for name in EXTRA_DOCS:
-        path = REPO_ROOT / name
-        if path.exists():
-            files.append(path)
+    files.extend(sorted(REPO_ROOT.glob("*.md")))
     return files
 
 
@@ -78,7 +78,6 @@ def is_placeholder(ref: str) -> bool:
     parts = ref.split("/")
     if any(part.lower() in PLACEHOLDER_COMPONENTS for part in parts):
         return True
-    # A bare directory prefix like `crates/` carries no target to check.
     return ref.endswith("/")
 
 
