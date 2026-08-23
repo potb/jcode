@@ -1209,6 +1209,43 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
     }));
 }
 
+/// The index SELECT no longer reads the activity columns into Rust, so the
+/// newest-first order it promises rests entirely on its `ORDER BY`. Without an
+/// assertion on the order, dropping the clause would still pass every test.
+#[test]
+fn indexed_session_list_is_ordered_newest_activity_first() {
+    let home = ScopedJcodeHome::new("metadata-index-order");
+    // The first read is what creates the table; the insert below needs it.
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let mut connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for (session_id, updated_at_ms, last_active_at_ms) in [
+        ("oldest", 10_i64, Some(10_i64)),
+        ("newest", 20, Some(90)),
+        ("middle", 80, None),
+    ] {
+        transaction
+            .execute(
+                "INSERT INTO recent_sessions (
+                     session_id, working_dir, todo_title, updated_at_ms, last_active_at_ms
+                 ) VALUES (?1, '/indexed/project', ?1, ?2, ?3)",
+                params![session_id, updated_at_ms, last_active_at_ms],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+
+    let ordered: Vec<String> = BridgeState::recent_session_index_entries()
+        .into_iter()
+        .map(|entry| entry.session_id)
+        .collect();
+
+    // `middle` outranks `oldest` only via COALESCE onto `updated_at_ms`, and
+    // `newest` outranks `middle` only via `last_active_at_ms`, so this order
+    // fails if either half of the clause is dropped.
+    assert_eq!(ordered, ["newest", "middle", "oldest"]);
+}
+
 #[test]
 fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
     let mut state = state_with_session();
