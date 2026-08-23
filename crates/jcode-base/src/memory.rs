@@ -1134,6 +1134,11 @@ impl MemoryManager {
         self.search_scoped(query, MemoryScope::All)
     }
 
+    /// Matching memories, newest first, with the id as a total-order tiebreak.
+    ///
+    /// The order is part of the contract because callers truncate: memories
+    /// live in a `HashMap`, so an unsorted result would expose an arbitrary
+    /// subset of the matches, differing from one process to the next.
     pub fn search_scoped(&self, query: &str, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
         let query_lower = normalize_search_text(query);
         if query_lower.is_empty() {
@@ -1147,6 +1152,12 @@ impl MemoryManager {
                 results.push(memory);
             }
         }
+
+        results.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         Ok(results)
     }
