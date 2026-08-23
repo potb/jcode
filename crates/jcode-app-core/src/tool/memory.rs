@@ -25,12 +25,12 @@ impl MemoryTool {
         }
     }
 
-    /// Report for an empty `search`, which names the substring rule rather than
+    /// Report for an empty `search`, which names the matching rule rather than
     /// implying the memory is absent. See issue #193.
     fn no_substring_match_report(query: &str) -> String {
         format!(
-            "no substring match for '{}' (search matches the whole query as one \
-             contiguous substring, not per-word); try fewer words",
+            "no lexical match for '{}' (search requires every term of the query to \
+             appear in an entry, in any order); try fewer terms",
             query
         )
     }
@@ -897,9 +897,10 @@ mod tests {
         }
     }
 
-    /// An empty `search` must name the substring rule, not imply absence (#193).
+    /// A multi-word `search` must find an entry holding every term (#193), and an
+    /// empty result must name the matching rule rather than imply absence.
     #[tokio::test]
-    async fn an_empty_search_result_names_the_substring_rule_instead_of_reporting_absence() {
+    async fn a_scattered_multi_word_search_finds_the_entry_holding_every_term() {
         let _guard = crate::storage::lock_test_env();
         let home = tempfile::tempdir().expect("home");
         let prev_home = std::env::var_os("JCODE_HOME");
@@ -917,43 +918,46 @@ mod tests {
         .await
         .expect("remember should succeed");
 
-        let scattered = tool
-            .execute(
-                json!({ "action": "search", "query": "node worktree fnm" }),
-                test_ctx(None),
-            )
-            .await
-            .expect("search should succeed");
+        let search = |query: &'static str| {
+            let tool = &tool;
+            async move {
+                tool.execute(
+                    json!({ "action": "search", "query": query }),
+                    test_ctx(None),
+                )
+                .await
+                .expect("search should succeed")
+            }
+        };
 
-        let contiguous = tool
-            .execute(
-                json!({ "action": "search", "query": "fnm node" }),
-                test_ctx(None),
-            )
-            .await
-            .expect("search should succeed");
+        let contiguous = search("fnm node").await;
+        let scattered = search("node worktree fnm").await;
+        let absent = search("node worktree kubernetes").await;
 
         assert!(
             contiguous.output.contains("Found 1 memories"),
-            "control failed: the store must answer a contiguous query, else this \
-             test proves nothing about the empty-result message. Got: {}",
+            "control: a contiguous query must still match. Got: {}",
             contiguous.output
         );
         assert!(
-            scattered.output.contains("no substring match"),
-            "an empty result must name the substring rule rather than read as \
-             absence. Got: {}",
+            scattered.output.contains("Found 1 memories"),
+            "every term of this query is in the entry, so it must be found. Got: {}",
             scattered.output
         );
         assert!(
-            scattered.output.contains("fewer words"),
+            absent.output.contains("no lexical match"),
+            "a query with an absent term must report the matching rule, not absence. Got: {}",
+            absent.output
+        );
+        assert!(
+            absent.output.contains("fewer terms"),
             "an empty result must suggest the recovery. Got: {}",
-            scattered.output
+            absent.output
         );
         assert!(
-            !scattered.output.contains("No memories matching"),
+            !absent.output.contains("No memories matching"),
             "the old absence wording must be gone. Got: {}",
-            scattered.output
+            absent.output
         );
 
         if let Some(prev_home) = prev_home {

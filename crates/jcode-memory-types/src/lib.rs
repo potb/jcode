@@ -830,8 +830,14 @@ pub fn normalize_memory_search_text(content: &str, tags: &[String]) -> String {
     format!("{} {}", normalized_content, normalized_tags.join(" "))
 }
 
+/// True when `memory` contains the whole query, or every term of it in any order.
 pub fn memory_matches_search(memory: &MemoryEntry, normalized_query: &str) -> bool {
-    memory.searchable_text().contains(normalized_query)
+    let mut terms = normalized_query.split_whitespace().peekable();
+    if terms.peek().is_none() {
+        return false;
+    }
+    let haystack = memory.searchable_text();
+    terms.all(|term| haystack.contains(term)) || haystack.contains(normalized_query)
 }
 
 pub mod ranking {
@@ -1003,5 +1009,81 @@ pub mod ranking {
             assert!(top_k_by_score([("a", 1.0)], 0).is_empty());
             assert!(top_k_by_ord([("a", 1)], 0).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod search_matching_tests {
+    use super::*;
+
+    fn entry(content: &str) -> MemoryEntry {
+        MemoryEntry::new(MemoryCategory::Fact, content)
+    }
+
+    fn matches(content: &str, query: &str) -> bool {
+        memory_matches_search(&entry(content), &normalize_search_text(query))
+    }
+
+    #[test]
+    fn scattered_terms_match_in_any_order() {
+        let content = "fnm node-versions v24.15.0 is on the PATH but lives outside the worktree, which has no node_modules";
+        assert!(
+            matches(content, "fnm"),
+            "control: a single present term must match, else the fixture is wrong"
+        );
+        assert!(
+            matches(content, "fnm node"),
+            "control: a contiguous query must still match"
+        );
+        assert!(
+            matches(content, "node path fnm worktree node_modules"),
+            "the query from #193: every term is present, so it must match"
+        );
+        assert!(
+            matches(content, "worktree fnm"),
+            "terms out of source order must match"
+        );
+    }
+
+    #[test]
+    fn one_absent_term_rejects_the_entry() {
+        let content = "fnm node-versions lives outside the worktree";
+        assert!(
+            !matches(content, "fnm kubernetes"),
+            "a term absent from the entry must reject it, or the match is vacuous"
+        );
+        assert!(
+            !matches(content, "kubernetes"),
+            "a wholly unrelated query must not match"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_matches_nothing() {
+        assert!(!matches("anything at all", "   "));
+        assert!(!matches("anything at all", ""));
+    }
+
+    #[test]
+    fn tags_are_searchable_alongside_content() {
+        let tagged = entry("lint ratchet consolidated").with_tags(vec!["ceiling".to_string()]);
+        assert!(memory_matches_search(
+            &tagged,
+            &normalize_search_text("ratchet ceiling")
+        ));
+    }
+
+    #[test]
+    fn store_search_finds_scattered_terms() {
+        let mut store = MemoryStore::new();
+        store.add(entry(
+            "mergeable statusCheckRollup is stale on a moved base in CI",
+        ));
+        assert_eq!(
+            store.search("stale CI mergeable").len(),
+            1,
+            "MemoryStore::search must inherit the per-term rule"
+        );
+        assert_eq!(store.search("stale CI kubernetes").len(), 0);
     }
 }
