@@ -40,6 +40,28 @@ const MODEL_PICKER_USAGE_VERSION: u8 = 1;
 const MODEL_PICKER_FAVORITES_FILE: &str = "model_picker_favorites.json";
 const MODEL_PICKER_FAVORITES_VERSION: u8 = 1;
 
+/// Machine auth facts taken as an explicit input to route synthesis, so a test
+/// sees only what it states rather than the host's credentials (issue #211).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RouteAuthInputs {
+    pub(crate) anthropic_has_api_key: bool,
+    pub(crate) anthropic_has_oauth: bool,
+    pub(crate) bedrock_available: bool,
+}
+
+impl RouteAuthInputs {
+    /// The only place that probes the host, keeping the rest of the path pure.
+    fn from_machine() -> Self {
+        let auth = crate::auth::AuthStatus::check_fast();
+        Self {
+            anthropic_has_api_key: auth.anthropic.has_api_key,
+            anthropic_has_oauth: auth.anthropic.has_oauth,
+            bedrock_available: auth.bedrock != crate::auth::AuthState::NotConfigured
+                || crate::provider::bedrock::BedrockProvider::has_credentials(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteModelCatalogCache {
     version: u8,
@@ -747,6 +769,7 @@ impl App {
             self.remote_provider_name.as_deref(),
             &self.remote_available_entries,
             routes,
+            RouteAuthInputs::from_machine,
         );
     }
 
@@ -756,6 +779,7 @@ impl App {
         remote_provider_name: Option<&str>,
         remote_available_entries: &[String],
         routes: &mut Vec<crate::provider::ModelRoute>,
+        auth: impl FnOnce() -> RouteAuthInputs,
     ) {
         if remote_available_entries.is_empty() {
             return;
@@ -807,9 +831,8 @@ impl App {
                 .or_default()
                 .insert(route.api_method.as_str());
         }
-        let auth = crate::auth::AuthStatus::check_fast();
-        let bedrock_available = auth.bedrock != crate::auth::AuthState::NotConfigured
-            || crate::provider::bedrock::BedrockProvider::has_credentials();
+        let auth = auth();
+        let bedrock_available = auth.bedrock_available;
         let missing: Vec<String> = remote_available_entries
             .iter()
             .filter(|model| match methods_by_model.get(model.as_str()) {
@@ -822,8 +845,8 @@ impl App {
                     let missing_anthropic_method = crate::provider::provider_for_model(model)
                         == Some("claude")
                         && !model.contains('/')
-                        && ((auth.anthropic.has_api_key && !methods.contains("claude-api"))
-                            || (auth.anthropic.has_oauth && !methods.contains("claude-oauth")));
+                        && ((auth.anthropic_has_api_key && !methods.contains("claude-api"))
+                            || (auth.anthropic_has_oauth && !methods.contains("claude-oauth")));
                     let missing_bedrock_method = bedrock_available
                         && crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model)
                         && !methods.contains("bedrock");
@@ -1267,6 +1290,10 @@ impl App {
                             remote_provider_name.as_deref(),
                             &remote_available_entries,
                             &mut routes,
+                            // Probed on the worker thread, not hoisted to the
+                            // caller: this branch exists to keep the UI thread
+                            // free, and a cold `check_fast()` blocks ~20-30ms.
+                            RouteAuthInputs::from_machine,
                         );
                         routes
                     },
@@ -3820,7 +3847,7 @@ impl App {
 mod tests {
     use super::{
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
-        REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
+        REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache, RouteAuthInputs,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
         model_picker_effort_matches_default, model_picker_route_is_current,
         model_picker_route_is_default, model_picker_route_is_recommended,
@@ -4546,6 +4573,134 @@ mod tests {
                 ("gpt-5.5", "OpenAI", "openai-oauth"),
                 ("qwen3-coder", "llama.cpp", "openai-compatible:llamacpp"),
             ]
+        );
+    }
+
+    /// Build the routes a mock provider declares, then run the extension the
+    /// way the picker does, with auth stated rather than probed (issue #211).
+    fn extend_with_auth(
+        declared: &[(&str, &str, &str)],
+        entries: &[&str],
+        auth: RouteAuthInputs,
+    ) -> Vec<(String, String, String)> {
+        let mut routes: Vec<crate::provider::ModelRoute> = declared
+            .iter()
+            .map(
+                |(model, provider, api_method)| crate::provider::ModelRoute {
+                    model: (*model).to_string(),
+                    provider: (*provider).to_string(),
+                    api_method: (*api_method).to_string(),
+                    available: true,
+                    detail: String::new(),
+                    cheapness: None,
+                },
+            )
+            .collect();
+        let entries: Vec<String> = entries.iter().map(|e| (*e).to_string()).collect();
+        App::extend_remote_routes_for_uncovered_models_static(
+            Some("mock-provider"),
+            &entries,
+            &mut routes,
+            || auth,
+        );
+        routes
+            .into_iter()
+            .map(|r| (r.model, r.provider, r.api_method))
+            .collect()
+    }
+
+    const DECLARED: [(&str, &str, &str); 1] = [("claude-sonnet-4-6", "Antigravity", "cli")];
+    const ENTRIES: [&str; 1] = ["claude-sonnet-4-6"];
+
+    #[test]
+    fn issue_211_no_credentials_yields_only_what_the_mock_declares() {
+        // The property the issue is about: with auth stated as absent, route
+        // synthesis adds nothing, whatever the host machine is logged into.
+        let routes = extend_with_auth(&DECLARED, &ENTRIES, RouteAuthInputs::default());
+        assert_eq!(
+            routes,
+            [(
+                "claude-sonnet-4-6".to_string(),
+                "Antigravity".to_string(),
+                "cli".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn issue_211_stated_oauth_widens_the_synthesised_route_set() {
+        // Deliberately a RELATIVE assertion. Naming `claude-oauth` would make
+        // this test depend on the host's credentials a second time, because
+        // the api_method still comes from `remote_model_routes_fallback`'s own
+        // ambient probe. What the seam owns is that stating oauth causes MORE
+        // routes than stating nothing, and that holds on any machine.
+        let declared = [("claude-sonnet-4-6", "Antigravity", "cli")];
+        let entries = ["claude-sonnet-4-6"];
+
+        let none = extend_with_auth(&declared, &entries, RouteAuthInputs::default());
+        let with_oauth = extend_with_auth(
+            &declared,
+            &entries,
+            RouteAuthInputs {
+                anthropic_has_oauth: true,
+                ..RouteAuthInputs::default()
+            },
+        );
+
+        assert_eq!(none.len(), 1, "no stated auth must add no routes: {none:?}");
+        assert!(
+            with_oauth.len() > none.len(),
+            "stating oauth must widen the set: {none:?} vs {with_oauth:?}"
+        );
+    }
+
+    #[test]
+    fn issue_211_auth_is_not_probed_when_there_is_nothing_to_extend() {
+        // Regression guard. Before the seam, `check_fast()` sat AFTER four
+        // early returns, so an empty catalog never probed the machine at all.
+        // Passing an evaluated `RouteAuthInputs` made the probe eager at the
+        // call site, which put credential I/O on paths that previously did
+        // none - including the synchronous picker open. The parameter is a
+        // closure so the cost stays where master had it.
+        let probed = std::cell::Cell::new(false);
+        let mut routes: Vec<crate::provider::ModelRoute> = Vec::new();
+
+        App::extend_remote_routes_for_uncovered_models_static(
+            Some("mock-provider"),
+            &[],
+            &mut routes,
+            || {
+                probed.set(true);
+                RouteAuthInputs::default()
+            },
+        );
+
+        assert!(
+            !probed.get(),
+            "an empty catalog must return before probing machine credentials"
+        );
+    }
+
+    #[test]
+    fn issue_211_route_synthesis_ignores_ambient_env_credentials() {
+        // The regression guard. `ANTHROPIC_API_KEY` is a process env var that
+        // no `JCODE_HOME` isolation can scope, so before the seam this test
+        // would see an extra route on any developer machine exporting it.
+        let _guard = crate::storage::lock_test_env();
+        // SAFETY: single-threaded section held by the repo's env lock.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key") };
+
+        let routes = extend_with_auth(&DECLARED, &ENTRIES, RouteAuthInputs::default());
+
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+        assert_eq!(
+            routes,
+            [(
+                "claude-sonnet-4-6".to_string(),
+                "Antigravity".to_string(),
+                "cli".to_string()
+            )],
+            "an ambient env credential must not reach stated-auth route synthesis"
         );
     }
 }
