@@ -111,6 +111,9 @@ test-support = ["jcode-app-core/test-support"]
 # Enables the downstream test-support helpers for *this* crate's own test
 # target. Feature unification applies this only to test/bench/example builds.
 jcode-app-core = { path = "../jcode-app-core", default-features = false, features = ["test-support"] }
+# Seeding a real Cursor `state.vscdb` is the only way a test here can tell the full auth probe
+# apart from the fast one. Same version jcode-base already builds, so nothing new is compiled.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

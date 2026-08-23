@@ -337,8 +337,18 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             .expect("inline account picker should open")
             .selected;
         let picker = app.inline_interactive_state.as_ref().unwrap();
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Otter"));
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Fox"));
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI Otter")
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI Fox")
+        );
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -480,46 +490,103 @@ fn test_account_command_combines_claude_and_openai_accounts() {
 #[cfg(unix)]
 #[test]
 fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() {
-    use std::os::unix::fs::PermissionsExt;
-
     with_temp_jcode_home(|| {
-        let prev_cursor_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-        let temp = tempfile::TempDir::new().expect("create temp dir");
-        let marker = temp.path().join("cursor-status-ran");
-        let script = temp.path().join("cursor-agent-mock");
+        let _cursor_env = ScopedRemovedEnvVars::new(&[
+            "CURSOR_API_KEY",
+            "CURSOR_ACCESS_TOKEN",
+            "CURSOR_REFRESH_TOKEN",
+        ]);
+        seed_trusted_cursor_vscdb();
 
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho ran > \"{}\"\nexit 0\n", marker.display()),
-        )
-        .expect("write mock cursor agent");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("stat mock cursor agent")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod mock cursor agent");
-
-        let mut app = create_test_app();
-
-        crate::env::set_var("JCODE_CURSOR_CLI_PATH", &script);
         crate::auth::AuthStatus::invalidate_cache();
-        let _ = std::fs::remove_file(&marker);
+        assert_eq!(
+            crate::auth::AuthStatus::check().cursor,
+            crate::auth::AuthState::Available,
+            "positive control: the seeded vscdb credential must be reachable by the full probe, \
+             or this fixture proves nothing about what the fast probe skipped"
+        );
 
+        crate::auth::AuthStatus::invalidate_cache();
+        let mut app = create_test_app();
         app.input = "/account".to_string();
         app.submit_input();
 
         assert!(app.inline_interactive_state.is_some());
-        assert!(
-            !marker.exists(),
-            "/account should not execute `cursor-agent status` on open"
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().cursor,
+            crate::auth::AuthState::NotConfigured,
+            "/account opens on the fast snapshot, which must not read Cursor's state.vscdb"
         );
-
-        match prev_cursor_cli_path {
-            Some(value) => crate::env::set_var("JCODE_CURSOR_CLI_PATH", value),
-            None => crate::env::remove_var("JCODE_CURSOR_CLI_PATH"),
-        }
-        crate::auth::AuthStatus::invalidate_cache();
     });
+}
+
+/// Unset environment variables for a scope, restoring them on drop.
+#[cfg(unix)]
+struct ScopedRemovedEnvVars {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(unix)]
+impl ScopedRemovedEnvVars {
+    fn new(names: &[&'static str]) -> Self {
+        let previous = names
+            .iter()
+            .map(|name| {
+                let prior = std::env::var_os(name);
+                crate::env::remove_var(name);
+                (*name, prior)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ScopedRemovedEnvVars {
+    fn drop(&mut self) {
+        for (name, prior) in &self.previous {
+            match prior {
+                Some(value) => crate::env::set_var(name, value),
+                None => crate::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// Write a Cursor `state.vscdb` holding a usable access token where the production lookup
+/// searches, and record it as a trusted external auth source so the probe will accept it.
+///
+/// The credential is deliberately the ONLY one present, so `AuthState::Available` can come from
+/// nowhere else.
+#[cfg(unix)]
+fn seed_trusted_cursor_vscdb() {
+    let db_path = crate::storage::user_home_path(".config/Cursor/User/globalStorage/state.vscdb")
+        .expect("resolve sandboxed vscdb path");
+    std::fs::create_dir_all(db_path.parent().expect("vscdb parent")).expect("create vscdb dir");
+
+    let connection = rusqlite::Connection::open(&db_path).expect("open mock vscdb");
+    connection
+        .execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .expect("create ItemTable");
+    connection
+        .execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            ("cursorAuth/accessToken", "vscdb-token-for-probe-mode-test"),
+        )
+        .expect("insert access token");
+    drop(connection);
+
+    let canonical = std::fs::canonicalize(&db_path).expect("canonicalize vscdb path");
+    let mut cfg = crate::config::Config::load_for_edit();
+    cfg.auth.trusted_external_source_paths = vec![format!(
+        "cursor_vscdb|{}",
+        canonical.to_string_lossy().to_ascii_lowercase()
+    )];
+    cfg.save().expect("save trusted vscdb path");
+    crate::config::invalidate_config_cache();
 }
 
 #[test]
