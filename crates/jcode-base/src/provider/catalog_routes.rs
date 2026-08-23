@@ -1914,6 +1914,31 @@ mod tests {
         }
 
         #[test]
+        fn no_stated_openai_credentials_still_lists_an_unavailable_openai_route() {
+            // The picker shows an unconfigured provider as a greyed-out entry
+            // so the model stays discoverable. Deleting that arm drops the
+            // OpenAI model from the snapshot entirely, and nothing else in the
+            // crate notices.
+            let routes = simplified_model_routes_for_picker_with(
+                "mock-provider",
+                "mock-model",
+                ["gpt-5.1".to_string()],
+                AuthStatus::default,
+            );
+            let openai: Vec<_> = routes
+                .iter()
+                .filter(|route| route.provider == "OpenAI")
+                .collect();
+            assert_eq!(openai.len(), 1, "got {routes:?}");
+            assert_eq!(openai[0].api_method, "openai-oauth");
+            assert!(
+                !openai[0].available,
+                "an unconfigured OpenAI route must not be available"
+            );
+            assert_eq!(openai[0].detail, "no credentials");
+        }
+
+        #[test]
         fn ambient_env_credentials_do_not_reach_a_stated_auth_build() {
             // ANTHROPIC_API_KEY is a process env var no JCODE_HOME can scope,
             // which is why home isolation alone never closed this issue.
