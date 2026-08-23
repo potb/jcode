@@ -50,7 +50,7 @@ pub use catalog_routes::{
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
     remote_model_routes_fallback_with, remote_model_routes_lightweight_fallback,
     remote_model_should_offer_copilot_route, remote_openai_compatible_route_for_model,
-    simplified_model_routes_for_picker,
+    simplified_model_routes_for_picker, simplified_model_routes_for_picker_with,
 };
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;

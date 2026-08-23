@@ -491,11 +491,16 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
     app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
         .unwrap();
     let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(!picker.filtered.is_empty(), "typed input should filter models");
+    assert!(
+        !picker.filtered.is_empty(),
+        "typed input should filter models"
+    );
     assert!(picker.filtered.len() < picker.entries.len());
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
     assert!(app.session.subagent_model.is_some());
     assert_eq!(app.provider.model(), "counting-a");
 }
@@ -2973,4 +2978,118 @@ fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
     });
+}
+
+/// Issue #211: a provider whose display list names an OpenAI model, used to
+/// exercise the picker's simplified (pre-hydration) route snapshot.
+#[derive(Clone)]
+struct UnconfiguredOpenAiPickerProvider;
+
+#[async_trait::async_trait]
+impl Provider for UnconfiguredOpenAiPickerProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("UnconfiguredOpenAiPickerProvider")
+    }
+
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn model(&self) -> String {
+        "gpt-5.1".to_string()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec!["gpt-5.1".to_string()]
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        // Hydration contributes nothing, so whatever the picker shows comes
+        // from the simplified snapshot this test is about.
+        Vec::new()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// Issue #211: with no OpenAI credentials, `/model` must still list the model
+/// as an unavailable row in the rendered frame, not hide it.
+#[test]
+fn test_model_picker_lists_unconfigured_openai_model_as_unavailable_row() {
+    let sandbox =
+        crate::auth::test_sandbox::AuthTestSandbox::new().expect("auth sandbox for a clean home");
+    crate::auth::AuthStatus::invalidate_cache();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(UnconfiguredOpenAiPickerProvider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.bump_display_messages_version();
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("the picker must open even with no credentials configured");
+    let openai_rows: Vec<_> = picker
+        .entries
+        .iter()
+        .flat_map(|entry| entry.options.iter())
+        .filter(|option| option.provider == "OpenAI")
+        .collect();
+    // Reasoning-effort models expand into one row per effort (issue #458), so
+    // the count is not 1; what matters is that the model is offered at all.
+    assert!(
+        !openai_rows.is_empty(),
+        "an unconfigured OpenAI model must still be offered, got {:?}",
+        picker
+            .entries
+            .iter()
+            .flat_map(|entry| entry.options.iter())
+            .map(|option| (&option.provider, &option.api_method))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        openai_rows
+            .iter()
+            .all(|option| option.api_method == "openai-oauth"),
+        "with no credentials every OpenAI row is the oauth placeholder, got {:?}",
+        openai_rows
+            .iter()
+            .map(|option| &option.api_method)
+            .collect::<Vec<_>>()
+    );
+
+    let rendered = {
+        let _render_lock = scroll_render_test_lock();
+        let backend = ratatui::backend::TestBackend::new(90, 14);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        render_and_snap(&app, &mut terminal)
+    };
+
+    crate::auth::AuthStatus::invalidate_cache();
+    drop(sandbox);
+
+    assert!(
+        rendered.contains("GPT-5.1"),
+        "the user must still SEE the unconfigured model in /model, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("no credentials"),
+        "the row must be shown as unavailable for lack of credentials, got:\n{rendered}"
+    );
 }

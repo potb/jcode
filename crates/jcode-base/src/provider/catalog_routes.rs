@@ -25,7 +25,29 @@ pub fn simplified_model_routes_for_picker(
     current_model: &str,
     display_models: impl IntoIterator<Item = String>,
 ) -> Vec<ModelRoute> {
-    let auth = AuthStatus::check_fast();
+    simplified_model_routes_for_picker_with(
+        current_provider_name,
+        current_model,
+        display_models,
+        AuthStatus::check_fast,
+    )
+}
+
+/// Build the picker's fast route snapshot from a stated `AuthStatus`;
+/// `AuthStatus::default()` means "no credentials".
+///
+/// `auth` is a closure rather than a value so the credential probe stays off
+/// every path that does not reach this function, and so it runs at exactly the
+/// point the ambient `check_fast()` call used to sit. Taking an `AuthStatus`
+/// by value would force each caller to probe the machine before it even knows
+/// whether the picker needs a simplified snapshot (#211).
+pub fn simplified_model_routes_for_picker_with(
+    current_provider_name: &str,
+    current_model: &str,
+    display_models: impl IntoIterator<Item = String>,
+    auth: impl FnOnce() -> AuthStatus,
+) -> Vec<ModelRoute> {
+    let auth = auth();
     let mut routes = Vec::new();
 
     for model in display_models {
@@ -1801,6 +1823,201 @@ mod tests {
             assert!(
                 !probed.get(),
                 "the subscription path must not probe the machine for credentials"
+            );
+        }
+    }
+
+    /// Issue #211: the picker snapshot must be built from the `AuthStatus` it
+    /// is GIVEN, so a test never observes the credentials of the host running
+    /// it, and the probe must run once rather than once per model.
+    mod issue_211_stated_picker_auth {
+        use super::*;
+
+        fn picker_methods(auth: &AuthStatus, models: &[&str]) -> Vec<(String, String)> {
+            simplified_model_routes_for_picker_with(
+                "mock-provider",
+                "mock-model",
+                models.iter().map(|model| (*model).to_string()),
+                || auth.clone(),
+            )
+            .into_iter()
+            .map(|route| (route.provider, route.api_method))
+            .collect()
+        }
+
+        fn anthropic_methods(auth: &AuthStatus) -> Vec<String> {
+            picker_methods(auth, &["claude-sonnet-4-6"])
+                .into_iter()
+                .filter(|(provider, _)| provider == "Anthropic")
+                .map(|(_, api_method)| api_method)
+                .collect()
+        }
+
+        #[test]
+        fn no_stated_credentials_yields_an_unavailable_anthropic_route_only() {
+            let routes = simplified_model_routes_for_picker_with(
+                "mock-provider",
+                "mock-model",
+                ["claude-sonnet-4-6".to_string()],
+                AuthStatus::default,
+            );
+            let anthropic: Vec<_> = routes
+                .iter()
+                .filter(|route| route.provider == "Anthropic")
+                .collect();
+            assert_eq!(anthropic.len(), 1);
+            assert_eq!(anthropic[0].api_method, "claude-oauth");
+            assert!(
+                !anthropic[0].available,
+                "a stated-empty AuthStatus must not make a route available"
+            );
+        }
+
+        #[test]
+        fn stated_oauth_yields_exactly_the_oauth_route() {
+            let auth = AuthStatus {
+                anthropic: ProviderAuth {
+                    state: AuthState::Available,
+                    has_oauth: true,
+                    ..ProviderAuth::default()
+                },
+                ..AuthStatus::default()
+            };
+            assert_eq!(anthropic_methods(&auth), ["claude-oauth"]);
+        }
+
+        #[test]
+        fn stated_api_key_yields_exactly_the_api_route() {
+            let auth = AuthStatus {
+                anthropic: ProviderAuth {
+                    state: AuthState::Available,
+                    has_api_key: true,
+                    ..ProviderAuth::default()
+                },
+                ..AuthStatus::default()
+            };
+            assert_eq!(anthropic_methods(&auth), ["claude-api"]);
+        }
+
+        #[test]
+        fn stated_openai_oauth_decides_the_openai_route() {
+            let auth = AuthStatus {
+                openai: AuthState::Available,
+                openai_has_oauth: true,
+                ..AuthStatus::default()
+            };
+            let methods = picker_methods(&auth, &["gpt-5.1"]);
+            assert_eq!(
+                methods,
+                vec![("OpenAI".to_string(), "openai-oauth".to_string())]
+            );
+        }
+
+        #[test]
+        fn no_stated_openai_credentials_still_lists_an_unavailable_openai_route() {
+            // The picker shows an unconfigured provider as a greyed-out entry
+            // so the model stays discoverable. Deleting that arm drops the
+            // OpenAI model from the snapshot entirely, and nothing else in the
+            // crate notices.
+            let routes = simplified_model_routes_for_picker_with(
+                "mock-provider",
+                "mock-model",
+                ["gpt-5.1".to_string()],
+                AuthStatus::default,
+            );
+            let openai: Vec<_> = routes
+                .iter()
+                .filter(|route| route.provider == "OpenAI")
+                .collect();
+            assert_eq!(openai.len(), 1, "got {routes:?}");
+            assert_eq!(openai[0].api_method, "openai-oauth");
+            assert!(
+                !openai[0].available,
+                "an unconfigured OpenAI route must not be available"
+            );
+            assert_eq!(openai[0].detail, "no credentials");
+        }
+
+        #[test]
+        fn ambient_env_credentials_do_not_reach_a_stated_auth_build() {
+            // ANTHROPIC_API_KEY is a process env var no JCODE_HOME can scope,
+            // which is why home isolation alone never closed this issue.
+            let _lock = crate::storage::lock_test_env();
+            // SAFETY: single-threaded section held by the repo's env lock.
+            unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key") };
+
+            let methods = anthropic_methods(&AuthStatus::default());
+
+            unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+            assert_eq!(
+                methods,
+                ["claude-oauth"],
+                "a host env credential must not add a claude-api route to a stated build"
+            );
+        }
+
+        #[test]
+        fn the_wrapper_still_probes_the_machine_for_credentials() {
+            // The tests above all call the `_with` form, so none of them can
+            // see what the no-arg wrapper passes: swapping its
+            // `AuthStatus::check_fast` for `AuthStatus::default` leaves the
+            // whole crate green. The picker calls the WRAPPER, so that
+            // substitution would silently stop offering configured providers.
+            // A sandbox gives a clean JCODE_HOME and drops the memoized auth
+            // cache, so an env credential set here is one the wrapper can only
+            // report by actually probing.
+            let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+            crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key");
+            crate::auth::AuthStatus::invalidate_cache();
+
+            let methods: Vec<String> = simplified_model_routes_for_picker(
+                "mock-provider",
+                "mock-model",
+                ["claude-sonnet-4-6".to_string()],
+            )
+            .into_iter()
+            .filter(|route| route.provider == "Anthropic")
+            .map(|route| route.api_method)
+            .collect();
+
+            crate::env::remove_var("ANTHROPIC_API_KEY");
+            crate::auth::AuthStatus::invalidate_cache();
+            drop(sandbox);
+
+            assert!(
+                methods.iter().any(|method| method == "claude-api"),
+                "the wrapper must probe the machine: with ANTHROPIC_API_KEY set \
+                 it has to offer claude-api, got {methods:?}"
+            );
+        }
+
+        #[test]
+        fn auth_is_probed_once_regardless_of_how_many_models_are_listed() {
+            // Unlike the fallback seam, this function has no early return: the
+            // probe is needed on every path. What laziness buys here is that
+            // it stays a SINGLE probe placed exactly where the ambient
+            // `check_fast()` stood, instead of one per listed model.
+            let probes = std::cell::Cell::new(0usize);
+
+            let routes = simplified_model_routes_for_picker_with(
+                "mock-provider",
+                "mock-model",
+                [
+                    "claude-sonnet-4-6".to_string(),
+                    "gpt-5.1".to_string(),
+                    "vendor/some-openrouter-model".to_string(),
+                ],
+                || {
+                    probes.set(probes.get() + 1);
+                    AuthStatus::default()
+                },
+            );
+
+            assert!(!routes.is_empty(), "the listed models still build routes");
+            assert_eq!(
+                probes.get(),
+                1,
+                "credentials must be probed once per picker snapshot, not per model"
             );
         }
     }
