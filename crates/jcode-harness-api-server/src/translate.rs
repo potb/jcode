@@ -174,8 +174,6 @@ struct RecentSessionIndexEntry {
     generated_title: Option<String>,
     custom_title: Option<String>,
     todo_title: Option<String>,
-    updated_at_ms: i64,
-    last_active_at_ms: Option<i64>,
 }
 
 impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
@@ -1443,7 +1441,7 @@ impl BridgeState {
         }
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, updated_at_ms, last_active_at_ms
+                    todo_title
              FROM recent_sessions
              ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
              LIMIT 500",
@@ -1458,8 +1456,6 @@ impl BridgeState {
                     generated_title: row.get(2)?,
                     custom_title: row.get(3)?,
                     todo_title: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                    last_active_at_ms: row.get(6)?,
                 })
             })
             .and_then(|rows| rows.collect())
