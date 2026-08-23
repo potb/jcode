@@ -12,6 +12,9 @@ pub struct MemoryTool {
 }
 
 impl MemoryTool {
+    /// Caps `search` output when the caller names no limit, matching `recall`.
+    const DEFAULT_SEARCH_LIMIT: usize = 10;
+
     pub fn new() -> Self {
         Self {
             manager: MemoryManager::new(),
@@ -25,12 +28,12 @@ impl MemoryTool {
         }
     }
 
-    /// Report for an empty `search`, which names the substring rule rather than
+    /// Report for an empty `search`, which names the matching rule rather than
     /// implying the memory is absent. See issue #193.
     fn no_substring_match_report(query: &str) -> String {
         format!(
-            "no substring match for '{}' (search matches the whole query as one \
-             contiguous substring, not per-word); try fewer words",
+            "no lexical match for '{}' (search requires every term of the query to \
+             appear in an entry, in any order); try fewer terms",
             query
         )
     }
@@ -321,6 +324,7 @@ impl Tool for MemoryTool {
                     action: "search".into(),
                     detail: truncate_for_widget(&query, 40),
                 });
+                let limit = input.limit.unwrap_or(Self::DEFAULT_SEARCH_LIMIT);
                 let results = manager.search_scoped(&query, scope)?;
                 memory::add_event(MemoryEventKind::ToolRecalled {
                     query: truncate_for_widget(&query, 40),
@@ -330,11 +334,23 @@ impl Tool for MemoryTool {
                 if results.is_empty() {
                     Ok(ToolOutput::new(Self::no_substring_match_report(&query)))
                 } else {
-                    let mut out = format!("Found {} memories:\n\n", results.len());
-                    for e in results {
+                    let total = results.len();
+                    let shown = results.len().min(limit);
+                    let mut out = if total > shown {
+                        format!("Found {} memories, showing {}:\n\n", total, shown)
+                    } else {
+                        format!("Found {} memories:\n\n", total)
+                    };
+                    for e in results.into_iter().take(shown) {
                         out.push_str(&format!(
                             "- [{}] {}\n  id: {}\n\n",
                             e.category, e.content, e.id
+                        ));
+                    }
+                    if total > shown {
+                        out.push_str(&format!(
+                            "{} more not shown; narrow the query or raise 'limit'.\n",
+                            total - shown
                         ));
                     }
                     Ok(ToolOutput::new(out))
@@ -897,9 +913,10 @@ mod tests {
         }
     }
 
-    /// An empty `search` must name the substring rule, not imply absence (#193).
+    /// A multi-word `search` must find an entry holding every term (#193), and an
+    /// empty result must name the matching rule rather than imply absence.
     #[tokio::test]
-    async fn an_empty_search_result_names_the_substring_rule_instead_of_reporting_absence() {
+    async fn a_scattered_multi_word_search_finds_the_entry_holding_every_term() {
         let _guard = crate::storage::lock_test_env();
         let home = tempfile::tempdir().expect("home");
         let prev_home = std::env::var_os("JCODE_HOME");
@@ -917,43 +934,143 @@ mod tests {
         .await
         .expect("remember should succeed");
 
-        let scattered = tool
-            .execute(
-                json!({ "action": "search", "query": "node worktree fnm" }),
-                test_ctx(None),
-            )
-            .await
-            .expect("search should succeed");
+        let search = |query: &'static str| {
+            let tool = &tool;
+            async move {
+                tool.execute(
+                    json!({ "action": "search", "query": query }),
+                    test_ctx(None),
+                )
+                .await
+                .expect("search should succeed")
+            }
+        };
 
-        let contiguous = tool
-            .execute(
-                json!({ "action": "search", "query": "fnm node" }),
-                test_ctx(None),
-            )
-            .await
-            .expect("search should succeed");
+        let contiguous = search("fnm node").await;
+        let scattered = search("node worktree fnm").await;
+        let absent = search("node worktree kubernetes").await;
 
         assert!(
             contiguous.output.contains("Found 1 memories"),
-            "control failed: the store must answer a contiguous query, else this \
-             test proves nothing about the empty-result message. Got: {}",
+            "control: a contiguous query must still match. Got: {}",
             contiguous.output
         );
         assert!(
-            scattered.output.contains("no substring match"),
-            "an empty result must name the substring rule rather than read as \
-             absence. Got: {}",
+            scattered.output.contains("Found 1 memories"),
+            "every term of this query is in the entry, so it must be found. Got: {}",
             scattered.output
         );
         assert!(
-            scattered.output.contains("fewer words"),
+            absent.output.contains("no lexical match"),
+            "a query with an absent term must report the matching rule, not absence. Got: {}",
+            absent.output
+        );
+        assert!(
+            absent.output.contains("fewer terms"),
             "an empty result must suggest the recovery. Got: {}",
-            scattered.output
+            absent.output
         );
         assert!(
-            !scattered.output.contains("No memories matching"),
+            !absent.output.contains("No memories matching"),
             "the old absence wording must be gone. Got: {}",
-            scattered.output
+            absent.output
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    /// The per-term rule widens result sets, so `search` caps output like `recall`.
+    #[tokio::test]
+    async fn search_caps_its_result_set_and_says_how_many_it_withheld() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        let subjects = [
+            "the nightly build cache eviction policy",
+            "a flaky websocket reconnect in the client",
+            "how the sandbox mounts a project directory",
+            "the French labels shipped in the invoice screen",
+            "why the resume scan stops at a fixed depth",
+            "the cost of an idle repaint on a wide terminal",
+            "a stale lockfile after a dependency bump",
+            "the ordering of migrations on a fresh database",
+            "an OAuth token refreshed on the wrong thread",
+            "the diff view collapsing unchanged hunks",
+            "a subprocess inheriting the parent environment",
+            "the retry budget for a rate-limited provider",
+            "how logs rotate once a day at midnight",
+            "the keybinding that toggles the side panel",
+        ];
+        for subject in subjects {
+            tool.execute(
+                json!({
+                    "action": "remember",
+                    "content": format!("{subject} sits under the ratchet and its ceiling"),
+                    "scope": "global",
+                }),
+                test_ctx(None),
+            )
+            .await
+            .expect("remember should succeed");
+        }
+
+        let search = |value: serde_json::Value| {
+            let tool = &tool;
+            async move {
+                tool.execute(value, test_ctx(None))
+                    .await
+                    .expect("search should succeed")
+            }
+        };
+
+        let raised = search(json!({
+            "action": "search",
+            "query": "ratchet ceiling",
+            "limit": 50,
+        }))
+        .await;
+        let total = raised.output.matches("  id: ").count();
+        assert!(
+            total > MemoryTool::DEFAULT_SEARCH_LIMIT,
+            "control: the fixture must exceed the default limit, else the cap is \
+             never exercised. Got {total} from: {}",
+            raised.output
+        );
+        assert!(
+            raised.output.contains(&format!("Found {total} memories:")),
+            "an explicit limit above the total must not report a cap. Got: {}",
+            raised.output
+        );
+
+        let capped = search(json!({ "action": "search", "query": "ratchet ceiling" })).await;
+        assert!(
+            capped.output.contains(&format!(
+                "Found {total} memories, showing {}:",
+                MemoryTool::DEFAULT_SEARCH_LIMIT
+            )),
+            "the total must stay visible even when the body is capped. Got: {}",
+            capped.output
+        );
+        assert!(
+            capped.output.contains(&format!(
+                "{} more not shown",
+                total - MemoryTool::DEFAULT_SEARCH_LIMIT
+            )),
+            "the caller must be told what was withheld. Got: {}",
+            capped.output
+        );
+        assert_eq!(
+            capped.output.matches("  id: ").count(),
+            MemoryTool::DEFAULT_SEARCH_LIMIT,
+            "exactly the limit may be rendered. Got: {}",
+            capped.output
         );
 
         if let Some(prev_home) = prev_home {

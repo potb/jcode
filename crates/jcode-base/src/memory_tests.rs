@@ -953,3 +953,60 @@ fn focus_query_text_falls_back_when_all_stripped() {
     // Nothing substantive survives -> fall back to raw rather than empty.
     assert_eq!(focused, raw);
 }
+
+#[test]
+fn search_returns_matches_newest_first_so_truncation_is_deterministic() {
+    with_temp_home(|_home| {
+        let manager = MemoryManager::new().with_project_dir("/tmp/jcode-search-order");
+        let base = chrono::Utc::now() - chrono::Duration::days(30);
+
+        let subjects = [
+            "the nightly build cache eviction policy",
+            "a flaky websocket reconnect in the client",
+            "how the sandbox mounts a project directory",
+            "the ordering of migrations on a fresh database",
+            "the retry budget for a rate-limited provider",
+            "the keybinding that toggles the side panel",
+        ];
+        for (age_days, subject) in subjects.iter().enumerate() {
+            let stamp = base + chrono::Duration::days(age_days as i64);
+            manager
+                .remember_global(
+                    MemoryEntry::new(
+                        MemoryCategory::Fact,
+                        format!("{subject} sits under the ratchet and its ceiling"),
+                    )
+                    .with_timestamps(stamp, stamp),
+                )
+                .expect("remember");
+        }
+
+        let contents = |scope| {
+            manager
+                .search_scoped("ratchet ceiling", scope)
+                .expect("search")
+                .into_iter()
+                .map(|e| e.content)
+                .collect::<Vec<_>>()
+        };
+
+        let hits = contents(MemoryScope::All);
+        assert_eq!(
+            hits.len(),
+            subjects.len(),
+            "control: every fixture must match, else the ordering below ranges \
+             over the wrong set. Got {hits:?}"
+        );
+
+        let expected = subjects
+            .iter()
+            .rev()
+            .map(|s| format!("{s} sits under the ratchet and its ceiling"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hits, expected,
+            "search must return matches newest first: callers truncate, and an \
+             unsorted HashMap walk shows an arbitrary subset"
+        );
+    });
+}
