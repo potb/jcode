@@ -23,9 +23,10 @@ code should live in small crates with one-way dependencies.
 ## Current first step
 
 `jcode-storage` is now a leaf crate for app paths, permission hardening, atomic
-JSON writes, and append-only JSONL helpers. The root `src/storage.rs` module is a
-thin compatibility facade that preserves existing logging behavior for backup
-recovery.
+JSON writes, and append-only JSONL helpers. The storage module that calls into it
+is a thin compatibility facade preserving existing logging behavior for backup
+recovery; it was at src/storage.rs in the root crate when this was written and now
+lives at `crates/jcode-base/src/storage.rs`.
 
 Measured after extraction on this machine:
 
@@ -34,11 +35,17 @@ Measured after extraction on this machine:
 
 ## Recommended next extractions
 
-1. `jcode-provider-anthropic`: move Anthropic request/stream translation out of
-   root `src/provider/anthropic.rs` and depend only on `jcode-provider-core`,
-   `jcode-message-types`, and serde/reqwest primitives.
-2. `jcode-provider-openai`: same for OpenAI request/stream handling. This
-   reduces rebuilds when editing server/TUI code and makes provider tests cheap.
+Items 1 and 2 have since been done: `crates/jcode-provider-anthropic` and
+`crates/jcode-provider-openai` both exist, and the Anthropic module they were
+split out of now lives at `crates/jcode-base/src/provider/anthropic.rs`. They are
+kept here so the list still reads as the sequence it argued for.
+
+1. ~~`jcode-provider-anthropic`~~ (done): move Anthropic request/stream
+   translation out of the root crate's provider/anthropic.rs and depend only on
+   `jcode-provider-core`, `jcode-message-types`, and serde/reqwest primitives.
+2. ~~`jcode-provider-openai`~~ (done): same for OpenAI request/stream handling.
+   This reduces rebuilds when editing server/TUI code and makes provider tests
+   cheap.
 3. `jcode-session-core`: move session storage paths, journal metadata, and
    memory-profile pure transforms once dependencies on root prompt/logging are
    cut behind callbacks.
