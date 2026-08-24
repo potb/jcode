@@ -240,21 +240,18 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     multiprovider_model_routes_with(provider, CatalogRouteAuth::from_machine)
 }
 
-/// The credentials the catalog build reads from the machine, gathered in one
-/// place so a caller can state them instead (#250).
-///
-/// `Default` means "no credentials", which is what a test wants unless it says
-/// otherwise.
+/// The credentials the catalog build reads from the machine, so a caller can
+/// state them instead (#250). `Default` means "no credentials".
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CatalogRouteAuth {
-    pub(crate) anthropic_has_oauth: bool,
-    pub(crate) anthropic_has_api_key: bool,
-    pub(crate) openai: AuthStatus,
+pub(super) struct CatalogRouteAuth {
+    pub(super) anthropic_has_oauth: bool,
+    pub(super) anthropic_has_api_key: bool,
+    pub(super) openai: AuthStatus,
 }
 
 impl CatalogRouteAuth {
     /// The only place this path probes the host.
-    pub(crate) fn from_machine() -> Self {
+    pub(super) fn from_machine() -> Self {
         Self {
             anthropic_has_oauth: crate::auth::claude::load_credentials().is_ok(),
             anthropic_has_api_key: crate::provider::anthropic::has_anthropic_api_key(),
@@ -265,10 +262,9 @@ impl CatalogRouteAuth {
 
 /// Build the full multi-provider route catalog from stated credentials.
 ///
-/// `auth` is a closure rather than a value so the credential probe runs at
-/// exactly the point the ambient reads used to sit, keeping the cost off any
-/// path that returns before needing it (#211, #250).
-pub(crate) fn multiprovider_model_routes_with(
+/// `auth` is a closure so the probe runs where the ambient reads used to sit,
+/// keeping its cost off paths that return first (#211, #250).
+pub(super) fn multiprovider_model_routes_with(
     provider: &MultiProvider,
     auth: impl FnOnce() -> CatalogRouteAuth,
 ) -> Vec<ModelRoute> {
@@ -2095,6 +2091,60 @@ mod tests {
                     .iter()
                     .map(|route| (&route.api_method, route.available))
                     .collect::<Vec<_>>()
+            );
+        }
+
+        fn openai_methods(auth: CatalogRouteAuth) -> Vec<String> {
+            let provider = MultiProvider::from_auth_status(AuthStatus::default());
+            multiprovider_model_routes_with(&provider, || auth)
+                .into_iter()
+                .filter(|route| route.provider == "OpenAI")
+                .map(|route| route.api_method)
+                .collect()
+        }
+
+        /// Pins the `openai` field through the seam. Replacing `auth.openai`
+        /// with a fresh `AuthStatus::check_fast()` inside `_with` leaves every
+        /// other test in this module green.
+        ///
+        /// Differential rather than absolute: some OpenAI models emit an
+        /// api-key row whatever is stated, and the machine running the test
+        /// may hold real credentials. Under the mutant all three builds read
+        /// the same host state, so the counts stop differing.
+        #[test]
+        fn stated_openai_credentials_reach_the_openai_routes() {
+            let _env = EnvGuard::new();
+            let count =
+                |methods: &[String], want: &str| methods.iter().filter(|m| *m == want).count();
+
+            let none = openai_methods(CatalogRouteAuth::default());
+            let with_key = openai_methods(CatalogRouteAuth {
+                openai: AuthStatus {
+                    openai_has_api_key: true,
+                    ..AuthStatus::default()
+                },
+                ..CatalogRouteAuth::default()
+            });
+            let with_oauth = openai_methods(CatalogRouteAuth {
+                openai: AuthStatus {
+                    openai_has_oauth: true,
+                    ..AuthStatus::default()
+                },
+                ..CatalogRouteAuth::default()
+            });
+
+            assert!(
+                count(&with_key, "openai-api-key") > count(&none, "openai-api-key"),
+                "stating an api key must add api-key routes: none={:?} with_key={:?}",
+                count(&none, "openai-api-key"),
+                count(&with_key, "openai-api-key")
+            );
+            assert!(
+                count(&with_oauth, "openai-oauth") > 0
+                    && count(&with_oauth, "openai-api-key") < count(&with_key, "openai-api-key"),
+                "stating oauth alone must not add api-key routes: with_oauth={:?} with_key={:?}",
+                count(&with_oauth, "openai-api-key"),
+                count(&with_key, "openai-api-key")
             );
         }
 
