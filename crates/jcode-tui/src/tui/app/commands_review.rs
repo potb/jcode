@@ -174,17 +174,18 @@ fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<Stor
     let mut transcript = Vec::new();
 
     for rendered in crate::session::render_messages(parent_session) {
+        let rendered_content = super::input::strip_reasoning_lines(&rendered.content);
         match rendered.role.as_str() {
             "user" => {
-                if !rendered.content.trim().is_empty() {
+                if !rendered_content.trim().is_empty() {
                     transcript.push(judge_transcript_text_message(
                         Role::User,
-                        rendered.content.trim().to_string(),
+                        rendered_content.trim().to_string(),
                     ));
                 }
             }
             "assistant" => {
-                let mut text = rendered.content.trim().to_string();
+                let mut text = rendered_content.trim().to_string();
                 if !rendered.tool_calls.is_empty() {
                     let visible_tools = rendered
                         .tool_calls

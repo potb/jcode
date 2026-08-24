@@ -285,6 +285,74 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
 }
 
 #[test]
+fn test_judge_transcript_omits_reasoning_when_reasoning_display_is_full() {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Full)
+            .expect("pin reasoning display to full");
+        crate::config::invalidate_config_cache();
+
+        let parent_id = "parent_full_reasoning_mode".to_string();
+        let child_id = "child_full_reasoning_mode".to_string();
+
+        let mut parent =
+            crate::session::Session::create_with_id(parent_id.clone(), None, Some("parent".into()));
+        parent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "please review what happened".to_string(),
+                cache_control: None,
+            }],
+        );
+        parent.add_message(
+            Role::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    text: "REASONING_MUST_NOT_REACH_THE_JUDGE".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "Final visible answer.".to_string(),
+                    cache_control: None,
+                },
+            ],
+        );
+        parent.save().expect("save parent session");
+
+        let mut child = crate::session::Session::create_with_id(
+            child_id.clone(),
+            Some(parent_id.clone()),
+            Some("judge".to_string()),
+        );
+        child.save().expect("save child session");
+
+        super::commands::prepare_review_spawned_session(
+            &child_id,
+            super::commands::build_judge_startup_message(&parent_id),
+            None,
+            None,
+            Some("judge".to_string()),
+            Some(parent_id.clone()),
+        );
+
+        let prepared = crate::session::Session::load(&child_id).expect("reload child session");
+        let transcript = prepared
+            .messages
+            .iter()
+            .flat_map(|msg| msg.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        assert!(transcript.contains("please review what happened"));
+        assert!(transcript.contains("Final visible answer."));
+        assert!(!transcript.contains("REASONING_MUST_NOT_REACH_THE_JUDGE"));
+        assert!(!transcript.contains(jcode_tui_markdown::REASONING_SENTINEL));
+    });
+}
+
+#[test]
 fn test_queue_autojudge_remote_targets_original_non_judge_session() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
