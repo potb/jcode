@@ -2167,6 +2167,34 @@ mod tests {
             );
         }
 
+        /// Pins `anthropic_has_oauth` *inside the seam*, a different mutant from
+        /// pinning it inside `from_machine`: `EnvGuard` empties JCODE_HOME, so
+        /// only the stated field can make a `claude-oauth` route available.
+        #[test]
+        fn stated_oauth_adds_an_available_claude_oauth_route() {
+            let _env = EnvGuard::new();
+            let available_oauth = |auth: CatalogRouteAuth| {
+                let provider = MultiProvider::from_auth_status(AuthStatus::default());
+                multiprovider_model_routes_with(&provider, || auth)
+                    .into_iter()
+                    .filter(|route| route.provider == "Anthropic")
+                    .filter(|route| route.api_method == "claude-oauth" && route.available)
+                    .count()
+            };
+            assert_eq!(
+                available_oauth(CatalogRouteAuth::default()),
+                0,
+                "stating no credentials must leave every claude-oauth route greyed out"
+            );
+            assert!(
+                available_oauth(CatalogRouteAuth {
+                    anthropic_has_oauth: true,
+                    ..CatalogRouteAuth::default()
+                }) > 0,
+                "stating oauth must make claude-oauth routes available"
+            );
+        }
+
         #[test]
         fn ambient_env_credentials_do_not_reach_a_stated_build() {
             // ANTHROPIC_API_KEY is a process env var no JCODE_HOME can scope,
