@@ -3093,3 +3093,92 @@ fn test_model_picker_lists_unconfigured_openai_model_as_unavailable_row() {
         "the row must be shown as unavailable for lack of credentials, got:\n{rendered}"
     );
 }
+
+/// Issue #250: the full catalog build (`multiprovider_model_routes`) feeds
+/// `listable_models`, which is the picker's model list. With a clean home and
+/// no credentials, `/model` must still render Anthropic models as greyed-out
+/// "no credentials" rows.
+///
+/// The unit tests in jcode-base all call the `_with` form, so none of them can
+/// see the rendered frame; on #249 a mutant that deleted exactly this arm
+/// passed every unit test and left all of jcode-tui green.
+#[test]
+fn test_model_picker_renders_uncredentialed_catalog_rows_as_unavailable() {
+    let sandbox =
+        crate::auth::test_sandbox::AuthTestSandbox::new().expect("auth sandbox for a clean home");
+    crate::auth::AuthStatus::invalidate_cache();
+    // The catalog memo is process-wide, so another test's build would
+    // otherwise satisfy this one without ever entering the seam.
+    crate::provider::bump_catalog_generation();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::from_auth_status(
+        crate::auth::AuthStatus::default(),
+    ));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.bump_display_messages_version();
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("the picker must open with no credentials configured");
+    let anthropic_rows: Vec<_> = picker
+        .entries
+        .iter()
+        .flat_map(|entry| entry.options.iter())
+        .filter(|option| option.provider == "Anthropic")
+        .collect();
+    assert!(
+        !anthropic_rows.is_empty(),
+        "an uncredentialed catalog must still offer Anthropic models"
+    );
+    assert!(
+        anthropic_rows
+            .iter()
+            .all(|option| option.api_method == "claude-oauth" && !option.available),
+        "with no credentials every Anthropic row is the unavailable placeholder, got {:?}",
+        anthropic_rows
+            .iter()
+            .map(|option| (&option.api_method, option.available))
+            .collect::<Vec<_>>()
+    );
+
+    let rendered = {
+        let _render_lock = scroll_render_test_lock();
+        let backend = ratatui::backend::TestBackend::new(90, 14);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        render_and_snap(&app, &mut terminal)
+    };
+
+    crate::auth::AuthStatus::invalidate_cache();
+    crate::provider::bump_catalog_generation();
+    drop(sandbox);
+
+    // The picker pane truncates the detail column, so assert on what the user
+    // can actually see: the Anthropic rows are present and every one of them
+    // carries the unavailable marker. Deleting the no-credentials arm in
+    // `append_anthropic_routes` makes the first assertion fail (the models
+    // vanish from the frame); flipping their availability fails the second.
+    let anthropic_lines: Vec<&str> = rendered
+        .lines()
+        .filter(|line| line.contains("Anthropic"))
+        .collect();
+    assert!(
+        !anthropic_lines.is_empty(),
+        "the user must SEE Anthropic models in /model with no credentials, got:\n{rendered}"
+    );
+    assert!(
+        anthropic_lines
+            .iter()
+            .all(|line| line.contains('\u{d7}') && line.contains("oauth")),
+        "every rendered Anthropic row must be an unavailable oauth placeholder, got {anthropic_lines:?}"
+    );
+}
