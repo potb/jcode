@@ -1095,15 +1095,12 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
-        for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
-        ] {
+        // The detailed calibration rubric first moved out of the always-on
+        // schema into the turn-finish continuation message, and then out of
+        // that message too when the intent gate was simplified. What the
+        // message still has to do is name the gate's subject and tell the
+        // model to resolve the ambiguity itself rather than asking.
+        for required_concept in ["intent", "avoid asking the user", "todo is up to date"] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
                     .contains(required_concept),
@@ -1126,11 +1123,7 @@ mod tests {
             feedback_description_lower.contains("explicit observation or check"),
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
-        for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
-        ] {
+        for required_concept in ["feedback loop", "todo is up to date"] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
                     .contains(required_concept),
