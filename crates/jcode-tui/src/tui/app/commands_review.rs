@@ -170,21 +170,30 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
     }
 }
 
+fn strip_rendered_reasoning_lines(text: &str) -> String {
+    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    text.lines()
+        .filter(|line| !line.contains(sentinel))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
     for rendered in crate::session::render_messages(parent_session) {
+        let rendered_content = strip_rendered_reasoning_lines(&rendered.content);
         match rendered.role.as_str() {
             "user" => {
-                if !rendered.content.trim().is_empty() {
+                if !rendered_content.trim().is_empty() {
                     transcript.push(judge_transcript_text_message(
                         Role::User,
-                        rendered.content.trim().to_string(),
+                        rendered_content.trim().to_string(),
                     ));
                 }
             }
             "assistant" => {
-                let mut text = rendered.content.trim().to_string();
+                let mut text = rendered_content.trim().to_string();
                 if !rendered.tool_calls.is_empty() {
                     let visible_tools = rendered
                         .tool_calls
