@@ -2199,11 +2199,6 @@ mod tests {
 
         #[test]
         fn the_wrapper_still_probes_the_machine_for_credentials() {
-            // Every test above calls the `_with` form, so none of them can see
-            // what the no-arg wrapper passes: swapping its
-            // `CatalogRouteAuth::from_machine` for `CatalogRouteAuth::default`
-            // would leave them all green while the picker silently stopped
-            // offering configured providers.
             let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
             crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key");
             crate::auth::AuthStatus::invalidate_cache();
@@ -2223,6 +2218,91 @@ mod tests {
                 methods.iter().any(|method| method == "claude-api"),
                 "the wrapper must probe the machine: with ANTHROPIC_API_KEY set \
                  it has to offer claude-api, got {methods:?}"
+            );
+        }
+
+        /// Pins `from_machine`'s OpenAI probe; the test above states only an Anthropic key.
+        ///
+        /// Differential against the same catalog built with no stated credentials.
+        /// Neither the method's presence nor `available` discriminates on its own:
+        /// GPT-Pro-only models emit an `openai-api-key` row either way, and every
+        /// such row is unavailable here because no OpenAI provider is configured.
+        /// What the probe changes is how many non-Pro models gain an api-key row.
+        #[test]
+        fn the_wrapper_probes_the_machine_for_openai_credentials() {
+            let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+            sandbox
+                .write_env_file("openai.env", "OPENAI_API_KEY", "sk-not-a-real-key")
+                .expect("openai key");
+            crate::auth::AuthStatus::invalidate_cache();
+
+            let provider = MultiProvider::from_auth_status(AuthStatus::default());
+            let api_key_rows = |routes: Vec<ModelRoute>| {
+                routes
+                    .into_iter()
+                    .filter(|route| {
+                        route.provider == "OpenAI" && route.api_method == "openai-api-key"
+                    })
+                    .count()
+            };
+            let probed = api_key_rows(multiprovider_model_routes(&provider));
+            let unprobed = api_key_rows(multiprovider_model_routes_with(
+                &provider,
+                CatalogRouteAuth::default,
+            ));
+
+            crate::auth::AuthStatus::invalidate_cache();
+            drop(sandbox);
+
+            assert!(
+                probed > unprobed,
+                "the wrapper must probe the machine for OpenAI credentials: with \
+                 OPENAI_API_KEY configured it has to offer more openai-api-key rows \
+                 than a build stating none, got probed={probed} unprobed={unprobed}"
+            );
+        }
+
+        /// Pins `from_machine`'s Anthropic OAuth probe; an API key yields the same
+        /// `claude-api` rows, so only an available `claude-oauth` route separates them.
+        #[test]
+        fn the_wrapper_probes_the_machine_for_anthropic_oauth() {
+            let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+            let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+            std::fs::write(
+                sandbox.root().join("auth.json"),
+                serde_json::json!({
+                    "anthropic_accounts": [{
+                        "label": "test",
+                        "access": "not-a-real-access-token",
+                        "refresh": "not-a-real-refresh-token",
+                        "expires": expires,
+                    }],
+                    "active_anthropic_account": "test",
+                })
+                .to_string(),
+            )
+            .expect("auth file");
+            crate::auth::AuthStatus::invalidate_cache();
+
+            let provider = MultiProvider::from_auth_status(AuthStatus::default());
+            let routes = multiprovider_model_routes(&provider);
+            let available_oauth = routes
+                .iter()
+                .filter(|route| route.provider == "Anthropic")
+                .any(|route| route.api_method == "claude-oauth" && route.available);
+
+            crate::auth::AuthStatus::invalidate_cache();
+            drop(sandbox);
+
+            assert!(
+                available_oauth,
+                "the wrapper must probe the machine for Anthropic OAuth: with a live \
+                 credential it has to offer an available claude-oauth route, got {:?}",
+                routes
+                    .iter()
+                    .filter(|route| route.provider == "Anthropic")
+                    .map(|route| (&route.api_method, route.available))
+                    .collect::<Vec<_>>()
             );
         }
     }
